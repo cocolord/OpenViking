@@ -10,6 +10,7 @@ from openviking.parse.parsers.media.utils import (
     MPEG_TS_PACKET_SIZE,
     MPEG_TS_PROBE_BYTES,
 )
+from openviking.storage.index_action import FieldPatch
 from openviking.utils import embedding_utils
 from openviking.utils.ingest_options import IngestOptions
 from openviking_cli.utils.config.parser_config import ImageConfig
@@ -1273,6 +1274,40 @@ async def test_context_vectorization_defaults_to_merge_for_legacy_producers(monk
     )
 
     assert [message.action.value for message in queue.items] == ["merge", "merge", "merge"]
+    assert all(message.field_patch is None for message in queue.items)
+
+
+@pytest.mark.asyncio
+async def test_planned_merge_does_not_copy_context_into_patch_seed(monkeypatch):
+    queue = DummyQueue()
+    monkeypatch.setattr(embedding_utils, "get_queue_manager", lambda: DummyQueueManager(queue))
+    monkeypatch.setattr(embedding_utils, "get_viking_fs", lambda: DummyFS("body"))
+    monkeypatch.setattr(
+        embedding_utils,
+        "get_openviking_config",
+        lambda: types.SimpleNamespace(
+            embedding=types.SimpleNamespace(text_source="summary_only", max_input_tokens=1000)
+        ),
+    )
+
+    await embedding_utils.vectorize_file(
+        file_path="viking://resources/repo/a.py",
+        summary_dict={"name": "a.py", "summary": "large summary"},
+        parent_uri="viking://resources/repo",
+        ctx=DummyReq(),
+        action="merge",
+        field_patch=FieldPatch(
+            {"search_tags": ["scope=new"]},
+            {"search_tags": "append"},
+        ),
+    )
+
+    msg = queue.items[0]
+    assert msg.context_data["abstract"] == "large summary"
+    assert msg.field_patch == FieldPatch(
+        {"search_tags": ["scope=new"]},
+        {"search_tags": "append"},
+    )
 
 
 def test_semantic_processor_uses_merge_for_unplanned_vectorization():
@@ -1280,7 +1315,10 @@ def test_semantic_processor_uses_merge_for_unplanned_vectorization():
 
     from openviking.storage.queuefs.semantic_processor import SemanticProcessor
 
-    assert inspect.signature(SemanticProcessor._vectorize_single_file).parameters["action"].default == "merge"
+    assert (
+        inspect.signature(SemanticProcessor._vectorize_single_file).parameters["action"].default
+        == "merge"
+    )
 
 
 @pytest.mark.asyncio

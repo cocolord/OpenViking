@@ -94,14 +94,13 @@ def _apply_planned_field_patch(
     }
     for field in patch_values:
         embedding_msg.context_data.pop(field, None)
-    embedding_msg.payload.field_patch = FieldPatch(
-        values=patch_values,
-        modes=field_patch.modes if field_patch is not None else {},
-        seed_fields={
-            key: value
-            for key, value in embedding_msg.context_data.items()
-            if not key.startswith("_")
-        },
+    embedding_msg.payload.field_patch = (
+        FieldPatch(
+            values=patch_values,
+            modes=field_patch.modes if field_patch is not None else {},
+        )
+        if patch_values
+        else None
     )
 
 

@@ -540,11 +540,6 @@ async def test_embedding_handler_merge_not_found_creates_from_generated_vector(m
         },
         update_fields={"search_tags": ["scope=new"]},
         field_modes={"search_tags": "append"},
-        initial_fields={
-            "uri": "viking://resources/repo/a.py",
-            "account_id": "acct",
-            "level": 2,
-        },
     )
 
     result = await handler.on_dequeue(_build_operation_payload(msg))
