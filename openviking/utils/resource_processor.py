@@ -1435,7 +1435,7 @@ class ResourceProcessor:
         file_md5: str | None = None,
         scalar_override: Optional[Dict[str, Any]] = None,
         field_modes: Optional[Dict[str, str]] = None,
-        action: str = "upsert",
+        action: str = "merge",
     ) -> None:
         parent = VikingURI(file_uri).parent
         if parent is None:

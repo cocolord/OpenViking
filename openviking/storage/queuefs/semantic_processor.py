@@ -1952,7 +1952,7 @@ class SemanticProcessor(DequeueHandlerBase):
         file_content: Optional[bytes] = None,
         scalar_override: Optional[Dict[str, Any]] = None,
         field_modes: Optional[Dict[str, str]] = None,
-        action: str = "upsert",
+        action: str = "merge",
     ) -> bool:
         """Vectorize a single file using its content or summary."""
         from openviking.utils.embedding_utils import vectorize_file

@@ -25,10 +25,16 @@ class EmbeddingMsgConverter:
     def from_context(
         context: Context,
         creator_acl_grant: CreatorAclGrant | None = None,
-        action: IndexAction = IndexAction.UPSERT,
+        action: IndexAction = IndexAction.MERGE,
     ) -> EmbeddingMsg | None:
         """
         Convert a Context object to EmbeddingMsg.
+
+        Context-based producers normally carry only the fields they just
+        generated.  They therefore default to ``MERGE`` so an execution-time
+        exact read retains stored scalar state such as tags and ACLs.  Producers
+        with a fully resolved record (notably an RNFV SemanticPlan) must pass
+        ``UPSERT`` explicitly.
         """
         vectorization_text = context.get_vectorization_text()
         vectorization_images = context.get_vectorization_images()

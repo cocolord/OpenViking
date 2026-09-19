@@ -140,7 +140,7 @@ class _FakeProcessor:
         file_md5=None,
         file_content=None,
         scalar_override=None,
-        action="upsert",
+        action="merge",
     ):
         del creator_acl_grant
         self.vectorized_files.append(file_path)

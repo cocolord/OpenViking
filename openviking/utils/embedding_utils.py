@@ -470,7 +470,7 @@ async def vectorize_directory_meta(
                 action=IndexAction(
                     (actions or {}).get(
                         int(ContextLevel.ABSTRACT.value),
-                        IndexAction.UPSERT,
+                        IndexAction.MERGE,
                     )
                 ),
             )
@@ -532,7 +532,7 @@ async def vectorize_directory_meta(
                 action=IndexAction(
                     (actions or {}).get(
                         int(ContextLevel.OVERVIEW.value),
-                        IndexAction.UPSERT,
+                        IndexAction.MERGE,
                     )
                 ),
             )
@@ -592,7 +592,7 @@ async def vectorize_file(
     creator_acl_grant: CreatorAclGrant | None = None,
     file_md5: Optional[str] = None,
     file_content: Optional[bytes] = None,
-    action: str = "upsert",
+    action: str = "merge",
 ) -> bool:
     """
     Vectorize a single file.
@@ -724,10 +724,13 @@ async def vectorize_file(
         if file_md5:
             context.md5 = file_md5
 
+        resolved_action = IndexAction(action)
+        if resolved_action not in {IndexAction.UPSERT, IndexAction.MERGE}:
+            raise ValueError(f"vectorize_file only supports upsert or merge actions: {action}")
         embedding_msg = EmbeddingMsgConverter.from_context(
             context,
             creator_acl_grant,
-            action=(IndexAction.MERGE if action == "merge" else IndexAction.UPSERT),
+            action=resolved_action,
         )
         if not embedding_msg:
             return False

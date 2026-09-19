@@ -1247,6 +1247,43 @@ async def test_full_upsert_uses_resolved_search_tags_from_plan(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_context_vectorization_defaults_to_merge_for_legacy_producers(monkeypatch):
+    queue = DummyQueue()
+    monkeypatch.setattr(embedding_utils, "get_queue_manager", lambda: DummyQueueManager(queue))
+    monkeypatch.setattr(embedding_utils, "get_viking_fs", lambda: DummyFS("body"))
+    monkeypatch.setattr(
+        embedding_utils,
+        "get_openviking_config",
+        lambda: types.SimpleNamespace(
+            embedding=types.SimpleNamespace(text_source="summary_only", max_input_tokens=1000)
+        ),
+    )
+
+    await embedding_utils.vectorize_file(
+        file_path="viking://resources/repo/a.py",
+        summary_dict={"name": "a.py", "summary": "summary"},
+        parent_uri="viking://resources/repo",
+        ctx=DummyReq(),
+    )
+    await embedding_utils.vectorize_directory_meta(
+        uri="viking://resources/repo",
+        abstract="abstract",
+        overview="overview",
+        ctx=DummyReq(),
+    )
+
+    assert [message.action.value for message in queue.items] == ["merge", "merge", "merge"]
+
+
+def test_semantic_processor_uses_merge_for_unplanned_vectorization():
+    import inspect
+
+    from openviking.storage.queuefs.semantic_processor import SemanticProcessor
+
+    assert inspect.signature(SemanticProcessor._vectorize_single_file).parameters["action"].default == "merge"
+
+
+@pytest.mark.asyncio
 async def test_full_upsert_carries_existing_record_id_as_internal_override(monkeypatch):
     queue = DummyQueue()
     monkeypatch.setattr(embedding_utils, "get_queue_manager", lambda: DummyQueueManager(queue))
