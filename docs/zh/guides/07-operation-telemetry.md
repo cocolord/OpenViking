@@ -249,7 +249,7 @@ admission，所以其 `gpu_gate_queue` 为零；worker 侧等待仍计入 `batch
 
 | 字段 | 含义 |
 | --- | --- |
-| `summary.semantic_nodes.total` | DAG 或语义节点总数 |
+| `summary.semantic_nodes.total` | 语义树节点总数 |
 | `summary.semantic_nodes.done` | 已完成节点数 |
 | `summary.semantic_nodes.pending` | 待处理节点数 |
 | `summary.semantic_nodes.running` | 正在处理中的节点数 |

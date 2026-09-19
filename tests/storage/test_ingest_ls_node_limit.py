@@ -132,22 +132,22 @@ class _TruncatingLsFS:
 
 
 @pytest.mark.asyncio
-async def test_semantic_dag_list_dir_enumerates_all_children(monkeypatch):
-    """The summary DAG dispatches one summary/recursion task per child it lists.
+async def test_semantic_executor_list_dir_enumerates_all_children(monkeypatch):
+    """The semantic tree dispatches one summary/recursion task per child it lists.
     If ``_list_dir`` is capped at node_limit, children beyond 1000 never get an
     ``.abstract.md``/``.overview.md`` (and are never recursed into), so a large
     namespace silently loses its L0/L1 layers."""
-    from openviking.storage.queuefs.semantic_dag import SemanticDagExecutor
+    from openviking.storage.queuefs.semantic_executor import SemanticTreeExecutor
 
     dir_uri = "viking://resources/wixqa"
     n_children = 1500  # > the default node_limit of 1000
     fake = _TruncatingLsFS(dir_uri, n_children)
     monkeypatch.setattr(
-        "openviking.storage.queuefs.semantic_dag.get_viking_fs",
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs",
         lambda: fake,
     )
 
-    executor = SemanticDagExecutor(
+    executor = SemanticTreeExecutor(
         processor=None,
         context_type="resource",
         max_concurrent_llm=1,
@@ -156,6 +156,6 @@ async def test_semantic_dag_list_dir_enumerates_all_children(monkeypatch):
     children_dirs, file_paths = await executor._list_dir(dir_uri, from_hint="test")
 
     assert len(children_dirs) == n_children, (
-        f"only {len(children_dirs)}/{n_children} children listed — summary DAG "
+        f"only {len(children_dirs)}/{n_children} children listed — semantic tree "
         "was truncated at ls node_limit"
     )

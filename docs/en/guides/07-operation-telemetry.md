@@ -255,7 +255,7 @@ This group appears when OpenViking waits for queue-backed work to complete.
 
 | Field | Meaning |
 | --- | --- |
-| `summary.semantic_nodes.total` | Total DAG or semantic-node count |
+| `summary.semantic_nodes.total` | Total semantic-tree node count |
 | `summary.semantic_nodes.done` | Number of completed nodes |
 | `summary.semantic_nodes.pending` | Number of pending nodes |
 | `summary.semantic_nodes.running` | Number of nodes still running |

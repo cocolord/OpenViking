@@ -17,16 +17,15 @@ from typing import List, Optional, Union
 from PIL import Image
 
 from openviking.parse.base import NodeType, ParseResult, ResourceNode
+from openviking.parse.output import create_parse_artifact_writer
 from openviking.parse.parsers.base_parser import BaseParser
 from openviking.parse.parsers.media.constants import IMAGE_EXTENSIONS
 from openviking.parse.parsers.media.large_image_processor import (
-    LargeImageResult,
     process_large_image,
     save_image_to_bytes,
 )
 from openviking.parse.parsers.media.naming import resolve_media_names
 from openviking.parse.parsers.media.utils import _convert_svg_to_png
-from openviking.prompts import render_prompt
 from openviking.storage.viking_fs import get_viking_fs
 from openviking_cli.utils.config.parser_config import ImageConfig
 from openviking_cli.utils.logger import get_logger
@@ -104,9 +103,6 @@ class ImageParser(BaseParser):
         if not file_path.exists():
             raise FileNotFoundError(f"Image file not found: {source}")
 
-        viking_fs = get_viking_fs()
-        temp_uri = viking_fs.create_temp_uri()
-
         # Load image (SVG is converted to PNG first since PIL doesn't support it)
         # For other formats not natively supported by VLM/embedding, convert to PNG
         # to ensure end-to-end compatibility with image understanding and vectorization
@@ -116,7 +112,7 @@ class ImageParser(BaseParser):
                 png_bytes = _convert_svg_to_png(file_bytes)
                 if png_bytes is None:
                     raise ValueError(
-                        f"SVG files require cairosvg. Install it: pip install cairosvg"
+                        "SVG files require cairosvg. Install it: pip install cairosvg"
                     )
                 img = Image.open(io.BytesIO(png_bytes))
                 img.verify()
@@ -157,15 +153,21 @@ class ImageParser(BaseParser):
             format_str = "png"
 
         root_dir_name = VikingURI.sanitize_segment(f"{stem}_{ext_no_dot}")
-        root_dir_uri = f"{temp_uri}/{root_dir_name}"
-        await viking_fs.mkdir(root_dir_uri, exist_ok=True)
+        output_store = kwargs.get("parse_output_store")
+        writer = await create_parse_artifact_writer(
+            output_store, viking_fs=get_viking_fs() if output_store is None else None
+        )
+        try:
+            await writer.mkdir(root_dir_name)
 
-        # Process the image (check if large)
-        large_image_result = process_large_image(file_path, img, filename_prefix=stem, config=self.config)
-        img.close()
+            # Process the image (check if large)
+            large_image_result = process_large_image(
+                file_path, img, filename_prefix=stem, config=self.config
+            )
+            img.close()
 
-        # Create root node with metadata
-        root_node = ResourceNode(
+            # Create root node with metadata
+            root_node = ResourceNode(
             type=NodeType.ROOT,
             title=display_stem,
             level=0,
@@ -184,71 +186,78 @@ class ImageParser(BaseParser):
             },
         )
 
-        if large_image_result.needs_processing:
+            if large_image_result.needs_processing:
             # Large image processing mode: save preview, grid, tiles
             # NOTE: The original file is intentionally NOT saved. Large images can be
             # hundreds of MB; storing the full-resolution original would exceed storage
             # budgets. The preview + tiles are the canonical representation. The
             # `original_filename` metadata field records the original name for reference
             # but the corresponding file is not persisted.
-            logger.info(f"Processing large image {original_filename}: {width}x{height}")
+                logger.info(f"Processing large image {original_filename}: {width}x{height}")
 
             # Save low-res preview (original is too large to store)
-            await viking_fs.write_file_bytes(
-                f"{root_dir_uri}/{large_image_result.preview_filename}",
-                large_image_result.preview_bytes
-            )
-            root_node.meta["preview_filename"] = large_image_result.preview_filename
+                await writer.write_bytes(
+                    f"{root_dir_name}/{large_image_result.preview_filename}",
+                    large_image_result.preview_bytes,
+                )
+                root_node.meta["preview_filename"] = large_image_result.preview_filename
 
             # Save grid overlay
-            if large_image_result.grid_overlay_bytes:
-                grid_filename = large_image_result.grid_overlay_filename or f"{stem}_grid.jpg"
-                await viking_fs.write_file_bytes(
-                    f"{root_dir_uri}/{grid_filename}",
-                    large_image_result.grid_overlay_bytes
-                )
-                root_node.meta["grid_overlay"] = grid_filename
+                if large_image_result.grid_overlay_bytes:
+                    grid_filename = (
+                        large_image_result.grid_overlay_filename or f"{stem}_grid.jpg"
+                    )
+                    await writer.write_bytes(
+                        f"{root_dir_name}/{grid_filename}",
+                        large_image_result.grid_overlay_bytes,
+                    )
+                    root_node.meta["grid_overlay"] = grid_filename
 
             # Create tiles directory
-            if large_image_result.tiles:
-                tiles_dir_name = "tiles"
-                tiles_dir_uri = f"{root_dir_uri}/{tiles_dir_name}"
-                await viking_fs.mkdir(tiles_dir_uri, exist_ok=True)
+                if large_image_result.tiles:
+                    tiles_dir_name = "tiles"
+                    tiles_dir_rel = f"{root_dir_name}/{tiles_dir_name}"
+                    await writer.mkdir(tiles_dir_rel)
 
                 # Save all tiles
-                for tile in large_image_result.tiles:
-                    if tile.bytes_data:
-                        await viking_fs.write_file_bytes(
-                            f"{tiles_dir_uri}/{tile.filename}",
-                            tile.bytes_data
-                        )
+                    for tile in large_image_result.tiles:
+                        if tile.bytes_data:
+                            await writer.write_bytes(
+                                f"{tiles_dir_rel}/{tile.filename}", tile.bytes_data
+                            )
 
                 # Update metadata
-                root_node.meta["tiles_dir"] = tiles_dir_name
-                root_node.meta["num_tiles"] = len(large_image_result.tiles)
-                root_node.meta["grid_rows"] = large_image_result.total_rows
-                root_node.meta["grid_cols"] = large_image_result.total_cols
-                root_node.meta["original_width"] = width
-                root_node.meta["original_height"] = height
+                    root_node.meta["tiles_dir"] = tiles_dir_name
+                    root_node.meta["num_tiles"] = len(large_image_result.tiles)
+                    root_node.meta["grid_rows"] = large_image_result.total_rows
+                    root_node.meta["grid_cols"] = large_image_result.total_cols
+                    root_node.meta["original_width"] = width
+                    root_node.meta["original_height"] = height
 
-        else:
-            # Small image: save as PNG if format is not VLM-supported, else as-is
-            if needs_png_conversion:
-                # SVG was already converted to PNG bytes during loading
-                if file_path.suffix.lower() == ".svg":
-                    image_bytes = converted_png_bytes
-                else:
-                    with Image.open(file_path) as converted_img:
-                        image_bytes = save_image_to_bytes(converted_img, format="PNG")
             else:
-                image_bytes = file_path.read_bytes()
-            await viking_fs.write_file_bytes(f"{root_dir_uri}/{original_filename}", image_bytes)
+            # Small image: save as PNG if format is not VLM-supported, else as-is
+                if needs_png_conversion:
+                # SVG was already converted to PNG bytes during loading
+                    if file_path.suffix.lower() == ".svg":
+                        image_bytes = converted_png_bytes
+                    else:
+                        with Image.open(file_path) as converted_img:
+                            image_bytes = save_image_to_bytes(converted_img, format="PNG")
+                else:
+                    image_bytes = file_path.read_bytes()
+                await writer.write_bytes(f"{root_dir_name}/{original_filename}", image_bytes)
+
+            artifact_ref = await writer.finalize(resource_rel=root_dir_name)
+        except BaseException:
+            await writer.cleanup()
+            raise
 
         # Phase 3: Build directory structure (handled by TreeBuilder)
         return ParseResult(
             root=root_node,
             source_path=str(file_path),
-            temp_dir_path=temp_uri,
+            temp_dir_path=artifact_ref.root,
+            artifact_ref=artifact_ref,
             source_format="image",
             parser_name="ImageParser",
             meta={

@@ -141,14 +141,14 @@ Operation flow:
    - If final_uri does not exist, check ancestor/descendant/same-path conflicts first
    - If there is no conflict, create final_uri and write final_uri/.path.ovlock as a T lock
 2. Keep temp as the source directory and enqueue SemanticMsg(uri=temp, target_uri=final_uri, lifecycle_lock_handle_id=...)
-3. DAG runs on temp and syncs temp content into final_uri after completion
+3. semantic tree runs on temp and syncs temp content into final_uri after completion
    - Do not use raw agfs.mv(temp -> final_uri), because final_uri already exists for the lock file
 4. Clean up temp directory
-5. DAG starts lock refresh loop (refreshes the lock token and updates handle activity every lock_expire/2 seconds)
-6. DAG complete + all embeddings done -> release TreeLock
+5. semantic tree starts lock refresh loop (refreshes the lock token and updates handle activity every lock_expire/2 seconds)
+6. semantic tree completes + all embeddings done -> release TreeLock
 ```
 
-If summarization and indexing are both disabled, no downstream DAG takes over.
+If summarization and indexing are both disabled, no downstream semantic tree takes over.
 In that case `ResourceProcessor` copies temp directory content into `final_uri`
 under the same TreeLock, deletes temp, then releases the lock. It does not call
 `VikingFS.mv(temp, final_uri, lock_handle=handle)`, because move cleanup can
@@ -161,12 +161,12 @@ During this period, `rm` attempting to acquire a TreeLock on the same path will 
 ```
 1. Acquire TreeLock on target_uri (protect existing resource)
 2. Enqueue SemanticMsg(uri=temp, target_uri=final, lifecycle_lock_handle_id=...)
-3. DAG runs on temp, lock refresh loop active
-4. DAG completion triggers sync_diff_callback or move_temp_to_target_callback
+3. semantic tree runs on temp, lock refresh loop active
+4. semantic-tree completion triggers sync_diff_callback or move_temp_to_target_callback
 5. Callback completes -> release TreeLock
 ```
 
-Note: DAG callbacks do NOT wrap operations in an outer lock. Each `VikingFS.rm` and `VikingFS.mv` has its own lock internally. An outer lock would conflict with these inner locks causing deadlock.
+Note: semantic-tree callbacks do NOT wrap operations in an outer lock. Each `VikingFS.rm` and `VikingFS.mv` has its own lock internally. An outer lock would conflict with these inner locks causing deadlock.
 
 Both first-time add and incremental update hold only `TreeLock(resource_dir)`.
 There is no `ExactPathLock(resource_dir) -> TreeLock(resource_dir)` handoff, so

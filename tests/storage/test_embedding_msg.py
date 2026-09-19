@@ -3,6 +3,9 @@
 
 from uuid import uuid4
 
+import pytest
+
+from openviking.storage.index_action import IndexAction
 from openviking.storage.queuefs.embedding_msg import EmbeddingMsg
 from openviking.telemetry.request_wait_tracker import RequestWaitTracker
 
@@ -27,3 +30,98 @@ def test_embedding_msg_roundtrip_preserves_id_for_request_wait_tracker():
         assert tracker.is_complete(telemetry_id)
     finally:
         tracker.cleanup(telemetry_id)
+
+
+def test_embedding_msg_roundtrip_preserves_queue_enqueue_time():
+    msg = EmbeddingMsg(
+        "hello",
+        {"uri": "viking://resources/demo"},
+        queue_enqueued_at=123.456,
+    )
+
+    assert EmbeddingMsg.from_dict(msg.to_dict()).queue_enqueued_at == 123.456
+
+
+def test_legacy_embedding_msg_defaults_to_embed_and_upsert():
+    restored = EmbeddingMsg.from_dict(
+        {
+            "message": "hello",
+            "context_data": {"uri": "viking://resources/demo"},
+        }
+    )
+
+    assert restored.action is IndexAction.UPSERT
+
+
+def test_embedding_msg_accepts_noop_index_action_roundtrip():
+    msg = EmbeddingMsg(None, {"uri": "viking://resources/demo"}, action=IndexAction.NONE)
+
+    restored = EmbeddingMsg.from_json(msg.to_json())
+
+    assert restored.action is IndexAction.NONE
+    assert restored.message is None
+
+
+def test_embedding_update_fields_roundtrip():
+    msg = EmbeddingMsg.for_update_fields(
+        record_id="record-1",
+        fields={
+            "md5": "new-md5",
+            "updated_at": "2026-09-13T00:00:00Z",
+            "search_tags": ["scope=new"],
+        },
+        context_data={
+            "uri": "viking://resources/demo/a.py",
+            "account_id": "account-a",
+            "level": 2,
+        },
+        field_modes={"search_tags": "append"},
+        initial_fields={
+            "uri": "viking://resources/demo/a.py",
+            "account_id": "account-a",
+            "level": 2,
+            "vector": [0.1, 0.2],
+        },
+    )
+
+    restored = EmbeddingMsg.from_json(msg.to_json())
+
+    assert restored.action is IndexAction.UPDATE_FIELDS
+    assert restored.record_ids == ["record-1"]
+    assert restored.update_fields == {
+        "md5": "new-md5",
+        "updated_at": "2026-09-13T00:00:00Z",
+        "search_tags": ["scope=new"],
+    }
+    assert restored.message is None
+    assert restored.field_modes == {"search_tags": "append"}
+    assert restored.initial_fields["vector"] == [0.1, 0.2]
+
+
+def test_embedding_delete_roundtrip():
+    msg = EmbeddingMsg.for_delete(
+        record_ids=["record-1", "record-2"],
+        context_data={
+            "uri": "viking://resources/demo",
+            "account_id": "account-a",
+        },
+    )
+
+    restored = EmbeddingMsg.from_json(msg.to_json())
+
+    assert restored.action is IndexAction.DELETE
+    assert restored.record_ids == ["record-1", "record-2"]
+    assert restored.message is None
+
+
+def test_embedding_update_fields_rejects_vector_fields():
+    with pytest.raises(ValueError, match="vector"):
+        EmbeddingMsg.for_update_fields(
+            record_id="record-1",
+            fields={"vector": [0.1, 0.2]},
+            context_data={
+                "uri": "viking://resources/demo/a.py",
+                "account_id": "account-a",
+                "level": 2,
+            },
+        )
