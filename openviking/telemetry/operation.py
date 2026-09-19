@@ -270,9 +270,7 @@ class TelemetrySummaryBuilder:
                         )
                     },
                     "execute": {
-                        "duration_ms": cls._f(
-                            gauges.get("queue.semantic.execute.duration_ms"), 0.0
-                        )
+                        "duration_ms": cls._f(gauges.get("queue.semantic.execute.duration_ms"), 0.0)
                     },
                 },
                 "embedding": {
@@ -417,9 +415,7 @@ class TelemetrySummaryBuilder:
                     "duration_ms": cls._f(gauges.get("resource.total.duration_ms"), 0.0),
                 },
                 "source_execute": {
-                    "duration_ms": cls._f(
-                        gauges.get("resource.source_execute.duration_ms"), 0.0
-                    ),
+                    "duration_ms": cls._f(gauges.get("resource.source_execute.duration_ms"), 0.0),
                 },
                 "source_prepare": {
                     "duration_ms": cls._f(gauges.get("resource.source_prepare.duration_ms"), 0.0),

@@ -248,7 +248,9 @@ async def test_direct_incremental_update_uses_changes_without_temp_sync(monkeypa
     if sidecar_state != "valid":
         filename = ".overview.md" if sidecar_state == "malformed_overview" else ".abstract.md"
         fake_fs._file_contents[f"{root_uri}/{filename}"] = "---\n"
-    monkeypatch.setattr("openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs)
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
     monkeypatch.setattr(
         "openviking.storage.queuefs.semantic_executor.get_openviking_config",
         lambda: SimpleNamespace(semantic=SimpleNamespace(overview_sample_limit=32)),
@@ -320,7 +322,9 @@ async def test_modified_file_with_same_abstract_still_propagates(monkeypatch):
             ),
         },
     )
-    monkeypatch.setattr("openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs)
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
     monkeypatch.setattr(
         "openviking.storage.queuefs.semantic_executor.get_openviking_config",
         lambda: SimpleNamespace(semantic=SimpleNamespace(overview_sample_limit=32)),
@@ -366,7 +370,9 @@ async def test_modified_file_with_different_abstract_still_propagates(monkeypatc
             ),
         },
     )
-    monkeypatch.setattr("openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs)
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
     monkeypatch.setattr(
         "openviking.storage.queuefs.semantic_executor.get_openviking_config",
         lambda: SimpleNamespace(semantic=SimpleNamespace(overview_sample_limit=32)),
@@ -402,7 +408,9 @@ async def test_added_file_with_matching_stale_abstract_still_propagates(monkeypa
         },
         file_contents={file_uri: "new body"},
     )
-    monkeypatch.setattr("openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs)
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
     monkeypatch.setattr(
         "openviking.storage.queuefs.semantic_executor.get_openviking_config",
         lambda: SimpleNamespace(semantic=SimpleNamespace(overview_sample_limit=32)),
@@ -441,7 +449,9 @@ async def test_deleted_last_nested_file_still_refreshes_existing_ancestor(monkey
             ),
         },
     )
-    monkeypatch.setattr("openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs)
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
     monkeypatch.setattr(
         "openviking.storage.queuefs.semantic_executor.get_openviking_config",
         lambda: SimpleNamespace(semantic=SimpleNamespace(overview_sample_limit=32)),
@@ -479,7 +489,9 @@ async def test_artifact_files_drive_tree_structure_when_target_listing_is_empty(
             f"{root_uri}/src/b.txt": b"beta",
         },
     )
-    monkeypatch.setattr("openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs)
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
     monkeypatch.setattr(
         "openviking.storage.queuefs.semantic_executor.get_openviking_config",
         lambda: SimpleNamespace(semantic=SimpleNamespace(overview_sample_limit=32)),
@@ -517,7 +529,9 @@ async def test_direct_incremental_reuses_vector_abstract_without_overview(monkey
         tree={root_uri: [{"name": "a.txt", "isDir": False}]},
         file_contents={},
     )
-    monkeypatch.setattr("openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs)
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
     monkeypatch.setattr(
         "openviking.storage.queuefs.semantic_executor.get_openviking_config",
         lambda: SimpleNamespace(semantic=SimpleNamespace(overview_sample_limit=32)),
@@ -551,7 +565,9 @@ async def test_missing_target_file_fails_instead_of_using_empty_summary(tmp_path
             raise FileNotFoundError(path)
 
     fake_fs = _MissingFileVikingFS(tree={}, file_contents={})
-    monkeypatch.setattr("openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs)
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
     monkeypatch.setattr(
         "openviking.storage.queuefs.semantic_executor.get_openviking_config",
         lambda: SimpleNamespace(semantic=SimpleNamespace(overview_sample_limit=32)),
@@ -591,7 +607,9 @@ async def test_content_write_tags_apply_only_to_changed_file(monkeypatch):
             f"{root_uri}/.abstract.md": "old-abstract",
         },
     )
-    monkeypatch.setattr("openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs)
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
     monkeypatch.setattr(
         "openviking.storage.queuefs.semantic_executor.get_openviking_config",
         lambda: SimpleNamespace(semantic=SimpleNamespace(overview_sample_limit=32)),
@@ -635,7 +653,9 @@ async def test_content_write_with_same_abstract_updates_file_and_parent(monkeypa
             ),
         },
     )
-    monkeypatch.setattr("openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs)
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
     monkeypatch.setattr(
         "openviking.storage.queuefs.semantic_executor.get_openviking_config",
         lambda: SimpleNamespace(semantic=SimpleNamespace(overview_sample_limit=32)),
@@ -674,7 +694,9 @@ async def test_content_write_keeps_matching_upstream_md5(monkeypatch):
         tree={root_uri: [{"name": "a.txt", "isDir": False}]},
         file_contents={changed_uri: latest_content},
     )
-    monkeypatch.setattr("openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs)
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
     monkeypatch.setattr(
         "openviking.storage.queuefs.semantic_executor.get_openviking_config",
         lambda: SimpleNamespace(semantic=SimpleNamespace(overview_sample_limit=32)),
@@ -708,7 +730,9 @@ async def test_semantic_generate_hashes_read_content_when_manifest_md5_is_missin
         tree={root_uri: [{"name": "a.txt", "isDir": False}]},
         file_contents={changed_uri: content},
     )
-    monkeypatch.setattr("openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs)
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
     monkeypatch.setattr(
         "openviking.storage.queuefs.semantic_executor.get_openviking_config",
         lambda: SimpleNamespace(semantic=SimpleNamespace(overview_sample_limit=32)),
@@ -755,7 +779,9 @@ async def test_pending_refresh_rebuilds_every_sampled_file_summary(monkeypatch):
             ),
         },
     )
-    monkeypatch.setattr("openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs)
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
     monkeypatch.setattr(
         "openviking.storage.queuefs.semantic_executor.get_openviking_config",
         lambda: SimpleNamespace(semantic=SimpleNamespace(overview_sample_limit=4)),
@@ -791,7 +817,9 @@ async def test_directory_vectorization_retries_after_matching_sidecar_write(monk
         tree={root_uri: [{"name": "a.txt", "isDir": False}]},
         file_contents={file_path: "new content"},
     )
-    monkeypatch.setattr("openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs)
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
     monkeypatch.setattr(
         "openviking.storage.queuefs.semantic_executor.get_openviking_config",
         lambda: SimpleNamespace(semantic=SimpleNamespace(overview_sample_limit=32)),
@@ -857,7 +885,9 @@ async def test_content_copy_rebuilds_target_overview_from_target_l2_summaries(mo
             ),
         },
     )
-    monkeypatch.setattr("openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs)
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
     monkeypatch.setattr(
         "openviking.storage.queuefs.semantic_executor.get_openviking_config",
         lambda: SimpleNamespace(semantic=SimpleNamespace(overview_sample_limit=32)),
@@ -904,7 +934,9 @@ async def test_content_copy_samples_before_loading_summaries(monkeypatch):
         tree={root_uri: [{"name": path.rsplit("/", 1)[-1], "isDir": False} for path in file_paths]},
         file_contents={path: path for path in file_paths},
     )
-    monkeypatch.setattr("openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs)
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
     monkeypatch.setattr(
         "openviking.storage.queuefs.semantic_executor.get_openviking_config",
         lambda: SimpleNamespace(semantic=SimpleNamespace(overview_sample_limit=2)),
@@ -943,7 +975,9 @@ async def test_content_copy_does_not_backfill_missing_sample_summary(monkeypatch
         tree={root_uri: [{"name": path.rsplit("/", 1)[-1], "isDir": False} for path in file_paths]},
         file_contents={path: path for path in file_paths},
     )
-    monkeypatch.setattr("openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs)
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
     monkeypatch.setattr(
         "openviking.storage.queuefs.semantic_executor.get_openviking_config",
         lambda: SimpleNamespace(semantic=SimpleNamespace(overview_sample_limit=2)),
@@ -988,7 +1022,9 @@ async def test_content_copy_with_no_ready_summaries_preserves_existing_sidecars(
             f"{root_uri}/.abstract.md": old_abstract,
         },
     )
-    monkeypatch.setattr("openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs)
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
     monkeypatch.setattr(
         "openviking.storage.queuefs.semantic_executor.get_openviking_config",
         lambda: SimpleNamespace(semantic=SimpleNamespace(overview_sample_limit=32)),
@@ -1026,7 +1062,9 @@ async def test_content_copy_rebuilds_semantics_when_move_leaves_source_directory
             f"{root_uri}/.abstract.md": old_abstract,
         },
     )
-    monkeypatch.setattr("openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs)
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
     monkeypatch.setattr(
         "openviking.storage.queuefs.semantic_executor.get_openviking_config",
         lambda: SimpleNamespace(semantic=SimpleNamespace(overview_sample_limit=32)),
@@ -1062,7 +1100,9 @@ async def test_content_copy_propagates_vector_summary_read_failure(monkeypatch):
         tree={root_uri: [{"name": "copied.txt", "isDir": False}]},
         file_contents={file_path: "copied"},
     )
-    monkeypatch.setattr("openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs)
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
     monkeypatch.setattr(
         "openviking.storage.queuefs.semantic_executor.get_openviking_config",
         lambda: SimpleNamespace(semantic=SimpleNamespace(overview_sample_limit=32)),

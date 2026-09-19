@@ -106,7 +106,9 @@ async def test_messages_jsonl_excluded_from_summary(monkeypatch):
         ],
     }
     fake_fs = _FakeVikingFS(tree)
-    monkeypatch.setattr("openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs)
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
 
     processor = _FakeProcessor()
     ctx = RequestContext(user=UserIdentifier("acc1", "user1"), role=Role.USER)
@@ -138,7 +140,9 @@ async def test_messages_jsonl_excluded_in_subdirectory(monkeypatch):
         ],
     }
     fake_fs = _FakeVikingFS(tree)
-    monkeypatch.setattr("openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs)
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
 
     processor = _FakeProcessor()
     ctx = RequestContext(user=UserIdentifier("acc1", "user1"), role=Role.USER)
@@ -166,7 +170,9 @@ async def test_unlistable_semantic_root_is_not_materialized_as_directory(
         fail_sidecar_write=fail_sidecar_write,
         list_error=list_error,
     )
-    monkeypatch.setattr("openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs)
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
     monkeypatch.setattr(
         "openviking.storage.queuefs.semantic_executor.get_openviking_config",
         lambda: SimpleNamespace(semantic=SimpleNamespace(overview_sample_limit=32)),
@@ -193,7 +199,9 @@ async def test_unlistable_semantic_root_is_not_materialized_as_directory(
 async def test_empty_semantic_directory_still_receives_sidecars(monkeypatch):
     root_uri = "viking://user/user1/memories/empty"
     fake_fs = _FakeVikingFS({root_uri: []})
-    monkeypatch.setattr("openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs)
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
     monkeypatch.setattr(
         "openviking.storage.queuefs.semantic_executor.get_openviking_config",
         lambda: SimpleNamespace(semantic=SimpleNamespace(overview_sample_limit=32)),

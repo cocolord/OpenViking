@@ -1036,9 +1036,7 @@ async def test_incremental_inventory_retries_a_transiently_short_cursor(monkeypa
         ),
     )
 
-    records = await backend.get_incremental_inventory_under_uri(
-        root, ctx=_ctx(), batch_size=2
-    )
+    records = await backend.get_incremental_inventory_under_uri(root, ctx=_ctx(), batch_size=2)
 
     assert set(records) == {"root-l0", "root-l1"}
     assert backend._strict_transfer_count.await_count == 2
@@ -1066,9 +1064,7 @@ async def test_incremental_inventory_retries_a_transient_count_undershoot(monkey
         ),
     )
 
-    records = await backend.get_incremental_inventory_under_uri(
-        root, ctx=_ctx(), batch_size=2
-    )
+    records = await backend.get_incremental_inventory_under_uri(root, ctx=_ctx(), batch_size=2)
 
     assert set(records) == {"root-l0", "root-l1"}
     assert backend._strict_transfer_count.await_count == 2

@@ -189,9 +189,7 @@ def _shared_upload_created_at(upload_id: str) -> Optional[float]:
 
 async def _stream_upload_to_local_temp(upload_file: Any, max_size_bytes: int) -> tuple[str, int]:
     suffix = Path(upload_file.filename or "upload.tmp").suffix or ".tmp"
-    temp_path = await asyncio.to_thread(
-        _create_temp_file, prefix="ov_http_upload_", suffix=suffix
-    )
+    temp_path = await asyncio.to_thread(_create_temp_file, prefix="ov_http_upload_", suffix=suffix)
     total = 0
     f = None
     try:
@@ -202,9 +200,7 @@ async def _stream_upload_to_local_temp(upload_file: Any, max_size_bytes: int) ->
                 break
             total += len(chunk)
             if total > max_size_bytes:
-                raise InvalidArgumentError(
-                    f"Upload exceeds size limit ({max_size_bytes} bytes)."
-                )
+                raise InvalidArgumentError(f"Upload exceeds size limit ({max_size_bytes} bytes).")
             # UploadFile reads already yield to the event loop.  Local disk writes do
             # not, so run each bounded write in the default executor rather than
             # stalling the Core worker event loop on slow local storage.
@@ -353,9 +349,7 @@ class TempUploadStore:
 
         try:
             content = await asyncio.to_thread(Path(temp_path).read_bytes)
-            await vfs.write_file_bytes(
-                content_uri, content, ctx=internal_ctx, auto_pathlock=False
-            )
+            await vfs.write_file_bytes(content_uri, content, ctx=internal_ctx, auto_pathlock=False)
             await vfs.write_file(
                 meta_uri,
                 json.dumps(meta, ensure_ascii=False),
@@ -394,9 +388,7 @@ class TempUploadStore:
         now = time.time()
         with _SHARED_CLEANUP_STATE_LOCK:
             if account_id in _SHARED_CLEANUP_PENDING:
-                logger.debug(
-                    "[TempUpload] Shared cleanup already pending account=%s", account_id
-                )
+                logger.debug("[TempUpload] Shared cleanup already pending account=%s", account_id)
                 return
             due_at = _SHARED_CLEANUP_DUE_AT.get(account_id)
             if due_at is not None and now < due_at:
@@ -565,9 +557,7 @@ class TempUploadStore:
         try:
             data = json.loads(await vfs.read_file(meta_uri, ctx=internal_ctx))
         except Exception as exc:
-            raise PermissionDeniedError(
-                "Temporary upload metadata is invalid or missing."
-            ) from exc
+            raise PermissionDeniedError("Temporary upload metadata is invalid or missing.") from exc
         if not isinstance(data, dict):
             raise PermissionDeniedError("Temporary upload metadata is invalid or missing.")
         return data
@@ -652,9 +642,9 @@ class TempUploadStore:
 
         # Classify the single listing into independent groups (order preserved,
         # so each group stays name-ascending / oldest-first).
-        buckets: list[tuple[str, float]] = []   # (uri, bucket_expiry)
-        legacy: list[tuple[str, float]] = []    # (uri, upload_expiry)
-        invalid: list[str] = []                 # uri
+        buckets: list[tuple[str, float]] = []  # (uri, bucket_expiry)
+        legacy: list[tuple[str, float]] = []  # (uri, upload_expiry)
+        invalid: list[str] = []  # uri
         for entry in entries:
             if not entry.get("isDir"):
                 continue
@@ -673,12 +663,18 @@ class TempUploadStore:
             invalid.append(uri)
 
         # Process the bucket and legacy groups independently, oldest-first.
-        bucket_scanned, bucket_removed, bucket_due, bucket_failed = (
-            await self._cleanup_expiry_group(vfs, internal_ctx, buckets, now, kind="bucket")
-        )
-        legacy_scanned, legacy_removed, legacy_due, legacy_failed = (
-            await self._cleanup_expiry_group(vfs, internal_ctx, legacy, now, kind="flat")
-        )
+        (
+            bucket_scanned,
+            bucket_removed,
+            bucket_due,
+            bucket_failed,
+        ) = await self._cleanup_expiry_group(vfs, internal_ctx, buckets, now, kind="bucket")
+        (
+            legacy_scanned,
+            legacy_removed,
+            legacy_due,
+            legacy_failed,
+        ) = await self._cleanup_expiry_group(vfs, internal_ctx, legacy, now, kind="flat")
 
         # Invalid/foreign dirs: only when explicitly enabled; never blocks the
         # expiry groups and failures are logged inside the helper.
@@ -766,9 +762,7 @@ class TempUploadStore:
         """
         started_at = time.monotonic()
         try:
-            await vfs.remove_files(
-                uri, recursive=True, ctx=internal_ctx, auto_pathlock=False
-            )
+            await vfs.remove_files(uri, recursive=True, ctx=internal_ctx, auto_pathlock=False)
         except Exception:
             logger.warning(
                 "[TempUpload] cleanup remove failed kind=%s uri=%s elapsed_ms=%.1f",

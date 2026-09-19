@@ -64,17 +64,22 @@ class _TruncatingVikingFS:
         pass
 
     async def sync_tree(
-        self, root_uri, target_uri, *, ctx=None, file_change_status=None,
-        lease_ref=None, delete_temp_after=False, is_changed=None,
+        self,
+        root_uri,
+        target_uri,
+        *,
+        ctx=None,
+        file_change_status=None,
+        lease_ref=None,
+        delete_temp_after=False,
+        is_changed=None,
     ):
         from openviking.storage.viking_fs import SyncDiff
         from openviking_cli.utils.uri import VikingURI
 
         diff = SyncDiff()
         # Mirror _SyncMixin.list_children: must pass node_limit=LS_ALL_NODES.
-        entries = await self.ls(
-            root_uri, show_all_hidden=True, node_limit=LS_ALL_NODES, ctx=ctx
-        )
+        entries = await self.ls(root_uri, show_all_hidden=True, node_limit=LS_ALL_NODES, ctx=ctx)
         for entry in entries:
             name = entry.get("name", "")
             if not name or name in (".", "..") or name.startswith("."):
@@ -113,9 +118,9 @@ async def test_sync_materializes_all_children_above_default_node_limit(monkeypat
         "sync was truncated at ls node_limit"
     )
     assert len(diff.added_dirs) == n_children
-    assert all(
-        lim == LS_ALL_NODES for lim in fake.ls_node_limits
-    ), f"sync_tree must pass LS_ALL_NODES to ls, got node_limits={fake.ls_node_limits}"
+    assert all(lim == LS_ALL_NODES for lim in fake.ls_node_limits), (
+        f"sync_tree must pass LS_ALL_NODES to ls, got node_limits={fake.ls_node_limits}"
+    )
 
 
 class _TruncatingLsFS:

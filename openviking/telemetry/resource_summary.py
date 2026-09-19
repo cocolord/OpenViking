@@ -92,6 +92,7 @@ def record_resource_queue_metrics(
         telemetry.set("semantic_nodes.pending", tree_stats.pending_nodes)
         telemetry.set("semantic_nodes.running", tree_stats.in_progress_nodes)
 
+
 __all__ = [
     "build_queue_status_payload",
     "record_resource_queue_metrics",

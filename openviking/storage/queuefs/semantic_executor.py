@@ -1462,9 +1462,11 @@ class SemanticTreeExecutor:
                 except AbstractOverviewFormatError:
                     raise
                 except Exception as exc:
-                    need_vectorize = False
-                    logger.info(f"[SemanticTree] {dir_uri} write failed, skipping")
                     self._record_skill_failure(dir_uri, exc)
+                    if self._semantic_plan is not None:
+                        self.fail(exc)
+                        return
+                    raise
 
         except AbstractOverviewFormatError:
             raise

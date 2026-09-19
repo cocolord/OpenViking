@@ -23,7 +23,7 @@ from openviking.storage.collection_schemas import TextEmbeddingHandler
 from openviking.storage.queuefs.embedding_msg import EmbeddingMsg
 from openviking.storage.queuefs.named_queue import NamedQueue
 from openviking.storage.queuefs.process_result import ProcessOutcome
-from openviking.storage.queuefs.semantic_executor import SemanticTreeStats, SemanticTreeExecutor
+from openviking.storage.queuefs.semantic_executor import SemanticTreeExecutor, SemanticTreeStats
 from openviking.storage.queuefs.semantic_msg import SemanticMsg
 from openviking.storage.queuefs.semantic_processor import SemanticProcessor
 from openviking.telemetry.request_wait_tracker import get_request_wait_tracker

@@ -131,6 +131,5 @@ class QueueObserver(BaseObserver):
     @staticmethod
     def _has_active_errors(statuses: Dict[str, QueueStatus]) -> bool:
         return any(
-            status.error_count > 0 and not status.is_complete
-            for status in statuses.values()
+            status.error_count > 0 and not status.is_complete for status in statuses.values()
         )

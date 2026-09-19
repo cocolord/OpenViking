@@ -136,9 +136,7 @@ class ParserRouter:
 
         if use_understanding:
             if isinstance(source, LocalResource):
-                kwargs["source_name"] = source.meta.get("resolved_name") or Path(
-                    source_path
-                ).name
+                kwargs["source_name"] = source.meta.get("resolved_name") or Path(source_path).name
                 kwargs["resolved_extension"] = (
                     kwargs.get("resolved_extension")
                     or source.meta.get("resolved_extension")

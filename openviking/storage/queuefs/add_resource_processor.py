@@ -324,8 +324,7 @@ class AddResourceProcessor(DequeueHandlerBase):
                     resource_summary = _snapshot.summary.get("resource", {})
                     queue_summary = _snapshot.summary.get("queue", {})
                     logger.info(
-                        "[AddResourceCompleted] %s root=%s total_ms=%s "
-                        "semantic=%s embedding=%s",
+                        "[AddResourceCompleted] %s root=%s total_ms=%s semantic=%s embedding=%s",
                         log_correlation(
                             task_id=msg.task_id,
                             telemetry_id=telemetry_id,

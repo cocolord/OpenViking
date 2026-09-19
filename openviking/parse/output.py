@@ -197,9 +197,7 @@ class ParseArtifactWriter:
         self._md5_by_rel[rel_path] = md5 or content_md5(content)
         self._finalized = False
 
-    async def write_text(
-        self, rel_path: str, content: str, *, encoding: str = "utf-8"
-    ) -> None:
+    async def write_text(self, rel_path: str, content: str, *, encoding: str = "utf-8") -> None:
         await self.write_bytes(rel_path, content.encode(encoding))
 
     async def finalize(self, *, resource_rel: str = "") -> ParseArtifactRef:
@@ -269,7 +267,9 @@ async def copy_artifact_tree(
         nonlocal copied
         if dst_dir:
             await target.mkdir(dst_dir)
-        for entry in entries if entries is not None else await source_store.list(source_ref, src_dir):
+        for entry in (
+            entries if entries is not None else await source_store.list(source_ref, src_dir)
+        ):
             if entry.rel_path == ARTIFACT_MANIFEST_NAME:
                 continue
             if entry.name.startswith(".") and entry.name not in allowed_hidden:
@@ -282,13 +282,13 @@ async def copy_artifact_tree(
                 if source_store is target.store:
                     if not md5:
                         md5 = content_md5(await source_store.read_bytes(source_ref, entry.rel_path))
-                    await target.store.move_file(
-                        source_ref, entry.rel_path, target.ref, child_dst
-                    )
+                    await target.store.move_file(source_ref, entry.rel_path, target.ref, child_dst)
                     target.record_md5(child_dst, md5)
                 else:
                     await target.write_bytes(
-                        child_dst, await source_store.read_bytes(source_ref, entry.rel_path), md5=md5
+                        child_dst,
+                        await source_store.read_bytes(source_ref, entry.rel_path),
+                        md5=md5,
                     )
                 copied += 1
 
@@ -358,9 +358,7 @@ class AgfsParseOutputStore(ParseOutputStore):
 
         base = self._resolve(ref, rel_path)
         kwargs = {"ctx": self._ctx} if self._ctx is not None else {}
-        entries = await self._fs().ls(
-            base, show_all_hidden=True, node_limit=LS_ALL_NODES, **kwargs
-        )
+        entries = await self._fs().ls(base, show_all_hidden=True, node_limit=LS_ALL_NODES, **kwargs)
         rel_prefix = (rel_path or "").strip("/")
         result: List[ArtifactEntry] = []
         for entry in entries:

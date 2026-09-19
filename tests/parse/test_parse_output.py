@@ -238,9 +238,7 @@ class TestAgfsParseOutputStore:
 
         await store.move_file(source, "a.txt", target, "nested/a.txt")
 
-        assert vfs.moves == [
-            (f"{source.root}/a.txt", f"{target.root}/nested/a.txt", ctx)
-        ]
+        assert vfs.moves == [(f"{source.root}/a.txt", f"{target.root}/nested/a.txt", ctx)]
 
 
 # ---------------------------------------------------------------------------
@@ -332,9 +330,7 @@ async def test_artifact_writer_records_final_bytes_in_manifest(backend, tmp_path
     ref = await writer.finalize(resource_rel="doc")
 
     assert ref.resource_rel == "doc"
-    assert await read_artifact_manifest(store, ref) == {
-        "doc/a.txt": content_md5(b"final bytes")
-    }
+    assert await read_artifact_manifest(store, ref) == {"doc/a.txt": content_md5(b"final bytes")}
 
 
 @pytest.mark.asyncio

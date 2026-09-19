@@ -69,15 +69,15 @@ def test_log_correlation_uses_bound_task_and_telemetry() -> None:
         bind_telemetry(telemetry),
     ):
         assert log_correlation(message_id="semantic-456") == (
-            f"task_id=task-123 telemetry_id={telemetry.telemetry_id} "
-            "message_id=semantic-456"
+            f"task_id=task-123 telemetry_id={telemetry.telemetry_id} message_id=semantic-456"
         )
 
 
 def test_log_correlation_accepts_explicit_queue_ids_without_context() -> None:
-    assert log_correlation(
-        task_id="task-1", telemetry_id="tm-1", message_id="embedding-2"
-    ) == "task_id=task-1 telemetry_id=tm-1 message_id=embedding-2"
+    assert (
+        log_correlation(task_id="task-1", telemetry_id="tm-1", message_id="embedding-2")
+        == "task_id=task-1 telemetry_id=tm-1 message_id=embedding-2"
+    )
 
 
 async def test_enqueue_registers_before_write_and_ack_finalizes_before_delete(tracked_queue):
@@ -260,9 +260,7 @@ async def test_process_result_tracks_children_and_errors(tracked_queue):
     queue.set_dequeue_handler(Handler())
     assert (await queue.process_dequeued(message)).outcome is ProcessOutcome.FAILED
     assert contexts[0].task_id == "task-1"
-    assert correlations == [
-        "task_id=task-1 telemetry_id=tm-1 message_id=semantic-1"
-    ]
+    assert correlations == ["task_id=task-1 telemetry_id=tm-1 message_id=semantic-1"]
     assert get_task_context() is None
     assert index.failure("task-1") == "failed work"
     child_payload = next(

@@ -321,9 +321,7 @@ class ParseResult:
         if not self.temp_dir_path:
             return None
         if not self.temp_dir_path.startswith("viking://temp/"):
-            raise ValueError(
-                "parse result with a non-AGFS temp path must provide artifact_ref"
-            )
+            raise ValueError("parse result with a non-AGFS temp path must provide artifact_ref")
         from openviking.parse.output import ParseArtifactRef
 
         self.artifact_ref = ParseArtifactRef(

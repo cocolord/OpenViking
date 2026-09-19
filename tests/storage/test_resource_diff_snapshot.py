@@ -265,17 +265,13 @@ async def test_build_rnfv_snapshot_skips_vector_inventory_when_vectorize_disable
     ref = await store.create_artifact(root_type="dir")
     await store.write_bytes(ref, "repository/a.py", b"new")
     inventory = await prepare_artifact_inventory(store, ref, doc_rel="repository")
-    vikingdb = _FakeVikingDB(
-        {f"{root}/a.py": {"id": "stale-l2", "level": 2, "md5": "new"}}
-    )
+    vikingdb = _FakeVikingDB({f"{root}/a.py": {"id": "stale-l2", "level": 2, "md5": "new"}})
     vikingdb.get_incremental_inventory_under_uri = AsyncMock(
         side_effect=AssertionError("build_index=false must not read vector inventory")
     )
 
     snapshot = await build_rnfv_snapshot(
-        viking_fs=_FakeVikingFS(
-            [{"rel_path": "a.py", "isDir": False, "uri": f"{root}/a.py"}]
-        ),
+        viking_fs=_FakeVikingFS([{"rel_path": "a.py", "isDir": False, "uri": f"{root}/a.py"}]),
         vikingdb=vikingdb,
         store=store,
         artifact_ref=ref,

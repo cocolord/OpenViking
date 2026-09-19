@@ -112,9 +112,7 @@ async def test_unpack_artifact_supports_local_output_store(tmp_path: Path):
 
     store = LocalParseOutputStore(str(tmp_path / "artifacts"))
     api = UnderstandingAPI.__new__(UnderstandingAPI)
-    ref = await api._unpack_zip_to_temp_dir(
-        zip_path, "resource", parse_output_store=store
-    )
+    ref = await api._unpack_zip_to_temp_dir(zip_path, "resource", parse_output_store=store)
 
     assert ref.backend == "local"
     assert ref.resource_rel == "resource"

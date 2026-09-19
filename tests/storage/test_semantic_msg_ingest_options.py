@@ -83,9 +83,7 @@ def test_semantic_msg_roundtrip_preserves_file_md5s():
         file_md5s={"viking://resources/x/a.py": "md5a"},
     )
 
-    assert SemanticMsg.from_dict(msg.to_dict()).file_md5s == {
-        "viking://resources/x/a.py": "md5a"
-    }
+    assert SemanticMsg.from_dict(msg.to_dict()).file_md5s == {"viking://resources/x/a.py": "md5a"}
 
 
 def test_semantic_msg_defaults_file_md5s_to_empty():

@@ -143,9 +143,7 @@ async def test_pdf_no_split_converts_to_one_complete_markdown(
 
     assert result.parser_name == "PDFParser"
     assert (
-        fake_fs.files[
-            "viking://temp/pdf-no-split/社交网络中英文剧本/社交网络中英文剧本.md"
-        ]
+        fake_fs.files["viking://temp/pdf-no-split/社交网络中英文剧本/社交网络中英文剧本.md"]
         == content
     )
     assert not any(uri.endswith(".pdf") for uri in fake_fs.files)

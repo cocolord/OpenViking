@@ -185,6 +185,9 @@ Search and Find requests default to `limit: 10`; override the limit on each API 
     },
     "vectordb": {
       "backend": "local"
+    },
+    "parse_output": {
+      "mode": "agfs"
     }
   }
 }
@@ -198,9 +201,16 @@ Search and Find requests default to `limit: 10`; override the limit on each API 
 | `agfs.backend` | `local`, `memory`, `s3` | `local` | File and metadata backend |
 | `vectordb.backend` | `local`, `cuvs`, `http`, `volcengine`, `vikingdb` | `local` | Vector database backend |
 | `vectordb.dimension` | integer | follows Embedding | Vector collection dimension |
+| `parse_output.mode` | `agfs`, `local` | `agfs` | Backend for intermediate parser artifacts |
+| `parse_output.local_root` | path or `null` | system temp directory | Root directory used by local parser artifacts |
 | `skip_process_lock` | boolean | `false` | Skip the workspace process lock; use only when accepting concurrent-write risk |
 
 Remote backends also require endpoint, bucket/collection, credentials, and timeout fields. See [Configuration](../guides/01-configuration.md#storage) for complete examples.
+
+`parse_output.mode=local` avoids writing parser intermediates to shared AGFS.
+The same worker must commit the required bytes to the formal resource tree before
+enqueueing downstream work. Artifacts are temporary and are removed after the
+content commit; provision `local_root` with enough space for concurrent imports.
 
 ## Queue Worker Settings
 

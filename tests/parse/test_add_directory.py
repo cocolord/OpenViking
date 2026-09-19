@@ -222,12 +222,8 @@ class TestDirectoryParserBasic:
         (tmp_path / "notes").mkdir()
         (tmp_path / "08_Attachments").mkdir()
         (tmp_path / "notes" / "article.md").write_text("keep", encoding="utf-8")
-        (tmp_path / "notes" / "private.excalidraw.md").write_text(
-            "exclude", encoding="utf-8"
-        )
-        (tmp_path / "08_Attachments" / "diagram.md").write_text(
-            "ignore", encoding="utf-8"
-        )
+        (tmp_path / "notes" / "private.excalidraw.md").write_text("exclude", encoding="utf-8")
+        (tmp_path / "08_Attachments" / "diagram.md").write_text("ignore", encoding="utf-8")
         (tmp_path / "main.py").write_text("exclude by include", encoding="utf-8")
 
         with (
@@ -242,9 +238,7 @@ class TestDirectoryParserBasic:
             )
 
         uploaded_paths = {
-            uri.split("/repository/", 1)[-1]
-            for uri in fake_fs.files
-            if "/repository/" in uri
+            uri.split("/repository/", 1)[-1] for uri in fake_fs.files if "/repository/" in uri
         }
         assert result.parser_name == "CodeRepositoryParser"
         assert uploaded_paths == {"notes/article.md"}
@@ -405,9 +399,7 @@ class TestNestedDirectory:
     @pytest.mark.asyncio
     async def test_file_count(self, tmp_nested_code: Path, parser, fake_fs) -> None:
         await parser.parse(str(tmp_nested_code))
-        business_files = [
-            uri for uri in fake_fs.files if not uri.endswith(ARTIFACT_MANIFEST_NAME)
-        ]
+        business_files = [uri for uri in fake_fs.files if not uri.endswith(ARTIFACT_MANIFEST_NAME)]
         assert len(business_files) == 4
 
 
@@ -463,9 +455,7 @@ class TestParserDelegation:
     ) -> None:
         nested = tmp_path / "scripts"
         nested.mkdir()
-        content = "\n\n".join(
-            f"paragraph {index} " + "x" * 1000 for index in range(20)
-        )
+        content = "\n\n".join(f"paragraph {index} " + "x" * 1000 for index in range(20))
         (nested / "screenplay.md").write_text(content, encoding="utf-8")
 
         result = await parser.parse(str(tmp_path), split_content=False)
@@ -476,9 +466,7 @@ class TestParserDelegation:
             for uri, value in fake_fs.files.items()
             if uri.startswith(root) and uri.endswith(".md")
         }
-        assert body_files == {
-            f"{root}/scripts/screenplay.md": content.encode("utf-8")
-        }
+        assert body_files == {f"{root}/scripts/screenplay.md": content.encode("utf-8")}
 
     @pytest.mark.asyncio
     async def test_txt_file_goes_through_parser(self, tmp_path: Path, parser, fake_fs) -> None:

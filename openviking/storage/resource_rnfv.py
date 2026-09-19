@@ -11,7 +11,7 @@ request or either storage backend again.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from openviking.utils.ingest_options import IngestOptions
 
@@ -167,6 +167,24 @@ class VectorRecordSnapshot:
             raise ValueError(f"invalid vector snapshot level: {self.level}")
 
 
+def canonical_vector_records_by_level(
+    records: Iterable[VectorRecordSnapshot],
+) -> tuple[dict[int, VectorRecordSnapshot], tuple[VectorRecordSnapshot, ...]]:
+    """Choose the lowest record ID per level and return the duplicates."""
+    canonical: dict[int, VectorRecordSnapshot] = {}
+    duplicates: list[VectorRecordSnapshot] = []
+    for record in records:
+        current = canonical.get(record.level)
+        if current is None:
+            canonical[record.level] = record
+        elif record.record_id < current.record_id:
+            duplicates.append(current)
+            canonical[record.level] = record
+        else:
+            duplicates.append(record)
+    return canonical, tuple(duplicates)
+
+
 @dataclass(frozen=True)
 class VectorIndexSnapshot:
     """Complete target-prefix V inventory and the projection used to read it."""
@@ -184,6 +202,7 @@ class RNFVSnapshot:
     supplies indexed levels, record identities, and selectively hydrated scalars.
     No later planner step may silently reread those sources.
     """
+
     request: RequestIntent
     new: NewArtifactSnapshot
     formal: FormalTreeSnapshot
@@ -217,4 +236,5 @@ __all__ = [
     "FormalEntry",
     "VectorIndexSnapshot",
     "VectorRecordSnapshot",
+    "canonical_vector_records_by_level",
 ]

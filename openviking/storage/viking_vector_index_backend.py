@@ -1872,7 +1872,11 @@ class VikingVectorIndexBackend:
         records: Dict[str, Dict[str, Any]] = {}
         what = f"Vector scan under {canonical_uri}"
         async for record in self._strict_scan(
-            ctx, scope, output_fields=INCREMENTAL_DIFF_OUTPUT_FIELDS, batch_size=batch_size, what=what
+            ctx,
+            scope,
+            output_fields=INCREMENTAL_DIFF_OUTPUT_FIELDS,
+            batch_size=batch_size,
+            what=what,
         ):
             record_uri = str(record.get("uri") or "")
             if not record_uri or not uri_in_transfer_scope(
@@ -2000,8 +2004,7 @@ class VikingVectorIndexBackend:
                 dynamic_fields = [
                     field
                     for field in schema_fields
-                    if field
-                    and field not in {"vector", "sparse_vector", "content"}
+                    if field and field not in {"vector", "sparse_vector", "content"}
                 ]
                 if dynamic_fields:
                     selected_fields = list(dict.fromkeys(dynamic_fields))
@@ -2010,9 +2013,7 @@ class VikingVectorIndexBackend:
                 # projection; correctness remains fail-closed at identity checks.
                 pass
         else:
-            selected_fields = list(
-                dict.fromkeys(["id", "uri", "level", *sorted(output_fields)])
-            )
+            selected_fields = list(dict.fromkeys(["id", "uri", "level", *sorted(output_fields)]))
         hydrated: Dict[str, Dict[str, Any]] = {}
 
         def _accept(record: Mapping[str, Any]) -> None:
@@ -2040,9 +2041,7 @@ class VikingVectorIndexBackend:
                     f"Incremental hydration returned duplicate record id: {record_id}"
                 )
             hydrated[record_id] = {
-                field: record[field]
-                for field in selected_fields
-                if field in record
+                field: record[field] for field in selected_fields if field in record
             }
 
         for start in range(0, len(requested_ids), batch_size):

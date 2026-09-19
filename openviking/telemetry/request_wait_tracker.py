@@ -145,7 +145,9 @@ class RequestWaitTracker:
             state = self._states.get(telemetry_id)
             if state is None:
                 return
-            setattr(state, queue_wait_attr, getattr(state, queue_wait_attr) + max(queue_wait_ms, 0.0))
+            setattr(
+                state, queue_wait_attr, getattr(state, queue_wait_attr) + max(queue_wait_ms, 0.0)
+            )
             setattr(state, execute_attr, getattr(state, execute_attr) + max(execute_ms, 0.0))
 
     def get_embedding_context_count(self, telemetry_id: str) -> int:

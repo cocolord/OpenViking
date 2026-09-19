@@ -474,7 +474,12 @@ class ResourceProcessor:
         failed_files = meta.get("failed_files")
         if not isinstance(failed_files, list):
             return []
-        return [item for item in failed_files if isinstance(item, dict) and "error" in item]
+        return [
+            item
+            for item in failed_files
+            if isinstance(item, dict)
+            and (item.get("status") == "failed" or (not item.get("status") and "error" in item))
+        ]
 
     @staticmethod
     def _incomplete_directory_error(failures: List[Dict[str, Any]]) -> str:
@@ -677,10 +682,7 @@ class ResourceProcessor:
                     return result
 
                 parse_failures = self._directory_parse_failures(parse_meta)
-                use_directory_update_plan = is_directory_aggregate and (
-                    summarize or bool(kwargs.get("build_index", True))
-                )
-                if use_directory_update_plan and parse_failures:
+                if is_directory_aggregate and parse_failures:
                     result["status"] = "error"
                     result["errors"].append(self._incomplete_directory_error(parse_failures))
                     try:

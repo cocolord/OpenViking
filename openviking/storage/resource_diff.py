@@ -43,6 +43,7 @@ from openviking.storage.resource_rnfv import (
     RNFVSnapshot,
     VectorIndexSnapshot,
     VectorRecordSnapshot,
+    canonical_vector_records_by_level,
 )
 from openviking.utils.log_correlation import log_correlation
 
@@ -209,9 +210,7 @@ async def resolve_resource_diff(
 
     new = snapshot.new.entries
     formal = snapshot.formal.entries
-    vector_records = (
-        snapshot.vectors.records_by_id if snapshot.request.vectorize else {}
-    )
+    vector_records = snapshot.vectors.records_by_id if snapshot.request.vectorize else {}
     records_by_rel: dict[str, list[VectorRecordSnapshot]] = {}
     for record in vector_records.values():
         records_by_rel.setdefault(record.relative_path, []).append(record)
@@ -232,14 +231,11 @@ async def resolve_resource_diff(
             elif new_entry.is_dir:
                 states[rel_path] = (ContentState.UNCHANGED, None)
             else:
-                l2_md5 = next(
-                    (
-                        str(record.fields.get("md5") or "")
-                        for record in records_by_rel.get(rel_path, ())
-                        if record.level == 2
-                    ),
-                    "",
+                canonical_records, _ = canonical_vector_records_by_level(
+                    records_by_rel.get(rel_path, ())
                 )
+                l2_record = canonical_records.get(2)
+                l2_md5 = str(l2_record.fields.get("md5") or "") if l2_record else ""
                 if new_entry.md5 and l2_md5:
                     md5_fast_path_count += 1
                     state = (
@@ -305,10 +301,16 @@ async def resolve_resource_diff(
             new_kind if state not in {ContentState.DELETED, ContentState.ABSENT} else None
         )
         records = tuple(records_by_rel.get(rel_path, ()))
+        canonical_records, _ = canonical_vector_records_by_level(records)
         result[rel_path] = ResourceDiffEntry(
             relative_path=rel_path,
             content_state=state,
-            index_state=_index_state(records, kind=current_kind, content_state=state, md5=md5),
+            index_state=_index_state(
+                tuple(canonical_records.values()),
+                kind=current_kind,
+                content_state=state,
+                md5=md5,
+            ),
             old_kind=old_kind,
             new_kind=new_kind,
             md5=md5,
@@ -560,9 +562,7 @@ async def build_rnfv_snapshot(
         )
 
     projection = request.required_vector_fields()
-    if request.vectorize and (
-        root_is_file or request.processing_mode == "vectors_only"
-    ):
+    if request.vectorize and (root_is_file or request.processing_mode == "vectors_only"):
         projection = projection | {"abstract"}
 
     tasks = [

@@ -510,6 +510,74 @@ async def test_resolver_marks_removed_content_vectors_as_obsolete():
 
 
 @pytest.mark.asyncio
+async def test_resolver_uses_same_duplicate_record_winner_as_planner():
+    from openviking.storage.context_update_plan import ContentState
+    from openviking.storage.resource_rnfv import (
+        FormalEntry,
+        FormalTreeSnapshot,
+        NewArtifactSnapshot,
+        NewEntry,
+        RequestIntent,
+        RNFVSnapshot,
+        VectorIndexSnapshot,
+        VectorRecordSnapshot,
+    )
+
+    root = "viking://resources/repo"
+    records = {
+        "z-new": VectorRecordSnapshot("z-new", f"{root}/a.py", "a.py", 2, {"md5": "new"}),
+        "a-old": VectorRecordSnapshot("a-old", f"{root}/a.py", "a.py", 2, {"md5": "old"}),
+    }
+    snapshot = RNFVSnapshot(
+        RequestIntent(root, "semantic_and_vectors"),
+        NewArtifactSnapshot({"a.py": NewEntry(md5="new")}),
+        FormalTreeSnapshot({"a.py": FormalEntry()}),
+        VectorIndexSnapshot(records, frozenset({"id", "uri", "level", "md5"})),
+    )
+
+    result = await resource_diff.resolve_resource_diff(
+        snapshot, store=AsyncMock(), artifact_ref=object(), target=AsyncMock()
+    )
+
+    assert result.entries["a.py"].content_state is ContentState.MODIFIED
+
+
+@pytest.mark.asyncio
+async def test_resolver_index_state_uses_canonical_duplicate_record():
+    from openviking.storage.context_update_plan import ContentState, IndexState
+    from openviking.storage.resource_rnfv import (
+        FormalEntry,
+        FormalTreeSnapshot,
+        NewArtifactSnapshot,
+        NewEntry,
+        RequestIntent,
+        RNFVSnapshot,
+        VectorIndexSnapshot,
+        VectorRecordSnapshot,
+    )
+
+    root = "viking://resources/repo"
+    records = {
+        "z-new": VectorRecordSnapshot("z-new", f"{root}/a.py", "a.py", 2, {"md5": "new"}),
+        "a-old": VectorRecordSnapshot("a-old", f"{root}/a.py", "a.py", 2, {"md5": "old"}),
+    }
+    snapshot = RNFVSnapshot(
+        RequestIntent(root, "semantic_and_vectors"),
+        NewArtifactSnapshot({"a.py": NewEntry(md5="old")}),
+        FormalTreeSnapshot({"a.py": FormalEntry()}),
+        VectorIndexSnapshot(records, frozenset({"id", "uri", "level", "md5"})),
+    )
+
+    result = await resource_diff.resolve_resource_diff(
+        snapshot, store=AsyncMock(), artifact_ref=object(), target=AsyncMock()
+    )
+
+    entry = result.entries["a.py"]
+    assert entry.content_state is ContentState.UNCHANGED
+    assert entry.index_state is IndexState.COMPLETE
+
+
+@pytest.mark.asyncio
 async def test_resolver_log_separates_files_directories_and_logical_root(monkeypatch):
     from openviking.storage import resource_diff
     from openviking.storage.resource_rnfv import (
@@ -2240,6 +2308,55 @@ async def test_directory_index_slots_choose_exact_levels(monkeypatch):
     kwargs = processor._vectorize_directory.await_args.kwargs
     assert kwargs["include_abstract"] is False
     assert kwargs["include_overview"] is True
+
+
+@pytest.mark.asyncio
+async def test_directory_sidecar_write_failure_fails_semantic_plan(monkeypatch):
+    from openviking.server.identity import RequestContext, Role
+    from openviking.storage.context_update_plan import (
+        SemanticPlan,
+        SemanticTreeEntry,
+        SemanticTreeSnapshot,
+    )
+    from openviking.storage.queuefs.semantic_executor import SemanticTreeExecutor
+    from openviking_cli.session.user_id import UserIdentifier
+
+    root = "viking://resources/repo"
+    fs = SimpleNamespace(_async_agfs=None, _uri_to_path=lambda uri, ctx=None: uri)
+    fs._async_agfs = fs
+    monkeypatch.setattr("openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fs)
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_openviking_config",
+        lambda: SimpleNamespace(semantic=SimpleNamespace(overview_sample_limit=32)),
+    )
+
+    class Processor:
+        _generate_overview = AsyncMock(return_value="overview")
+        _vectorize_directory = AsyncMock(return_value={0, 1})
+
+        @staticmethod
+        def _normalize_overview_generation(overview):
+            return overview, "abstract"
+
+    processor = Processor()
+    plan = SemanticPlan(
+        root,
+        "resource",
+        SemanticTreeSnapshot((SemanticTreeEntry("", "directory", "unchanged", "aggregate"),)),
+    )
+    executor = SemanticTreeExecutor(
+        processor=processor,
+        context_type="resource",
+        max_concurrent_llm=1,
+        ctx=RequestContext(UserIdentifier("acc", "user"), Role.USER),
+        semantic_plan=plan,
+    )
+    executor._write_directory_semantics = AsyncMock(side_effect=OSError("sidecar unavailable"))
+
+    with pytest.raises(OSError, match="sidecar unavailable"):
+        await executor.run(root)
+
+    processor._vectorize_directory.assert_not_awaited()
 
 
 @pytest.mark.asyncio

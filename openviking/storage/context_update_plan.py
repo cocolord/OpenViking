@@ -22,6 +22,7 @@ from openviking.storage.resource_rnfv import (
     RequestIntent,
     RNFVSnapshot,
     VectorRecordSnapshot,
+    canonical_vector_records_by_level,
 )
 from openviking.storage.vector_ids import vector_record_id
 from openviking.utils.ingest_options import IngestOptions
@@ -545,16 +546,13 @@ def _records_by_path(
 ]:
     result: dict[str, dict[int, VectorRecordSnapshot]] = {}
     duplicates: list[VectorRecordSnapshot] = []
+    records_by_relative_path: dict[str, list[VectorRecordSnapshot]] = {}
     for record in records.values():
-        levels = result.setdefault(record.relative_path, {})
-        current = levels.get(record.level)
-        if current is None:
-            levels[record.level] = record
-        elif record.record_id < current.record_id:
-            duplicates.append(current)
-            levels[record.level] = record
-        else:
-            duplicates.append(record)
+        records_by_relative_path.setdefault(record.relative_path, []).append(record)
+    for relative_path, path_records in records_by_relative_path.items():
+        levels, path_duplicates = canonical_vector_records_by_level(path_records)
+        result[relative_path] = levels
+        duplicates.extend(path_duplicates)
     return result, tuple(duplicates)
 
 

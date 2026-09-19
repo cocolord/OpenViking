@@ -207,8 +207,9 @@ async def test_resource_processor_rejects_directory_when_every_file_failed(monke
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("build_index", [True, False])
 async def test_resource_processor_rejects_partial_directory_before_semantic_plan_diff(
-    monkeypatch,
+    monkeypatch, build_index
 ):
     from openviking.parse.output import ParseArtifactRef
     from openviking.utils.resource_processor import ResourceProcessor
@@ -251,7 +252,7 @@ async def test_resource_processor_rejects_partial_directory_before_semantic_plan
         return_value=_directory_plan("viking://resources/root")
     )
 
-    result = await rp.process_resource(path="repo", ctx=object(), build_index=True)
+    result = await rp.process_resource(path="repo", ctx=object(), build_index=build_index)
 
     assert result["status"] == "error"
     assert result["errors"] == [
@@ -305,19 +306,29 @@ async def test_partial_directory_rejection_cleans_local_parse_artifact(monkeypat
     rp.tree_builder.finalize_from_temp.assert_not_awaited()
 
 
-def test_directory_parse_failures_exclude_source_access_skips():
+def test_directory_parse_failures_include_failed_source_access_items():
     from openviking.utils.resource_processor import ResourceProcessor
 
     failures = ResourceProcessor._directory_parse_failures(
         {
             "failed_files": [
                 {"path": "broken.pdf", "error": "invalid PDF"},
-                {"path": "denied.docx", "reason": "HTTP 403"},
+                {"path": "denied.docx", "status": "failed", "reason": "HTTP 403"},
+                {"path": "binary.bin", "status": "unsupported", "reason": "binary"},
+                {
+                    "path": "unsupported.csv",
+                    "status": "unsupported",
+                    "error": "unsupported type",
+                },
+                {"path": "ignored.tmp", "status": "skipped", "error": "ignored"},
             ]
         }
     )
 
-    assert failures == [{"path": "broken.pdf", "error": "invalid PDF"}]
+    assert failures == [
+        {"path": "broken.pdf", "error": "invalid PDF"},
+        {"path": "denied.docx", "status": "failed", "reason": "HTTP 403"},
+    ]
 
 
 @pytest.mark.parametrize("length", [119, 120, 121, 240])

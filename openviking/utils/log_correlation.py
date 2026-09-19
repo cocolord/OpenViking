@@ -7,9 +7,7 @@ from openviking.service.task_work_index import get_task_context
 from openviking.telemetry import get_current_telemetry
 
 
-def log_correlation(
-    *, task_id: str = "", telemetry_id: str = "", message_id: str = ""
-) -> str:
+def log_correlation(*, task_id: str = "", telemetry_id: str = "", message_id: str = "") -> str:
     """Return searchable task, telemetry, and optional queue-message IDs."""
     task_context = get_task_context()
     task_id = task_id or (task_context.task_id if task_context is not None else "-")

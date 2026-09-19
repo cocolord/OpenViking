@@ -1,4 +1,3 @@
-
 from openviking.telemetry.operation import OperationTelemetry
 
 
@@ -7,6 +6,7 @@ def test_record_resource_queue_metrics_collects_queue_and_tree_stats(monkeypatch
 
     telemetry = OperationTelemetry(operation="resources.add_resource", enabled=True)
     telemetry_id = telemetry.telemetry_id
+
     class _SemanticStats:
         processed = 7
         requeue_count = 0

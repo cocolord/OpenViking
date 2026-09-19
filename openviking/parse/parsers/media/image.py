@@ -108,12 +108,14 @@ class ImageParser(BaseParser):
         # to ensure end-to-end compatibility with image understanding and vectorization
         try:
             file_bytes = file_path.read_bytes()
-            if file_path.suffix.lower() == ".svg" or file_bytes[:4] == b"<svg" or (file_bytes[:5] == b"<?xml" and b"<svg" in file_bytes[:100]):
+            if (
+                file_path.suffix.lower() == ".svg"
+                or file_bytes[:4] == b"<svg"
+                or (file_bytes[:5] == b"<?xml" and b"<svg" in file_bytes[:100])
+            ):
                 png_bytes = _convert_svg_to_png(file_bytes)
                 if png_bytes is None:
-                    raise ValueError(
-                        "SVG files require cairosvg. Install it: pip install cairosvg"
-                    )
+                    raise ValueError("SVG files require cairosvg. Install it: pip install cairosvg")
                 img = Image.open(io.BytesIO(png_bytes))
                 img.verify()
                 img.close()
@@ -124,7 +126,14 @@ class ImageParser(BaseParser):
             else:
                 # Check if extension is in VLM-natively supported list
                 suffix_lower = file_path.suffix.lower()
-                supported_by_vlm = suffix_lower in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
+                supported_by_vlm = suffix_lower in {
+                    ".png",
+                    ".jpg",
+                    ".jpeg",
+                    ".gif",
+                    ".bmp",
+                    ".webp",
+                }
                 if supported_by_vlm:
                     img = Image.open(file_path)
                     img.verify()  # Verify that it's a valid image
@@ -144,7 +153,9 @@ class ImageParser(BaseParser):
             raise ValueError(f"Invalid image file: {file_path}. Error: {e}") from e
 
         # Resolve names
-        display_stem, stem, original_filename = resolve_media_names(file_path, file_path.suffix, **kwargs)
+        display_stem, stem, original_filename = resolve_media_names(
+            file_path, file_path.suffix, **kwargs
+        )
         ext_no_dot = file_path.suffix[1:] if file_path.suffix else "jpg"
         if needs_png_conversion:
             # Convert to PNG and change extension for VLM/embedding compatibility
@@ -168,65 +179,63 @@ class ImageParser(BaseParser):
 
             # Create root node with metadata
             root_node = ResourceNode(
-            type=NodeType.ROOT,
-            title=display_stem,
-            level=0,
-            detail_file=None,
-            content_path=None,
-            children=[],
-            meta={
-                "width": width,
-                "height": height,
-                "format": format_str.lower(),
-                "content_type": "image",
-                "source_title": display_stem,
-                "semantic_name": display_stem,
-                "original_filename": original_filename,
-                "is_large_image": large_image_result.needs_processing,
-            },
-        )
+                type=NodeType.ROOT,
+                title=display_stem,
+                level=0,
+                detail_file=None,
+                content_path=None,
+                children=[],
+                meta={
+                    "width": width,
+                    "height": height,
+                    "format": format_str.lower(),
+                    "content_type": "image",
+                    "source_title": display_stem,
+                    "semantic_name": display_stem,
+                    "original_filename": original_filename,
+                    "is_large_image": large_image_result.needs_processing,
+                },
+            )
 
             if large_image_result.needs_processing:
-            # Large image processing mode: save preview, grid, tiles
-            # NOTE: The original file is intentionally NOT saved. Large images can be
-            # hundreds of MB; storing the full-resolution original would exceed storage
-            # budgets. The preview + tiles are the canonical representation. The
-            # `original_filename` metadata field records the original name for reference
-            # but the corresponding file is not persisted.
+                # Large image processing mode: save preview, grid, tiles
+                # NOTE: The original file is intentionally NOT saved. Large images can be
+                # hundreds of MB; storing the full-resolution original would exceed storage
+                # budgets. The preview + tiles are the canonical representation. The
+                # `original_filename` metadata field records the original name for reference
+                # but the corresponding file is not persisted.
                 logger.info(f"Processing large image {original_filename}: {width}x{height}")
 
-            # Save low-res preview (original is too large to store)
+                # Save low-res preview (original is too large to store)
                 await writer.write_bytes(
                     f"{root_dir_name}/{large_image_result.preview_filename}",
                     large_image_result.preview_bytes,
                 )
                 root_node.meta["preview_filename"] = large_image_result.preview_filename
 
-            # Save grid overlay
+                # Save grid overlay
                 if large_image_result.grid_overlay_bytes:
-                    grid_filename = (
-                        large_image_result.grid_overlay_filename or f"{stem}_grid.jpg"
-                    )
+                    grid_filename = large_image_result.grid_overlay_filename or f"{stem}_grid.jpg"
                     await writer.write_bytes(
                         f"{root_dir_name}/{grid_filename}",
                         large_image_result.grid_overlay_bytes,
                     )
                     root_node.meta["grid_overlay"] = grid_filename
 
-            # Create tiles directory
+                # Create tiles directory
                 if large_image_result.tiles:
                     tiles_dir_name = "tiles"
                     tiles_dir_rel = f"{root_dir_name}/{tiles_dir_name}"
                     await writer.mkdir(tiles_dir_rel)
 
-                # Save all tiles
+                    # Save all tiles
                     for tile in large_image_result.tiles:
                         if tile.bytes_data:
                             await writer.write_bytes(
                                 f"{tiles_dir_rel}/{tile.filename}", tile.bytes_data
                             )
 
-                # Update metadata
+                    # Update metadata
                     root_node.meta["tiles_dir"] = tiles_dir_name
                     root_node.meta["num_tiles"] = len(large_image_result.tiles)
                     root_node.meta["grid_rows"] = large_image_result.total_rows
@@ -235,9 +244,9 @@ class ImageParser(BaseParser):
                     root_node.meta["original_height"] = height
 
             else:
-            # Small image: save as PNG if format is not VLM-supported, else as-is
+                # Small image: save as PNG if format is not VLM-supported, else as-is
                 if needs_png_conversion:
-                # SVG was already converted to PNG bytes during loading
+                    # SVG was already converted to PNG bytes during loading
                     if file_path.suffix.lower() == ".svg":
                         image_bytes = converted_png_bytes
                     else:

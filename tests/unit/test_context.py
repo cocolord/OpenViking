@@ -274,6 +274,7 @@ class TestContextMethods:
 
         assert ctx.get_vectorization_text() == "Test abstract"
 
+
 class TestContextToDict:
     """Test Context.to_dict."""
 
