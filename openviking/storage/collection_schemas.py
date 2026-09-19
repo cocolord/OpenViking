@@ -27,11 +27,10 @@ from openviking.storage.errors import (
     EmbeddingConfigurationError,
     EmbeddingRebuildRequiredError,
 )
-from openviking.storage.index_action import IndexAction
+from openviking.storage.index_action import FieldPatch, IndexAction
 from openviking.storage.queuefs.embedding_msg import (
     EmbeddingMsg,
     IncompleteInitialRecordError,
-    apply_field_patch,
     missing_initial_record_fields,
 )
 from openviking.storage.queuefs.named_queue import DequeueHandlerBase
@@ -644,20 +643,18 @@ class TextEmbeddingHandler(DequeueHandlerBase):
             return {"deleted_count": deleted_count}
 
         record_id = embedding_msg.record_ids[0]
+        field_patch = embedding_msg.field_patch
+        assert field_patch is not None
         # UPDATE_FIELDS is a read-modify-write patch.  The exact read happens at
         # execution time so append semantics use the latest stored tags rather
         # than the inventory snapshot that produced the durable plan.
         existing_records = await self._vikingdb.get_strict([record_id], ctx=ctx)
         if existing_records:
             existing = dict(existing_records[0])
-            resolved = apply_field_patch(
-                existing,
-                embedding_msg.update_fields,
-                embedding_msg.field_modes,
-            )
+            resolved = field_patch.resolve(existing)
             changed_fields = {
                 field: resolved.get(field)
-                for field in embedding_msg.update_fields
+                for field in field_patch.values
                 if resolved.get(field) != existing.get(field)
             }
             if not changed_fields:
@@ -671,11 +668,7 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                 )
             return updated_record
 
-        initial_record = apply_field_patch(
-            {**embedding_msg.initial_fields, "id": record_id},
-            embedding_msg.update_fields,
-            embedding_msg.field_modes,
-        )
+        initial_record = field_patch.apply({**field_patch.seed_fields, "id": record_id})
         missing_fields = missing_initial_record_fields(initial_record)
         if missing_fields:
             raise IncompleteInitialRecordError(record_id, missing_fields)
@@ -934,8 +927,9 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                             ctx,
                         )
                     if embedding_msg.action is IndexAction.MERGE:
-                        merge_fields = dict(embedding_msg.update_fields)
-                        merge_modes = dict(embedding_msg.field_modes)
+                        field_patch = embedding_msg.field_patch
+                        merge_fields = dict(field_patch.values) if field_patch is not None else {}
+                        merge_modes = dict(field_patch.modes) if field_patch is not None else {}
                         # Legacy MERGE producers encoded tag intent in context_data
                         # plus _upsert_options. Normalize them to the explicit patch
                         # protocol before the exact read.
@@ -950,15 +944,15 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                         base = (
                             dict(existing_records[0])
                             if existing_records
-                            else dict(embedding_msg.initial_fields)
+                            else dict(field_patch.seed_fields)
+                            if field_patch is not None
+                            else {}
                         )
                         # Fresh content/model outputs win over the stored record;
                         # scalar patches are then interpreted against that latest
                         # exact-get result.
-                        inserted_data = apply_field_patch(
-                            {**base, **inserted_data},
-                            merge_fields,
-                            merge_modes,
+                        inserted_data = FieldPatch(merge_fields, merge_modes).apply(
+                            {**base, **inserted_data}
                         )
                         if not existing_records:
                             missing_fields = missing_initial_record_fields(inserted_data)

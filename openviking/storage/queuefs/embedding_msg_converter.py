@@ -91,7 +91,7 @@ class EmbeddingMsgConverter:
 
         if creator_acl_grant is not None:
             context_data[ACL_CREATOR_GRANT_FIELD] = creator_acl_grant
-        embedding_msg = EmbeddingMsg(
+        embedding_msg = EmbeddingMsg.for_embed(
             message=message,
             context_data=context_data,
             telemetry_id=get_current_telemetry().telemetry_id,

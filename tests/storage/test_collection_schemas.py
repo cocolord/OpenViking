@@ -560,9 +560,7 @@ async def test_embedding_handler_skips_noop_action_without_vector_db_or_embedder
     from openviking.storage.index_action import IndexAction
 
     config = _DummyConfig(_DummyEmbedder())
-    monkeypatch.setattr(
-        "openviking_cli.utils.config.get_openviking_config", lambda: config
-    )
+    monkeypatch.setattr("openviking_cli.utils.config.get_openviking_config", lambda: config)
 
     class _NoopVikingDB:
         is_closing = False
@@ -1024,7 +1022,7 @@ async def test_embedding_handler_truncates_queue_input_before_embed(monkeypatch)
     handler = TextEmbeddingHandler(_CapturingVikingDB())
     payload = _build_queue_payload()
     queue_data = json.loads(payload["data"])
-    queue_data["message"] = " ".join(f"token-{idx}" for idx in range(200))
+    queue_data["payload"]["message"] = " ".join(f"token-{idx}" for idx in range(200))
     payload["data"] = json.dumps(queue_data)
 
     await handler.on_dequeue(payload)
@@ -1102,7 +1100,7 @@ async def test_embedding_handler_preserves_parent_uri_for_backend_upsert_logic(m
     handler = TextEmbeddingHandler(_CapturingVikingDB())
     payload = _build_queue_payload()
     queue_data = json.loads(payload["data"])
-    queue_data["context_data"]["parent_uri"] = "viking://resources"
+    queue_data["payload"]["context_data"]["parent_uri"] = "viking://resources"
     payload["data"] = json.dumps(queue_data)
 
     result = await handler.on_dequeue(payload)
@@ -1110,7 +1108,7 @@ async def test_embedding_handler_preserves_parent_uri_for_backend_upsert_logic(m
     assert result.outcome is ProcessOutcome.SUCCESS
     assert result.error is None
     assert result.value == {
-        **queue_data["context_data"],
+        **queue_data["payload"]["context_data"],
         "id": vector_record_id("default", "viking://resources/sample", 2),
         "vector": [0.1, 0.2],
     }
@@ -1137,7 +1135,7 @@ async def test_embedding_handler_honors_explicit_full_upsert(monkeypatch):
     )
     payload = _build_queue_payload()
     queue_data = json.loads(payload["data"])
-    queue_data["context_data"]["_upsert_options"] = {"partial_update": False}
+    queue_data["payload"]["context_data"]["_upsert_options"] = {"partial_update": False}
     payload["data"] = json.dumps(queue_data)
 
     await TextEmbeddingHandler(_CapturingVikingDB()).on_dequeue(payload)
@@ -1164,7 +1162,7 @@ async def test_embedding_handler_honors_existing_record_id_override(monkeypatch)
     )
     payload = _build_queue_payload_for_account("acct-existing-id")
     queue_data = json.loads(payload["data"])
-    queue_data["context_data"]["_upsert_record_id"] = "id-from-vector-db"
+    queue_data["payload"]["context_data"]["_upsert_record_id"] = "id-from-vector-db"
     payload["data"] = json.dumps(queue_data)
 
     await TextEmbeddingHandler(_CapturingVikingDB()).on_dequeue(payload)
@@ -1196,9 +1194,7 @@ async def test_embedding_handler_generates_id_when_no_existing_override(monkeypa
 
     await TextEmbeddingHandler(_CapturingVikingDB()).on_dequeue(payload)
 
-    assert captured["data"]["id"] == vector_record_id(
-        "acct-new-id", "viking://resources/sample", 2
-    )
+    assert captured["data"]["id"] == vector_record_id("acct-new-id", "viking://resources/sample", 2)
 
 
 @pytest.mark.asyncio
@@ -2022,9 +2018,7 @@ async def test_single_account_backend_partial_update_does_not_fill_omitted_text_
         shared_adapter=_Adapter(),
     )
 
-    result = await backend.update(
-        {"id": "rec-1", "search_tags": ["team=search"]}
-    )
+    result = await backend.update({"id": "rec-1", "search_tags": ["team=search"]})
 
     assert result.ok is True
     assert calls == [

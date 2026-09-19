@@ -28,7 +28,7 @@ from openviking.server.identity import RequestContext
 from openviking.service.task_work_index import TaskWorkRejected
 from openviking.storage.abstract_overview import body_for_preview, embedding_text_for_body
 from openviking.storage.acl import CreatorAclGrant
-from openviking.storage.index_action import IndexAction
+from openviking.storage.index_action import FieldPatch, IndexAction
 from openviking.storage.queuefs import get_queue_manager
 from openviking.storage.queuefs.embedding_msg_converter import EmbeddingMsgConverter
 from openviking.storage.resource_rnfv import NON_PORTABLE_VECTOR_RECORD_FIELDS
@@ -79,34 +79,30 @@ def _apply_scalar_overrides(embedding_msg, overrides: Optional[Dict[str, Any]]) 
 
 def _apply_planned_field_patch(
     embedding_msg,
-    overrides: Optional[Dict[str, Any]],
-    field_modes: Optional[Dict[str, str]],
+    field_patch: FieldPatch | None,
 ) -> None:
     """Attach a MERGE patch without overwriting the exact-get base prematurely."""
 
     if not embedding_msg or embedding_msg.action is not IndexAction.MERGE:
         return
-    patch = {
+    patch_values = {
         field: value
-        for field, value in (overrides or {}).items()
+        for field, value in (field_patch.values if field_patch is not None else {}).items()
         if not field.startswith("_")
         and field not in NON_PORTABLE_VECTOR_RECORD_FIELDS
         and value is not None
     }
-    for field in patch:
+    for field in patch_values:
         embedding_msg.context_data.pop(field, None)
-    embedding_msg.update_fields.update(patch)
-    embedding_msg.field_modes.update(
-        {field: mode for field, mode in (field_modes or {}).items() if field in patch}
+    embedding_msg.payload.field_patch = FieldPatch(
+        values=patch_values,
+        modes=field_patch.modes if field_patch is not None else {},
+        seed_fields={
+            key: value
+            for key, value in embedding_msg.context_data.items()
+            if not key.startswith("_")
+        },
     )
-    if embedding_msg.action is IndexAction.MERGE:
-        embedding_msg.initial_fields.update(
-            {
-                key: value
-                for key, value in embedding_msg.context_data.items()
-                if not key.startswith("_")
-            }
-        )
 
 
 def _apply_ingest_options(
@@ -410,7 +406,7 @@ async def vectorize_directory_meta(
     *,
     content_is_body: bool = False,
     actions: Optional[Dict[int, IndexAction | str]] = None,
-    field_modes: Optional[Dict[int, Dict[str, str]]] = None,
+    field_patches: Optional[Dict[int, FieldPatch]] = None,
 ) -> set[int]:
     """
     Vectorize directory metadata (.abstract.md and .overview.md).
@@ -481,8 +477,7 @@ async def vectorize_directory_meta(
             )
             _apply_planned_field_patch(
                 msg_abstract,
-                level_overrides,
-                (field_modes or {}).get(int(ContextLevel.ABSTRACT.value)),
+                (field_patches or {}).get(int(ContextLevel.ABSTRACT.value)),
             )
             _apply_ingest_options(msg_abstract, ingest_options)
             if msg_abstract:
@@ -543,8 +538,7 @@ async def vectorize_directory_meta(
             )
             _apply_planned_field_patch(
                 msg_overview,
-                level_overrides,
-                (field_modes or {}).get(int(ContextLevel.OVERVIEW.value)),
+                (field_patches or {}).get(int(ContextLevel.OVERVIEW.value)),
             )
             _apply_ingest_options(msg_overview, ingest_options)
             if msg_overview:
@@ -587,7 +581,7 @@ async def vectorize_file(
     use_summary: bool = False,
     preserve_existing_created_at: bool = False,
     scalar_override: Optional[Dict[str, Any]] = None,
-    field_modes: Optional[Dict[str, str]] = None,
+    field_patch: FieldPatch | None = None,
     ingest_options: IngestOptions | None = None,
     creator_acl_grant: CreatorAclGrant | None = None,
     file_md5: Optional[str] = None,
@@ -737,7 +731,7 @@ async def vectorize_file(
 
         _apply_ingest_options(embedding_msg, ingest_options)
         _apply_scalar_overrides(embedding_msg, scalar_override)
-        _apply_planned_field_patch(embedding_msg, scalar_override, field_modes)
+        _apply_planned_field_patch(embedding_msg, field_patch)
         enqueued = await _enqueue_embedding_message(
             embedding_queue,
             embedding_msg,

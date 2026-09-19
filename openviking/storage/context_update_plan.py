@@ -11,7 +11,7 @@ from pathlib import PurePosixPath
 from typing import Any, Mapping
 
 from openviking.concurrency import bounded_map
-from openviking.storage.index_action import IndexAction
+from openviking.storage.index_action import FieldPatch, IndexAction
 from openviking.storage.resource_diff import ContentState, IndexState
 from openviking.storage.resource_rnfv import (
     NON_PORTABLE_VECTOR_RECORD_FIELDS,
@@ -98,10 +98,9 @@ class IndexSlot:
     record_id: str
     existing_fields: Mapping[str, Any] | None = None
     action: IndexAction = IndexAction.NONE
-    fields: Mapping[str, Any] = field(default_factory=dict)
-    update_fields: Mapping[str, Any] = field(default_factory=dict)
-    field_modes: Mapping[str, str] = field(default_factory=dict)
-    fallback_update_fields: bool = False
+    upsert_fields: Mapping[str, Any] = field(default_factory=dict)
+    field_patch: FieldPatch | None = None
+    fallback_to_patch: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "action", IndexAction(self.action))
@@ -112,10 +111,13 @@ class IndexSlot:
         if self.action is IndexAction.UPDATE_FIELDS:
             raise ValueError("semantic index slots only supports none, upsert, or merge")
         _validate_index_fields(self.existing_fields or {})
-        _validate_index_fields(self.fields)
-        _validate_index_fields(self.update_fields)
-        if set(self.field_modes) - (set(self.fields) | set(self.update_fields)):
-            raise ValueError("index slot field modes require matching fields")
+        _validate_index_fields(self.upsert_fields)
+        if self.action is IndexAction.NONE and (self.upsert_fields or self.field_patch):
+            raise ValueError("none index slot cannot carry index mutations")
+        if self.fallback_to_patch and self.field_patch is None:
+            raise ValueError("fallback_to_patch requires a field patch")
+        if self.action is IndexAction.MERGE and self.upsert_fields:
+            raise ValueError("merge index slot uses field_patch, not upsert_fields")
 
     @property
     def abstract(self) -> str:
@@ -123,19 +125,42 @@ class IndexSlot:
 
     def scalar_override(self) -> dict[str, Any]:
         existing = {
-                key: value
-                for key, value in (self.existing_fields or {}).items()
-                if key not in NON_PORTABLE_VECTOR_RECORD_FIELDS and not key.startswith("_")
-            }
+            key: value
+            for key, value in (self.existing_fields or {}).items()
+            if key not in NON_PORTABLE_VECTOR_RECORD_FIELDS and not key.startswith("_")
+        }
         return {
             **({} if self.action is IndexAction.MERGE else existing),
-            **dict(self.fields),
+            **dict(self.upsert_fields),
             "_record_id": self.record_id,
         }
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "IndexSlot":
-        return cls(**dict(data))
+        values = dict(data)
+        if any(
+            name in values
+            for name in ("fields", "update_fields", "field_modes", "fallback_update_fields")
+        ):
+            legacy_fields = dict(values.pop("fields", {}) or {})
+            legacy_update = dict(values.pop("update_fields", {}) or {})
+            legacy_modes = dict(values.pop("field_modes", {}) or {})
+            action = IndexAction(values.get("action", IndexAction.NONE))
+            values.setdefault("upsert_fields", {} if action is IndexAction.MERGE else legacy_fields)
+            patch_values = legacy_update or (legacy_fields if action is IndexAction.MERGE else {})
+            values.setdefault(
+                "field_patch",
+                FieldPatch(patch_values, legacy_modes) if patch_values else None,
+            )
+            legacy_fallback = bool(values.pop("fallback_update_fields", False))
+            # Older planners marked every modified semantic node for fallback,
+            # even when there was no scalar patch to apply. Normalize that
+            # inert state while decoding already queued plans.
+            values["fallback_to_patch"] = legacy_fallback and bool(patch_values)
+        values.setdefault("upsert_fields", {})
+        if isinstance(values.get("field_patch"), Mapping):
+            values["field_patch"] = FieldPatch.from_dict(values["field_patch"])
+        return cls(**values)
 
 
 @dataclass(frozen=True)
@@ -359,11 +384,9 @@ class DirectIndexAction:
     uri: str
     level: int
     record_id: str
-    fields: Mapping[str, Any] = field(default_factory=dict)
-    field_modes: Mapping[str, str] = field(default_factory=dict)
-    initial_fields: Mapping[str, Any] = field(default_factory=dict)
+    upsert_fields: Mapping[str, Any] = field(default_factory=dict)
+    field_patch: FieldPatch | None = None
     md5: str | None = None
-    search_tag_mode: str = "replace"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "action", IndexAction(self.action))
@@ -371,13 +394,47 @@ class DirectIndexAction:
             raise ValueError("invalid direct index action")
         if not self.record_id:
             raise ValueError("direct index action requires a record ID")
-        _validate_index_fields(self.fields)
-        if set(self.field_modes) - set(self.fields):
-            raise ValueError("direct index field modes require matching fields")
-        if self.action is IndexAction.UPDATE_FIELDS and not self.fields:
-            raise ValueError("field update requires fields")
-        if self.search_tag_mode not in {"replace", "append"}:
-            raise ValueError("invalid search tag mode")
+        _validate_index_fields(self.upsert_fields)
+        if self.action is IndexAction.DELETE and (self.upsert_fields or self.field_patch):
+            raise ValueError("delete cannot carry index fields")
+        if self.action is IndexAction.UPDATE_FIELDS and (
+            self.field_patch is None or not self.field_patch.values or self.upsert_fields
+        ):
+            raise ValueError("field update requires only a non-empty field patch")
+        if self.action is IndexAction.UPSERT and self.field_patch is not None:
+            raise ValueError("upsert uses resolved upsert_fields, not a field patch")
+        if self.action is IndexAction.MERGE and self.upsert_fields:
+            raise ValueError("merge uses field_patch, not upsert_fields")
+        if self.action in {IndexAction.DELETE, IndexAction.UPDATE_FIELDS} and self.md5 is not None:
+            raise ValueError(f"{self.action.value} cannot carry a vectorization md5")
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "DirectIndexAction":
+        values = dict(data)
+        if any(
+            name in values
+            for name in ("fields", "field_modes", "initial_fields", "search_tag_mode")
+        ):
+            legacy_fields = dict(values.pop("fields", {}) or {})
+            legacy_modes = dict(values.pop("field_modes", {}) or {})
+            legacy_seed = dict(values.pop("initial_fields", {}) or {})
+            values.pop("search_tag_mode", None)
+            action = IndexAction(values.get("action"))
+            values.setdefault(
+                "upsert_fields", legacy_fields if action is IndexAction.UPSERT else {}
+            )
+            values.setdefault(
+                "field_patch",
+                (
+                    FieldPatch(legacy_fields, legacy_modes, legacy_seed)
+                    if action in {IndexAction.MERGE, IndexAction.UPDATE_FIELDS} and legacy_fields
+                    else None
+                ),
+            )
+        values.setdefault("upsert_fields", {})
+        if isinstance(values.get("field_patch"), Mapping):
+            values["field_patch"] = FieldPatch.from_dict(values["field_patch"])
+        return cls(**values)
 
 
 @dataclass(frozen=True)
@@ -463,8 +520,7 @@ class ContextUpdatePlan:
                 SemanticPlan.from_dict(data["semantic_plan"]) if data.get("semantic_plan") else None
             ),
             direct_index_actions=tuple(
-                DirectIndexAction(**item)
-                for item in data.get("direct_index_actions", ())
+                DirectIndexAction.from_dict(item) for item in data.get("direct_index_actions", ())
             ),
             file_refresh=(
                 FileRefreshIntent(**data["file_refresh"]) if data.get("file_refresh") else None
@@ -513,53 +569,21 @@ def _portable_existing_fields(record: VectorRecordSnapshot | None) -> dict[str, 
     }
 
 
-@dataclass(frozen=True)
-class _ResolvedScalarPatch:
-    desired_fields: Mapping[str, Any] = field(default_factory=dict)
-    patch_fields: Mapping[str, Any] = field(default_factory=dict)
-    field_modes: Mapping[str, str] = field(default_factory=dict)
-
-
-def _resolved_scalar_patch(
-    request: RequestIntent, record: VectorRecordSnapshot | None
-) -> _ResolvedScalarPatch:
-    from openviking.utils.tags import merge_search_tags, normalize_search_tags
-
+def _field_patch(request: RequestIntent, record: VectorRecordSnapshot | None) -> FieldPatch | None:
     existing = dict(record.fields) if record is not None else {}
-    desired_fields: dict[str, Any] = {}
-    patch_fields: dict[str, Any] = {}
-    field_modes: dict[str, str] = {}
+    values: dict[str, Any] = {}
+    modes: dict[str, str] = {}
     for intent in request.scalar_intents:
         if record is not None and record.level not in intent.target_levels:
             continue
         if intent.field != "search_tags":
             continue
-        old = normalize_search_tags(existing.get(intent.field), discard_invalid=True)
-        incoming = normalize_search_tags(intent.value, discard_invalid=True)
-        desired = merge_search_tags(old, incoming) if intent.mode == "append" else incoming
-        # A missing inventory record may still exist in the vector backend.  In
-        # that repair path, partial update needs an explicit empty replacement
-        # to clear existing tags instead of silently preserving them.
-        if record is None or sorted(old) != sorted(desired):
-            desired_fields[intent.field] = desired
-            patch_fields[intent.field] = incoming
-            field_modes[intent.field] = intent.mode
-    return _ResolvedScalarPatch(desired_fields, patch_fields, field_modes)
-
-
-def _resolved_scalar_fields(
-    request: RequestIntent, record: VectorRecordSnapshot | None
-) -> dict[str, Any]:
-    """Compatibility helper returning full desired values for UPSERT payloads."""
-
-    return dict(_resolved_scalar_patch(request, record).desired_fields)
-
-
-def _search_tag_mode(request: RequestIntent) -> str:
-    return next(
-        (intent.mode for intent in request.scalar_intents if intent.field == "search_tags"),
-        "replace",
-    )
+        candidate = FieldPatch({intent.field: intent.value}, {intent.field: intent.mode})
+        desired = candidate.resolve(existing).get(intent.field)
+        if record is None or existing.get(intent.field) != desired:
+            values[intent.field] = intent.value
+            modes[intent.field] = intent.mode
+    return FieldPatch(values, modes) if values else None
 
 
 def _semantic_closure(
@@ -716,9 +740,7 @@ async def hydrate_context_plan_records(
                 continue
             required_scalars[record_id] = {"uri": record.uri, "level": record.level}
         if required_scalars:
-            merge_hydrated(
-                await vikingdb.hydrate_incremental_records(required_scalars, ctx=ctx)
-            )
+            merge_hydrated(await vikingdb.hydrate_incremental_records(required_scalars, ctx=ctx))
 
     return result, (active, membership_changed, retained)
 
@@ -748,7 +770,9 @@ def build_context_update_plan(
     come from the current execution.
     """
     root_uri = root_uri.rstrip("/")
-    records_by_path, duplicate_records = _records_by_path(records) if request.vectorize else ({}, ())
+    records_by_path, duplicate_records = (
+        _records_by_path(records) if request.vectorize else ({}, ())
+    )
     active, membership_changed, retained = closure or _semantic_closure(
         diff,
         new_kinds,
@@ -816,18 +840,13 @@ def build_context_update_plan(
             )
         ):
             record = existing.get(2)
-            scalar_patch = (
-                _resolved_scalar_patch(request, record)
-                if request.vectorize
-                else _ResolvedScalarPatch()
-            )
+            field_patch = _field_patch(request, record) if request.vectorize else None
             index_action = (
                 IndexAction.MERGE
                 if (
                     record is None
                     and entry.old_kind == kind
-                    and IndexState(entry.index_state)
-                    in {IndexState.MISSING, IndexState.PARTIAL}
+                    and IndexState(entry.index_state) in {IndexState.MISSING, IndexState.PARTIAL}
                 )
                 else IndexAction.UPSERT
             )
@@ -839,43 +858,28 @@ def build_context_update_plan(
                     record.record_id
                     if record is not None
                     else vector_record_id(account_id, _uri(root_uri, path), 2),
-                    fields={
-                        **(_portable_existing_fields(record) or {}),
-                        **(
-                            scalar_patch.patch_fields
-                            if index_action is IndexAction.MERGE
-                            else scalar_patch.desired_fields
-                        ),
-                    },
-                    field_modes=(
-                        scalar_patch.field_modes
-                        if index_action is IndexAction.MERGE
-                        else {}
-                    ),
-                    initial_fields=(
+                    upsert_fields=(
                         {
-                            "uri": _uri(root_uri, path),
-                            "account_id": account_id,
-                            "level": 2,
-                            **scalar_patch.desired_fields,
+                            **(_portable_existing_fields(record) or {}),
+                            **(
+                                field_patch.resolve(record.fields if record else {})
+                                if field_patch
+                                else {}
+                            ),
                         }
-                        if index_action is IndexAction.MERGE
+                        if index_action is IndexAction.UPSERT
                         else {}
                     ),
+                    field_patch=field_patch if index_action is IndexAction.MERGE else None,
                     md5=entry.md5,
-                    search_tag_mode=_search_tag_mode(request),
                 )
             )
 
     scheduled_direct_ids = {action.record_id for action in direct_actions}
     for path, levels in records_by_path.items():
         for record in levels.values():
-            scalar_patch = (
-                _resolved_scalar_patch(request, record)
-                if request.vectorize
-                else _ResolvedScalarPatch()
-            )
-            fields = dict(scalar_patch.patch_fields)
+            field_patch = _field_patch(request, record) if request.vectorize else None
+            patch_values = dict(field_patch.values) if field_patch is not None else {}
             diff_entry = diff.entries.get(path)
             if (
                 record.level == 2
@@ -884,28 +888,30 @@ def build_context_update_plan(
                 and diff_entry.md5
                 and not str(record.fields.get("md5") or "")
             ):
-                fields["md5"] = diff_entry.md5
+                patch_values["md5"] = diff_entry.md5
+                field_patch = FieldPatch(
+                    patch_values,
+                    field_patch.modes if field_patch is not None else {},
+                )
             if (
-                fields
+                field_patch is not None
                 and record.record_id not in scheduled_direct_ids
                 and (path not in active or not request.vectorize)
             ):
+                seed = {
+                    "uri": record.uri,
+                    "account_id": account_id,
+                    "level": record.level,
+                    **(_portable_existing_fields(record) or {}),
+                    **field_patch.resolve(record.fields),
+                }
                 direct_actions.append(
                     DirectIndexAction(
                         IndexAction.UPDATE_FIELDS,
                         record.uri,
                         record.level,
                         record.record_id,
-                        fields=fields,
-                        field_modes=scalar_patch.field_modes,
-                        initial_fields={
-                            "uri": record.uri,
-                            "account_id": account_id,
-                            "level": record.level,
-                            **(_portable_existing_fields(record) or {}),
-                            **scalar_patch.desired_fields,
-                        },
-                        search_tag_mode=_search_tag_mode(request),
+                        field_patch=field_patch.with_seed(seed),
                     )
                 )
                 scheduled_direct_ids.add(record.record_id)
@@ -939,11 +945,7 @@ def build_context_update_plan(
                 if record is not None
                 else vector_record_id(account_id, _uri(root_uri, path), level)
             )
-            scalar_patch = (
-                _resolved_scalar_patch(request, record)
-                if request.vectorize
-                else _ResolvedScalarPatch()
-            )
+            field_patch = _field_patch(request, record) if request.vectorize else None
             index_action = (
                 IndexAction.MERGE
                 if (
@@ -961,21 +963,18 @@ def build_context_update_plan(
                     record_id,
                     _portable_existing_fields(record),
                     action=(index_action if request.vectorize else IndexAction.NONE),
-                    fields=(
-                        scalar_patch.patch_fields
-                        if index_action is IndexAction.MERGE
-                        else scalar_patch.desired_fields
+                    upsert_fields=(
+                        field_patch.resolve(record.fields if record else {})
+                        if index_action is IndexAction.UPSERT and field_patch is not None
+                        else {}
                     ),
-                    update_fields=scalar_patch.patch_fields,
+                    field_patch=field_patch,
                     # Keep the original patch mode even for a resolved UPSERT.
                     # If semantic output is unchanged, the executor falls back
                     # to UPDATE_FIELDS and must still interpret append against
                     # the execution-time exact-get record. The normal UPSERT
                     # path deliberately does not forward these modes.
-                    field_modes=scalar_patch.field_modes,
-                    fallback_update_fields=(
-                        state is ContentState.MODIFIED or bool(scalar_patch.patch_fields)
-                    ),
+                    fallback_to_patch=field_patch is not None,
                 )
             )
         semantic_entries.append(
@@ -1008,9 +1007,7 @@ def build_context_update_plan(
                 else FileVectorSource.CONTENT
             ),
             ingest_options=(
-                IngestOptions.from_value(ingest_options)
-                if request.vectorize
-                else IngestOptions()
+                IngestOptions.from_value(ingest_options) if request.vectorize else IngestOptions()
             ),
             source_metadata=source_metadata,
         )
@@ -1083,7 +1080,9 @@ async def build_context_update_plan_from_snapshot(
         vikingdb=vikingdb,
         ctx=ctx,
         request=snapshot.request,
-        repair_indexes=(snapshot.request.vectorize and snapshot.request.processing_mode != "vectors_only"),
+        repair_indexes=(
+            snapshot.request.vectorize and snapshot.request.processing_mode != "vectors_only"
+        ),
     )
     plan = build_context_update_plan(
         root_uri=snapshot.request.target_uri,
@@ -1103,19 +1102,15 @@ async def build_context_update_plan_from_snapshot(
         return diff, plan
 
     root_entry = diff.entries[""]
-    needs_refresh = (
-        ContentState(root_entry.content_state)
-        in {
-            ContentState.ADDED,
-            ContentState.RESTORE,
-            ContentState.MODIFIED,
-            ContentState.REPLACE_KIND,
-        }
-        or (
-            snapshot.request.vectorize
-            and IndexState(root_entry.index_state)
-            in {IndexState.MISSING, IndexState.PARTIAL, IndexState.STALE, IndexState.LEVEL_CONFLICT}
-        )
+    needs_refresh = ContentState(root_entry.content_state) in {
+        ContentState.ADDED,
+        ContentState.RESTORE,
+        ContentState.MODIFIED,
+        ContentState.REPLACE_KIND,
+    } or (
+        snapshot.request.vectorize
+        and IndexState(root_entry.index_state)
+        in {IndexState.MISSING, IndexState.PARTIAL, IndexState.STALE, IndexState.LEVEL_CONFLICT}
     )
     return diff, ContextUpdatePlan(
         root_uri=plan.root_uri,
@@ -1139,6 +1134,7 @@ async def execute_content_tree_actions(
     concurrency: int | None = None,
 ) -> None:
     """Commit planned content mutations before any asynchronous work."""
+
     async def run_action(action: ContentTreeAction, operation: Any) -> None:
         try:
             await operation
@@ -1180,6 +1176,7 @@ async def execute_content_tree_actions(
         concurrency = int(
             get_openviking_config().queue_workers.add_resource.file_operation_concurrency
         )
+
     async def write(action: ContentTreeAction) -> None:
         async def read_and_write() -> None:
             data = await store.read_bytes(artifact_ref, action.artifact_path)

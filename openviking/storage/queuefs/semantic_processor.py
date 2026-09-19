@@ -47,6 +47,7 @@ from openviking.storage.abstract_overview import (
 )
 from openviking.storage.acl import CreatorAclGrant
 from openviking.storage.errors import LockAcquisitionError
+from openviking.storage.index_action import FieldPatch
 from openviking.storage.queuefs.named_queue import DequeueHandlerBase
 from openviking.storage.queuefs.process_result import ProcessResult
 from openviking.storage.queuefs.semantic_executor import SemanticTreeExecutor, SemanticTreeStats
@@ -1849,7 +1850,7 @@ class SemanticProcessor(DequeueHandlerBase):
         skill_source_path: str = "",
         scalar_overrides: Optional[Dict[int, Dict[str, Any]]] = None,
         actions: Optional[Dict[int, str]] = None,
-        field_modes: Optional[Dict[int, Dict[str, str]]] = None,
+        field_patches: Optional[Dict[int, FieldPatch]] = None,
         include_abstract: bool = True,
         include_overview: bool = True,
     ) -> set[int]:
@@ -1881,7 +1882,7 @@ class SemanticProcessor(DequeueHandlerBase):
             **({"meta": skill_meta} if skill_meta is not None else {}),
             scalar_overrides=scalar_overrides,
             actions=actions,
-            field_modes=field_modes,
+            field_patches=field_patches,
             include_abstract=include_abstract,
             include_overview=include_overview,
         )
@@ -1907,20 +1908,17 @@ class SemanticProcessor(DequeueHandlerBase):
         record_id: str,
         uri: str,
         level: int,
-        fields: Dict[str, Any],
-        field_modes: Optional[Dict[str, str]] = None,
-        initial_fields: Optional[Dict[str, Any]] = None,
+        field_patch: FieldPatch,
         ctx: RequestContext,
     ) -> bool:
         from openviking.storage.queuefs import get_queue_manager
         from openviking.storage.queuefs.embedding_msg import EmbeddingMsg
         from openviking.telemetry import get_current_telemetry
         from openviking.utils.embedding_utils import _enqueue_embedding_message
+
         embedding_msg = EmbeddingMsg.for_update_fields(
             record_id=record_id,
-            fields=fields,
-            field_modes=field_modes,
-            initial_fields=initial_fields,
+            field_patch=field_patch,
             context_data={
                 "uri": uri,
                 "level": level,
@@ -1951,7 +1949,7 @@ class SemanticProcessor(DequeueHandlerBase):
         file_md5: Optional[str] = None,
         file_content: Optional[bytes] = None,
         scalar_override: Optional[Dict[str, Any]] = None,
-        field_modes: Optional[Dict[str, str]] = None,
+        field_patch: FieldPatch | None = None,
         action: str = "merge",
     ) -> bool:
         """Vectorize a single file using its content or summary."""
@@ -1971,6 +1969,6 @@ class SemanticProcessor(DequeueHandlerBase):
             file_md5=file_md5,
             file_content=file_content,
             scalar_override=scalar_override,
-            field_modes=field_modes,
+            field_patch=field_patch,
             action=action,
         )

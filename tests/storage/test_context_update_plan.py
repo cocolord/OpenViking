@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock
 import pytest
 
 from openviking.storage import resource_diff
+from openviking.storage.index_action import FieldPatch
 
 
 def test_context_plan_has_explicit_actions_and_compact_semantic_roundtrip():
@@ -33,7 +34,7 @@ def test_context_plan_has_explicit_actions_and_compact_semantic_roundtrip():
                 record_id="external-id",
                 existing_fields={"abstract": "old"},
                 action="upsert",
-                fields={"search_tags": ["new"]},
+                upsert_fields={"search_tags": ["new"]},
             ),
         ),
     )
@@ -63,6 +64,72 @@ def test_context_plan_has_explicit_actions_and_compact_semantic_roundtrip():
     assert "previous_abstracts" not in node
     assert "uri" not in node["index_slots"][0]
     assert node["index_slots"][0]["record_id"] == "external-id"
+
+
+def test_index_actions_reject_unconsumed_field_patch_state():
+    from openviking.storage.context_update_plan import DirectIndexAction, IndexSlot
+
+    patch = FieldPatch({"search_tags": ["scope=new"]})
+    with pytest.raises(ValueError, match="upsert uses resolved upsert_fields"):
+        DirectIndexAction(
+            "upsert",
+            "viking://resources/repo/a.py",
+            2,
+            "a-l2",
+            field_patch=patch,
+        )
+    with pytest.raises(ValueError, match="fallback_to_patch requires"):
+        IndexSlot(2, "a-l2", action="upsert", fallback_to_patch=True)
+
+
+def test_context_plan_reads_legacy_flat_patch_fields():
+    from openviking.storage.context_update_plan import ContextUpdatePlan
+
+    restored = ContextUpdatePlan.from_dict(
+        {
+            "root_uri": "viking://resources/repo",
+            "context_type": "resource",
+            "direct_index_actions": [
+                {
+                    "action": "update_fields",
+                    "uri": "viking://resources/repo/a.py",
+                    "level": 2,
+                    "record_id": "a-l2",
+                    "fields": {"search_tags": ["scope=new"]},
+                    "field_modes": {"search_tags": "append"},
+                    "initial_fields": {"vector": [0.1, 0.2]},
+                    "search_tag_mode": "append",
+                }
+            ],
+        }
+    )
+
+    action = restored.direct_index_actions[0]
+    assert action.upsert_fields == {}
+    assert action.field_patch == FieldPatch(
+        {"search_tags": ["scope=new"]},
+        {"search_tags": "append"},
+        {"vector": [0.1, 0.2]},
+    )
+
+
+def test_legacy_semantic_slot_drops_inert_fallback_without_patch():
+    from openviking.storage.context_update_plan import IndexSlot
+
+    slot = IndexSlot.from_dict(
+        {
+            "level": 2,
+            "record_id": "a-l2",
+            "action": "upsert",
+            "fields": {},
+            "update_fields": {},
+            "field_modes": {},
+            "fallback_update_fields": True,
+        }
+    )
+
+    assert slot.field_patch is None
+    assert slot.fallback_to_patch is False
 
 
 def test_after_content_commit_keeps_only_derived_actions():
@@ -160,9 +227,7 @@ def test_semantic_plan_rejects_disconnected_or_mistyped_actions():
                         "file",
                         "modified",
                         "generate",
-                        index_slots=(
-                            IndexSlot(2, "a-l2", action="upsert"),
-                        ),
+                        index_slots=(IndexSlot(2, "a-l2", action="upsert"),),
                     ),
                 )
             ),
@@ -190,9 +255,7 @@ def test_semantic_plan_rejects_disconnected_or_mistyped_actions():
                         "modified",
                         "generate",
                         md5="new",
-                        index_slots=(
-                            IndexSlot(2, "a-l2", action="upsert"),
-                        ),
+                        index_slots=(IndexSlot(2, "a-l2", action="upsert"),),
                     ),
                 )
             ),
@@ -264,9 +327,7 @@ def test_semantic_plan_rejects_missing_higher_ancestor_independent_of_entry_orde
                         "modified",
                         "generate",
                         md5="new",
-                        index_slots=(
-                            IndexSlot(2, "c-l2", action="upsert"),
-                        ),
+                        index_slots=(IndexSlot(2, "c-l2", action="upsert"),),
                     ),
                     SemanticTreeEntry("a/b", "directory", "unchanged", "aggregate"),
                 )
@@ -428,12 +489,8 @@ async def test_resolver_marks_removed_content_vectors_as_obsolete():
 
     root = "viking://resources/repo"
     records = {
-        "removed-l2": VectorRecordSnapshot(
-            "removed-l2", f"{root}/removed.md", "removed.md", 2
-        ),
-        "orphan-l2": VectorRecordSnapshot(
-            "orphan-l2", f"{root}/orphan.md", "orphan.md", 2
-        ),
+        "removed-l2": VectorRecordSnapshot("removed-l2", f"{root}/removed.md", "removed.md", 2),
+        "orphan-l2": VectorRecordSnapshot("orphan-l2", f"{root}/orphan.md", "orphan.md", 2),
     }
     snapshot = RNFVSnapshot(
         RequestIntent(root, "semantic_and_vectors"),
@@ -470,9 +527,7 @@ async def test_resolver_log_separates_files_directories_and_logical_root(monkeyp
     records = {
         "root-l0": VectorRecordSnapshot("root-l0", root, "", 0),
         "root-l1": VectorRecordSnapshot("root-l1", root, "", 1),
-        "file-l2": VectorRecordSnapshot(
-            "file-l2", f"{root}/a.py", "a.py", 2, {"md5": "same"}
-        ),
+        "file-l2": VectorRecordSnapshot("file-l2", f"{root}/a.py", "a.py", 2, {"md5": "same"}),
         "sub-l0": VectorRecordSnapshot("sub-l0", f"{root}/sub", "sub", 0),
         "sub-l1": VectorRecordSnapshot("sub-l1", f"{root}/sub", "sub", 1),
     }
@@ -794,8 +849,7 @@ async def test_vectorize_disabled_plan_ignores_stale_vectors_and_compares_formal
 
     assert diff.entries["a.txt"].content_state is ContentState.MODIFIED
     assert [
-        (action.operation.value, action.relative_path)
-        for action in plan.content_tree_actions
+        (action.operation.value, action.relative_path) for action in plan.content_tree_actions
     ] == [("upsert", "a.txt")]
     assert plan.semantic_plan is None
     assert plan.direct_index_actions == ()
@@ -825,11 +879,7 @@ async def test_vectorize_enabled_keeps_md5_noop_without_formal_content_reads():
         NewArtifactSnapshot({"a.txt": NewEntry(md5="same")}),
         FormalTreeSnapshot({"a.txt": FormalEntry()}),
         VectorIndexSnapshot(
-            {
-                "a-l2": VectorRecordSnapshot(
-                    "a-l2", root + "/a.txt", "a.txt", 2, {"md5": "same"}
-                )
-            },
+            {"a-l2": VectorRecordSnapshot("a-l2", root + "/a.txt", "a.txt", 2, {"md5": "same"})},
             frozenset({"id", "uri", "level", "md5"}),
         ),
     )
@@ -920,7 +970,7 @@ async def test_vectorize_disabled_semantic_plan_regenerates_without_vector_hydra
         for slot in entry.index_slots
     )
     assert all(
-        not slot.fields
+        not slot.upsert_fields and slot.field_patch is None
         for entry in plan.semantic_plan.tree.entries
         for slot in entry.index_slots
     )
@@ -1024,10 +1074,12 @@ def test_builder_keeps_append_intent_as_fallback_for_semantic_upsert():
     slot = next(
         e for e in plan.semantic_plan.tree.entries if e.relative_path == "a.py"
     ).index_slots[0]
-    assert slot.fields == {"search_tags": ["scope=old", "owner=new"]}
-    assert slot.update_fields == {"search_tags": ["owner=new"]}
-    assert slot.field_modes == {"search_tags": "append"}
-    assert slot.fallback_update_fields is True
+    assert slot.upsert_fields == {"search_tags": ["scope=old", "owner=new"]}
+    assert slot.field_patch == FieldPatch(
+        {"search_tags": ["owner=new"]},
+        {"search_tags": "append"},
+    )
+    assert slot.fallback_to_patch is True
     assert plan.semantic_plan.ingest_options.search_tags is None
 
 
@@ -1132,8 +1184,8 @@ def test_vectors_only_upsert_preserves_existing_custom_scalars():
     action = plan.direct_index_actions[0]
     assert action.action.value == "upsert"
     assert action.record_id == "external-id"
-    assert action.fields["business_priority"] == 7
-    assert "vector" not in action.fields
+    assert action.upsert_fields["business_priority"] == 7
+    assert "vector" not in action.upsert_fields
 
 
 def test_vectors_only_restore_with_complete_index_does_not_reembed():
@@ -1400,8 +1452,11 @@ def test_vectors_only_partial_repair_preserves_explicit_replace_empty_tags():
     )
 
     action = plan.direct_index_actions[0]
-    assert action.fields["search_tags"] == []
-    assert action.search_tag_mode == "replace"
+    assert action.action.value == "merge"
+    assert action.field_patch == FieldPatch(
+        {"search_tags": []},
+        {"search_tags": "replace"},
+    )
 
 
 def test_builder_backfills_missing_md5_and_merges_scalar_update():
@@ -1461,7 +1516,7 @@ def test_builder_backfills_missing_md5_and_merges_scalar_update():
     action = plan.direct_index_actions[0]
     assert action.record_id == "a-l2"
     assert action.action.value == "update_fields"
-    assert action.fields == {
+    assert action.field_patch.values == {
         "md5": "resolved-md5",
         "search_tags": ["scope=new"],
     }
@@ -1625,7 +1680,7 @@ async def test_snapshot_builder_hydrates_scalars_for_vectors_only_upsert():
 
     vikingdb.hydrate_incremental_records.assert_awaited_once()
     assert plan.direct_index_actions[0].record_id == record.record_id
-    assert plan.direct_index_actions[0].fields["business_priority"] == 7
+    assert plan.direct_index_actions[0].upsert_fields["business_priority"] == 7
 
 
 @pytest.mark.asyncio
@@ -1643,9 +1698,7 @@ async def test_file_root_plan_uses_file_refresh_without_directory_semantic_tree(
     )
 
     root = "viking://resources/report.md"
-    record = VectorRecordSnapshot(
-        "report-l2", root, "", 2, {"md5": "old", "abstract": "old"}
-    )
+    record = VectorRecordSnapshot("report-l2", root, "", 2, {"md5": "old", "abstract": "old"})
     snapshot = RNFVSnapshot(
         RequestIntent(root, "semantic_and_vectors"),
         NewArtifactSnapshot({"": NewEntry(md5="new")}),
@@ -1653,9 +1706,7 @@ async def test_file_root_plan_uses_file_refresh_without_directory_semantic_tree(
         VectorIndexSnapshot({"report-l2": record}, frozenset({"id", "uri", "level", "md5"})),
     )
     vikingdb = AsyncMock()
-    vikingdb.hydrate_incremental_records.return_value = {
-        "report-l2": {"abstract": "old"}
-    }
+    vikingdb.hydrate_incremental_records.return_value = {"report-l2": {"abstract": "old"}}
 
     _, plan = await build_context_update_plan_from_snapshot(
         snapshot=snapshot,
@@ -1672,9 +1723,9 @@ async def test_file_root_plan_uses_file_refresh_without_directory_semantic_tree(
         root_is_file=True,
     )
 
-    assert [(action.operation.value, action.relative_path) for action in plan.content_tree_actions] == [
-        ("upsert", "")
-    ]
+    assert [
+        (action.operation.value, action.relative_path) for action in plan.content_tree_actions
+    ] == [("upsert", "")]
     assert plan.semantic_plan is None
     assert plan.file_refresh is not None
     assert plan.file_refresh.md5 == "new"
@@ -1748,12 +1799,8 @@ async def test_hydration_reads_summaries_before_full_scalars_for_active_records(
 
     root = "viking://resources/repo"
     inventory = {
-        "changed": VectorRecordSnapshot(
-            "changed", f"{root}/a.py", "a.py", 2, {"md5": "old"}
-        ),
-        "sibling": VectorRecordSnapshot(
-            "sibling", f"{root}/b.py", "b.py", 2, {"md5": "same"}
-        ),
+        "changed": VectorRecordSnapshot("changed", f"{root}/a.py", "a.py", 2, {"md5": "old"}),
+        "sibling": VectorRecordSnapshot("sibling", f"{root}/b.py", "b.py", 2, {"md5": "same"}),
     }
     vikingdb = AsyncMock()
     vikingdb.hydrate_incremental_records.side_effect = [
@@ -1852,9 +1899,7 @@ async def test_content_executor_uploads_files_with_bounded_concurrency():
         for index in range(8)
     )
     create_task = asyncio.create_task
-    with patch.object(
-        concurrency_utils.asyncio, "create_task", wraps=create_task
-    ) as created:
+    with patch.object(concurrency_utils.asyncio, "create_task", wraps=create_task) as created:
         await execute_content_tree_actions(
             actions,
             store=Store(),
@@ -1885,9 +1930,7 @@ async def test_bounded_map_preserves_order_and_processes_all_items():
         return value * 2
 
     create_task = asyncio.create_task
-    with patch.object(
-        concurrency_utils.asyncio, "create_task", wraps=create_task
-    ) as created:
+    with patch.object(concurrency_utils.asyncio, "create_task", wraps=create_task) as created:
         result = await concurrency_utils.bounded_map(range(100), work, concurrency=3)
 
     assert started == 100
@@ -1994,18 +2037,21 @@ async def test_resource_processor_dispatches_direct_index_actions_without_semant
                 "viking://resources/repo/b.py",
                 2,
                 "id-b",
-                fields={"search_tags": ["scope=new"]},
-                field_modes={"search_tags": "replace"},
+                field_patch=FieldPatch(
+                    {"search_tags": ["scope=new"]},
+                    {"search_tags": "replace"},
+                ),
             ),
             DirectIndexAction(
                 "merge",
                 "viking://resources/repo/c.py",
                 2,
                 "id-c",
-                fields={"search_tags": ["scope=new"]},
-                field_modes={"search_tags": "append"},
+                field_patch=FieldPatch(
+                    {"search_tags": ["scope=new"]},
+                    {"search_tags": "append"},
+                ),
                 md5="new-md5",
-                search_tag_mode="append",
             ),
         ),
         ctx=ctx,
@@ -2017,9 +2063,12 @@ async def test_resource_processor_dispatches_direct_index_actions_without_semant
         "viking://resources/repo/c.py",
         ctx=ctx,
         file_md5="new-md5",
-        scalar_override={"search_tags": ["scope=new"], "_record_id": "id-c"},
+        scalar_override={"_record_id": "id-c"},
         action="merge",
-        field_modes={"search_tags": "append"},
+        field_patch=FieldPatch(
+            {"search_tags": ["scope=new"]},
+            {"search_tags": "append"},
+        ),
     )
 
 
@@ -2322,10 +2371,12 @@ async def test_directory_output_unchanged_still_applies_planned_scalar_fields(mo
                             "root-l0",
                             {"abstract": "abstract"},
                             action="upsert",
-                            fields={"search_tags": ["scope=new"]},
-                            update_fields={"search_tags": ["scope=new"]},
-                            field_modes={"search_tags": "append"},
-                            fallback_update_fields=True,
+                            upsert_fields={"search_tags": ["scope=new"]},
+                            field_patch=FieldPatch(
+                                {"search_tags": ["scope=new"]},
+                                {"search_tags": "append"},
+                            ),
+                            fallback_to_patch=True,
                         ),
                         IndexSlot(
                             1,
@@ -2358,14 +2409,16 @@ async def test_directory_output_unchanged_still_applies_planned_scalar_fields(mo
         record_id="root-l0",
         uri=root,
         level=0,
-        fields={"search_tags": ["scope=new"]},
-        field_modes={"search_tags": "append"},
-        initial_fields={
-            "abstract": "abstract",
-            "uri": root,
-            "level": 0,
-            "account_id": "acc",
-        },
+        field_patch=FieldPatch(
+            {"search_tags": ["scope=new"]},
+            {"search_tags": "append"},
+            {
+                "abstract": "abstract",
+                "uri": root,
+                "level": 0,
+                "account_id": "acc",
+            },
+        ),
         ctx=executor._ctx,
     )
 
@@ -2432,7 +2485,6 @@ async def test_code_summary_unchanged_still_reembeds_after_content_change(monkey
                             "a-l2",
                             {"abstract": "same"},
                             action="upsert",
-                            fallback_update_fields=True,
                         ),
                     ),
                 ),
@@ -2558,7 +2610,7 @@ async def test_direct_only_plan_skips_semantic_queue(monkeypatch):
         root + "/a.py",
         2,
         "a-l2",
-        fields={"search_tags": ["scope=new"]},
+        field_patch=FieldPatch({"search_tags": ["scope=new"]}),
     )
 
     await processor.finish_prepared_resource(
@@ -2579,7 +2631,7 @@ async def test_direct_only_plan_skips_semantic_queue(monkeypatch):
                         "uri": action.uri,
                         "level": action.level,
                         "record_id": action.record_id,
-                        "fields": dict(action.fields),
+                        "field_patch": action.field_patch.to_dict(),
                         "md5": action.md5,
                     }
                 ],

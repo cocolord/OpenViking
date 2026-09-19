@@ -28,6 +28,7 @@ from openviking.server.identity import RequestContext
 from openviking.storage.acl import AclAction, CreatorAclGrant
 from openviking.storage.errors import LockAcquisitionError
 from openviking.storage.expr import And, Eq, PathScope
+from openviking.storage.index_action import FieldPatch
 from openviking.storage.internal_names import STORAGE_INTERNAL_ENTRY_NAMES
 from openviking.storage.queuefs.semantic_processor import SemanticProcessor
 from openviking.storage.resource_rnfv import RequestIntent
@@ -355,8 +356,7 @@ class ResourceProcessor:
                 account_id=ctx.account_id,
             )
             logger.exception(
-                "[ContentTreeCommitFailed] %s target=%s artifact_backend=%s "
-                "actions=%d error=%s",
+                "[ContentTreeCommitFailed] %s target=%s artifact_backend=%s actions=%d error=%s",
                 log_correlation(),
                 root_uri,
                 artifact_backend,
@@ -379,7 +379,10 @@ class ResourceProcessor:
             sum(action.new_kind == "file" for action in context_plan.content_tree_actions),
             sum(action.new_kind == "directory" for action in context_plan.content_tree_actions),
             sum(action.operation.value == "delete" for action in context_plan.content_tree_actions),
-            sum(action.operation.value == "replace_kind" for action in context_plan.content_tree_actions),
+            sum(
+                action.operation.value == "replace_kind"
+                for action in context_plan.content_tree_actions
+            ),
             (time.perf_counter() - content_commit_started_at) * 1000.0,
         )
         self._log_context_update_plan(context_plan)
@@ -868,7 +871,9 @@ class ResourceProcessor:
                         ingest_options=ingest_options,
                         is_code_repo=parse_result.source_format == "repository",
                         source_metadata=self._semantic_source_metadata(
-                            path=path, prepared_resource=prepared_resource, source_format=parse_result.source_format
+                            path=path,
+                            prepared_resource=prepared_resource,
+                            source_format=parse_result.source_format,
                         ),
                     )
                     incremental_noop = target_preexisting and context_update_plan.is_noop()
@@ -1057,19 +1062,19 @@ class ResourceProcessor:
                 if should_summarize:
                     try:
                         summary_result = await self._get_summarizer().summarize(
-                        resource_uris=[root_uri],
-                        ctx=ctx,
-                        skip_vectorization=not build_index,
-                        lock=resource_lock,
-                        temp_uris=[temp_uri],
-                        is_code_repo=bool(prepared.get("is_code_repo")),
-                        target_preexisting=target_preexisting,
-                        ingest_options=ingest_options,
-                        semantic_source=semantic_source,
-                        generation_trigger="resource_ingest",
-                        semantic_plan=semantic_plan,
-                        **kwargs,
-                    )
+                            resource_uris=[root_uri],
+                            ctx=ctx,
+                            skip_vectorization=not build_index,
+                            lock=resource_lock,
+                            temp_uris=[temp_uri],
+                            is_code_repo=bool(prepared.get("is_code_repo")),
+                            target_preexisting=target_preexisting,
+                            ingest_options=ingest_options,
+                            semantic_source=semantic_source,
+                            generation_trigger="resource_ingest",
+                            semantic_plan=semantic_plan,
+                            **kwargs,
+                        )
                         if semantic_plan is not None and summary_result.get("status") != "success":
                             raise RuntimeError(
                                 str(summary_result.get("message") or "semantic plan enqueue failed")
@@ -1130,8 +1135,10 @@ class ResourceProcessor:
                         )
                     if temp_dir_path:
                         await viking_fs.delete_temp(temp_dir_path, ctx=ctx)
-                if context_update_plan is None and vectors_only and (
-                    sync_deleted_files or sync_deleted_dirs
+                if (
+                    context_update_plan is None
+                    and vectors_only
+                    and (sync_deleted_files or sync_deleted_dirs)
                 ):
                     await self._delete_removed_resource_vectors(
                         files=sync_deleted_files, dirs=sync_deleted_dirs, ctx=ctx
@@ -1249,9 +1256,7 @@ class ResourceProcessor:
         embedding_queue = queue_manager.get_queue(queue_manager.EMBEDDING, allow_create=True)
         telemetry_id = get_current_telemetry().telemetry_id
         action_counts = Counter(action.action.value for action in actions)
-        delete_ids = [
-            action.record_id for action in actions if action.action == IndexAction.DELETE
-        ]
+        delete_ids = [action.record_id for action in actions if action.action == IndexAction.DELETE]
         if delete_ids:
             message = EmbeddingMsg.for_delete(
                 record_ids=delete_ids,
@@ -1275,19 +1280,20 @@ class ResourceProcessor:
                     action.uri,
                     ctx=ctx,
                     file_md5=action.md5,
-                    scalar_override={**dict(action.fields), "_record_id": action.record_id},
+                    scalar_override={
+                        **dict(action.upsert_fields),
+                        "_record_id": action.record_id,
+                    },
                     action=action.action.value,
-                    field_modes=dict(action.field_modes),
+                    field_patch=action.field_patch,
                 )
                 continue
             if action.action != IndexAction.UPDATE_FIELDS:
                 continue
-            fields = dict(action.fields)
+            assert action.field_patch is not None
             message = EmbeddingMsg.for_update_fields(
                 record_id=action.record_id,
-                fields=fields,
-                field_modes=dict(action.field_modes),
-                initial_fields=dict(action.initial_fields),
+                field_patch=action.field_patch,
                 context_data={
                     "uri": action.uri,
                     "level": action.level,
@@ -1434,7 +1440,7 @@ class ResourceProcessor:
         creator_acl_grant: CreatorAclGrant | None = None,
         file_md5: str | None = None,
         scalar_override: Optional[Dict[str, Any]] = None,
-        field_modes: Optional[Dict[str, str]] = None,
+        field_patch: FieldPatch | None = None,
         action: str = "merge",
     ) -> None:
         parent = VikingURI(file_uri).parent
@@ -1451,7 +1457,7 @@ class ResourceProcessor:
             creator_acl_grant=creator_acl_grant,
             file_md5=file_md5,
             scalar_override=scalar_override,
-            field_modes=field_modes,
+            field_patch=field_patch,
             action=action,
         )
 

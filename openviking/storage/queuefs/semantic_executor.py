@@ -30,6 +30,7 @@ from openviking.storage.abstract_overview import (
 from openviking.storage.acl import CreatorAclGrant
 from openviking.storage.context_update_plan import FileVectorSource, SemanticAction
 from openviking.storage.errors import LockAcquisitionError
+from openviking.storage.index_action import FieldPatch
 from openviking.storage.viking_fs import LS_ALL_NODES, get_viking_fs
 from openviking.telemetry import bind_telemetry, get_current_telemetry
 from openviking.utils.content_hash import content_md5
@@ -904,6 +905,11 @@ class SemanticTreeExecutor:
         slot = entry.slot(level)
         return slot.scalar_override() if slot is not None else None
 
+    def _plan_field_patch(self, uri: str, level: int) -> FieldPatch | None:
+        entry = self._plan_entries_by_uri.get(uri.rstrip("/"))
+        slot = entry.slot(level) if entry is not None else None
+        return slot.field_patch if slot is not None else None
+
     async def _check_file_content_changed(self, file_path: str) -> bool:
         if self._is_direct_incremental_update():
             return file_path in self._changed_paths
@@ -1150,11 +1156,7 @@ class SemanticTreeExecutor:
                     file_md5 = manifest_md5
                 if self._semantic_plan is not None:
                     vectorize_kwargs["scalar_override"] = self._plan_scalar_override(file_path, 2)
-                    vectorize_kwargs["field_modes"] = (
-                        dict(slot.field_modes)
-                        if slot is not None and slot.action is IndexAction.MERGE
-                        else {}
-                    )
+                    vectorize_kwargs["field_patch"] = self._plan_field_patch(file_path, 2)
                     vectorize_kwargs["action"] = slot.action.value if slot is not None else "upsert"
                 enqueued = await self._processor._vectorize_single_file(
                     parent_uri=parent_uri,
@@ -1510,10 +1512,10 @@ class SemanticTreeExecutor:
                                 for level, slot in slots.items()
                                 if slot.action in {IndexAction.UPSERT, IndexAction.MERGE}
                             },
-                            "field_modes": {
-                                level: dict(slot.field_modes)
+                            "field_patches": {
+                                level: slot.field_patch
                                 for level, slot in slots.items()
-                                if slot.action is IndexAction.MERGE and slot.field_modes
+                                if slot.field_patch is not None
                             },
                             "include_abstract": include_abstract,
                             "include_overview": include_overview,
@@ -1555,21 +1557,24 @@ class SemanticTreeExecutor:
                 enqueued_levels = set()
 
             for level, slot in sorted(slots.items()):
-                patch_fields = dict(slot.update_fields or slot.fields)
-                if level in enqueued_levels or not slot.fallback_update_fields or not patch_fields:
+                if (
+                    level in enqueued_levels
+                    or not slot.fallback_to_patch
+                    or slot.field_patch is None
+                ):
                     continue
                 enqueued = await self._processor._update_vector_fields(
                     record_id=slot.record_id,
                     uri=dir_uri,
                     level=level,
-                    fields=patch_fields,
-                    field_modes=dict(slot.field_modes),
-                    initial_fields={
-                        **dict(slot.existing_fields or {}),
-                        "uri": dir_uri,
-                        "level": level,
-                        "account_id": self._ctx.account_id,
-                    },
+                    field_patch=slot.field_patch.with_seed(
+                        {
+                            **dict(slot.existing_fields or {}),
+                            "uri": dir_uri,
+                            "level": level,
+                            "account_id": self._ctx.account_id,
+                        }
+                    ),
                     ctx=self._ctx,
                 )
                 if enqueued:

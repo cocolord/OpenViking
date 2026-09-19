@@ -14,6 +14,7 @@ from openviking.storage.context_update_plan import (
     SemanticTreeEntry,
     SemanticTreeSnapshot,
 )
+from openviking.storage.index_action import FieldPatch
 from openviking.utils.ingest_options import IngestOptions
 from openviking.utils.resource_processor import ResourceProcessor
 from openviking_cli.session.user_id import UserIdentifier
@@ -252,7 +253,7 @@ async def test_vectors_only_scalar_update_is_enqueued_before_lock_release(monkey
         record_id="a-l2",
         uri="viking://resources/demo/a.py",
         level=2,
-        fields={"search_tags": ["team=search"]},
+        field_patch=FieldPatch({"search_tags": ["team=search"]}),
     )
     plan = ContextUpdatePlan(
         root_uri="viking://resources/demo",
