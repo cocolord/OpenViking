@@ -7,8 +7,8 @@ const resources = {
   requestLogs: {
     accessRequired: {
       description:
-        'Current connection has no admin/root role. Configure an API key with Console Usage/Audit access in Connection & Identity.',
-      title: 'Admin access required',
+        'Connection identity is unresolved. Check the server address, identity, and authentication settings in Connection Settings.',
+      title: 'Connection identity required',
     },
     clear: 'Clear',
     description:
@@ -62,9 +62,9 @@ const resources = {
     reset: 'Reset',
     searchPlaceholder: 'Filter method, path, or status',
     scope: {
-      currentIdentity: 'Current scope: Current API key identity',
+      currentIdentity: 'Current scope: Current connection identity',
       currentIdentityWithName:
-        'Current scope: Current API key identity ({{identity}})',
+        'Current scope: Current connection identity ({{identity}})',
     },
     status: {
       error: 'ERR',

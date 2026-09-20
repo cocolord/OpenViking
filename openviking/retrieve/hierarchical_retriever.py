@@ -188,13 +188,9 @@ class HierarchicalRetriever:
             search_limit = (
                 max(limit * 5, 50) if image_query else max(limit, self.GLOBAL_SEARCH_TOPK)
             )
-            decay_kwargs = (
-                {
-                    "events_time_decay_weight": events_time_decay_weight,
-                    "events_time_decay_protection": events_time_decay_protection,
-                }
-                if events_time_decay_weight > 0.0
-                else {}
+            decay_kwargs = self._time_decay_search_kwargs(
+                events_time_decay_weight,
+                events_time_decay_protection,
             )
             with telemetry.measure("search.vector_retrieval"):
                 quick_results = await vector_proxy.search_in_tenant(
@@ -253,7 +249,11 @@ class HierarchicalRetriever:
             telemetry.count("vector.scanned", len(global_results))
 
             leaf_results: List[Dict[str, Any]] = []
-            if self.vector_store._acl_enabled(ctx) and (level is None or 2 in level):
+            if await self.vector_store._acl_enabled(ctx) and (level is None or 2 in level):
+                decay_kwargs = self._time_decay_search_kwargs(
+                    events_time_decay_weight,
+                    events_time_decay_protection,
+                )
                 leaf_results = await vector_proxy.search_in_tenant(
                     query_vector=query_vector,
                     sparse_query_vector=sparse_query_vector,
@@ -262,20 +262,31 @@ class HierarchicalRetriever:
                     extra_filter=scope_dsl,
                     level=[2],
                     limit=max(limit, self.GLOBAL_SEARCH_TOPK),
+                    **decay_kwargs,
                 )
                 telemetry.count("vector.searches", 1)
                 telemetry.count("vector.scored", len(leaf_results))
                 telemetry.count("vector.scanned", len(leaf_results))
                 if self._rerank_client and mode == RetrieverMode.THINKING and leaf_results:
+                    leaf_scores = [
+                        self._finite_score(
+                            result.get("_origin_score", result.get("_score", 0.0))
+                        )
+                        for result in leaf_results
+                    ]
                     leaf_scores = await self._rerank_scores(
                         query.query,
                         [str(result.get("abstract", "")) for result in leaf_results],
-                        [self._finite_score(result.get("_score", 0.0)) for result in leaf_results],
+                        leaf_scores,
                     )
-                    leaf_results = [
-                        {**result, "_score": score}
-                        for result, score in zip(leaf_results, leaf_scores, strict=True)
-                    ]
+                    reranked_leaf_results = []
+                    for result, score in zip(leaf_results, leaf_scores, strict=True):
+                        candidate = dict(result)
+                        candidate["_score"] = self._fuse_time_decay_candidate(
+                            candidate, score, events_time_decay_weight
+                        )
+                        reranked_leaf_results.append(candidate)
+                    leaf_results = reranked_leaf_results
 
             # Debug: Print all URIs in global_results
             if logger.isEnabledFor(logging.DEBUG):
@@ -376,6 +387,36 @@ class HierarchicalRetriever:
     def _resolve_threshold(self, threshold: Optional[float]) -> float:
         resolved = threshold if threshold is not None else self.threshold
         return resolved if resolved is not None else 0.0
+
+    @staticmethod
+    def _time_decay_search_kwargs(
+        weight: float,
+        protection: str,
+    ) -> Dict[str, Any]:
+        if weight == 0.0:
+            return {}
+        return {
+            "events_time_decay_weight": weight,
+            "events_time_decay_protection": protection,
+        }
+
+    @staticmethod
+    def _fuse_time_decay_candidate(
+        candidate: Dict[str, Any],
+        origin_score: float,
+        weight: float,
+    ) -> float:
+        if "_origin_score" not in candidate:
+            return origin_score
+        candidate["_origin_score"] = origin_score
+        time_score = candidate.get("_time_score")
+        if time_score is not None:
+            return fuse_time_decay_scores(
+                origin_score=origin_score,
+                addition_score=HierarchicalRetriever._finite_score(time_score),
+                weight=weight,
+            )
+        return origin_score
 
     @staticmethod
     def _finite_score(value: Any, default: float = 0.0) -> float:
@@ -507,14 +548,9 @@ class HierarchicalRetriever:
             heapq.heappush(dir_queue, (-score, uri))
 
         async def search_children(current_uri: str) -> List[Dict[str, Any]]:
-            decay_kwargs = (
-                {
-                    "events_time_decay_weight": events_time_decay_weight,
-                    "events_time_decay_protection": events_time_decay_protection,
-                    "defer_time_decay_fusion": True,
-                }
-                if events_time_decay_weight > 0.0
-                else {}
+            decay_kwargs = self._time_decay_search_kwargs(
+                events_time_decay_weight,
+                events_time_decay_protection,
             )
             return await vector_proxy.search_children_in_tenant(
                 parent_uri=current_uri,
@@ -566,17 +602,9 @@ class HierarchicalRetriever:
                     final_score = (
                         alpha * score + (1 - alpha) * current_score if current_score else score
                     )
-                    time_score = r.get("_time_score")
-                    if r.get("_event_time_decay") and time_score is not None:
-                        origin_score = final_score
-                        final_score = fuse_time_decay_scores(
-                            origin_score=origin_score,
-                            addition_score=self._finite_score(time_score),
-                            weight=events_time_decay_weight,
-                        )
-                        r["_origin_score"] = origin_score
-                    elif r.get("_event_time_decay_missing"):
-                        r["_origin_score"] = final_score
+                    final_score = self._fuse_time_decay_candidate(
+                        r, final_score, events_time_decay_weight
+                    )
 
                     if not self._passes_threshold(final_score, effective_threshold, score_gte):
                         logger.debug(
@@ -651,8 +679,8 @@ class HierarchicalRetriever:
             semantic_score = self._finite_score(c.get("_final_score", c.get("_score", 0.0)))
 
             alpha = self.hotness_alpha
-            decay_attempted = c.get("_event_time_decay") or c.get("_event_time_decay_missing")
-            if apply_hotness and alpha > 0 and not decay_attempted:
+            time_decay_applied = c.get("_time_score") is not None
+            if apply_hotness and alpha > 0 and not time_decay_applied:
                 updated_at_raw = c.get("updated_at")
                 if isinstance(updated_at_raw, str):
                     try:

@@ -7,8 +7,8 @@ const resources = {
   requestLogs: {
     accessRequired: {
       description:
-        '当前连接没有管理员或 Root 权限，无法显示请求日志。请在“连接设置”中配置具备控制台用量和审计权限的 API 密钥。',
-      title: '需要管理员权限',
+        '当前连接身份尚未确认。请在“连接设置”中检查服务地址、身份和认证配置。',
+      title: '需要确认连接身份',
     },
     clear: '清空',
     description:
@@ -60,9 +60,8 @@ const resources = {
     reset: '重置',
     searchPlaceholder: '筛选方法、路径或状态码',
     scope: {
-      currentIdentity: '当前范围：当前 API 密钥对应的身份',
-      currentIdentityWithName:
-        '当前范围：当前 API 密钥对应的身份（{{identity}}）',
+      currentIdentity: '当前范围：当前连接身份',
+      currentIdentityWithName: '当前范围：当前连接身份（{{identity}}）',
     },
     status: {
       error: '错误',

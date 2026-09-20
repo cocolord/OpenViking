@@ -57,8 +57,8 @@ class DummyStorage:
         self.search_calls = []
         self.child_search_calls = []
 
-    def _acl_enabled(self, ctx: RequestContext) -> bool:
-        return self.acl_manager is not None and self.acl_manager.is_enabled(ctx.account_id)
+    async def _acl_enabled(self, ctx: RequestContext) -> bool:
+        return self.acl_manager is not None and await self.acl_manager.is_enabled(ctx.account_id)
 
     async def collection_exists_bound(self) -> bool:
         return True
@@ -74,6 +74,8 @@ class DummyStorage:
         level=None,
         limit: int = 10,
         offset: int = 0,
+        events_time_decay_weight: float = 0.0,
+        events_time_decay_protection: str = "0",
     ):
         self.search_calls.append(
             {
@@ -86,6 +88,8 @@ class DummyStorage:
                 "level": level,
                 "limit": limit,
                 "offset": offset,
+                "events_time_decay_weight": events_time_decay_weight,
+                "events_time_decay_protection": events_time_decay_protection,
             }
         )
         return [
@@ -217,7 +221,6 @@ class TimeDecayChildProxy:
                 context_type="memory",
                 _origin_score=0.2,
                 _time_score=0.9,
-                _event_time_decay=True,
             )
         ]
 
@@ -400,7 +403,11 @@ async def test_retrieve_falls_back_to_vector_scores_when_rerank_returns_none(mon
             _result("viking://resources/b/deep-b.md", 0.8, abstract="deep B"),
         ]
     )
-    storage.acl_manager = SimpleNamespace(is_enabled=lambda _account_id: True)
+
+    async def acl_enabled(_account_id):
+        return True
+
+    storage.acl_manager = SimpleNamespace(is_enabled=acl_enabled)
 
     async def no_hierarchical_children(*_args, **_kwargs):
         return []
@@ -757,7 +764,6 @@ async def test_quick_mode_forwards_time_decay_only_when_enabled():
                 context_type="memory",
                 _origin_score=0.4,
                 _time_score=1.0,
-                _event_time_decay=True,
             )
         ]
     )
@@ -777,6 +783,51 @@ async def test_quick_mode_forwards_time_decay_only_when_enabled():
     assert result.matched_contexts[0].score == pytest.approx(0.75)
     assert result.matched_contexts[0].origin_score == pytest.approx(0.4)
     assert result.matched_contexts[0].time_score == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_thinking_global_leaf_prefetch_applies_time_decay():
+    class DecayAwareThinkingStorage(QuickSearchStorage):
+        async def search_in_tenant(self, *args, **kwargs):
+            self.search_calls.append(dict(kwargs))
+            if kwargs.get("level") == [0, 1]:
+                return []
+            return [
+                _result(
+                    "viking://user/user1/memories/events/old",
+                    0.18,
+                    context_type="memory",
+                    _origin_score=0.9,
+                    _time_score=0.0,
+                )
+            ]
+
+        async def search_children_in_tenant(self, *args, **kwargs):
+            return []
+
+    storage = DecayAwareThinkingStorage([])
+
+    async def acl_enabled(_account_id):
+        return True
+
+    storage.acl_manager = SimpleNamespace(is_enabled=acl_enabled)
+    retriever = HierarchicalRetriever(storage=storage, embedder=DummyEmbedder())
+    retriever._rerank_client = FakeRerankClient([0.6])
+
+    result = await retriever.retrieve(
+        _memory_query(),
+        ctx=_ctx(),
+        limit=1,
+        mode=RetrieverMode.THINKING,
+        events_time_decay_weight=0.8,
+    )
+
+    leaf_call = next(call for call in storage.search_calls if call.get("level") == [2])
+    assert leaf_call["events_time_decay_weight"] == 0.8
+    assert leaf_call["events_time_decay_protection"] == "0"
+    assert result.matched_contexts[0].score == pytest.approx(0.12)
+    assert result.matched_contexts[0].origin_score == pytest.approx(0.6)
+    assert result.matched_contexts[0].time_score == pytest.approx(0.0)
 
 
 @pytest.mark.asyncio
@@ -830,10 +881,55 @@ async def test_thinking_time_decay_fuses_once_after_rerank_and_propagation(monke
         origin_score=propagated_rerank_score, addition_score=0.9, weight=0.25
     )
     assert fusion_calls == [(pytest.approx(propagated_rerank_score), 0.9, 0.25)]
-    assert proxy.calls[0]["defer_time_decay_fusion"] is True
+    assert proxy.calls[0]["events_time_decay_weight"] == 0.25
     assert candidates[0]["_final_score"] == pytest.approx(expected)
     assert matched[0].score == pytest.approx(expected)
     assert matched[0].origin_score == pytest.approx(propagated_rerank_score)
     assert matched[0].time_score == pytest.approx(0.9)
     payload = FindResult(memories=[matched[0]], resources=[], skills=[]).to_dict()
     assert payload["memories"][0]["time_score"] == pytest.approx(0.9)
+
+
+@pytest.mark.asyncio
+async def test_thinking_missing_event_time_keeps_legacy_hotness(monkeypatch):
+    retriever = HierarchicalRetriever(
+        storage=DummyStorage(),
+        embedder=None,
+        retrieval_config=RetrievalConfig(hotness_alpha=0.5),
+    )
+    proxy = TimeDecayChildProxy()
+
+    async def missing_time_child(parent_uri: str, **kwargs):
+        proxy.calls.append({"parent_uri": parent_uri, **kwargs})
+        return [
+            _result(
+                f"{parent_uri}/event",
+                0.4,
+                context_type="memory",
+                _origin_score=0.4,
+            )
+        ]
+
+    proxy.search_children_in_tenant = missing_time_child
+    monkeypatch.setattr(
+        "openviking.retrieve.hierarchical_retriever.hotness_score",
+        lambda *args, **kwargs: 1.0,
+    )
+
+    candidates = await retriever._recursive_search(
+        vector_proxy=proxy,
+        query="hello",
+        query_vector=[1.0],
+        sparse_query_vector=None,
+        starting_points=[("viking://user/user1/memories/events", 0.0)],
+        limit=1,
+        mode=RetrieverMode.THINKING,
+        events_time_decay_weight=0.25,
+    )
+    matched = await retriever._convert_to_matched_contexts(
+        candidates, ctx=_ctx(), apply_hotness=True
+    )
+
+    assert matched[0].score == pytest.approx(0.7)
+    assert matched[0].origin_score == pytest.approx(0.4)
+    assert matched[0].time_score is None

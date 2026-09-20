@@ -460,7 +460,6 @@ class VikingDBManagerProxy:
         offset: int = 0,
         events_time_decay_weight: float = 0.0,
         events_time_decay_protection: str = "0",
-        defer_time_decay_fusion: bool = False,
     ) -> List[Dict[str, Any]]:
         kwargs = {
             "query_vector": query_vector,
@@ -472,11 +471,10 @@ class VikingDBManagerProxy:
             "limit": limit,
             "offset": offset,
         }
-        if events_time_decay_weight != 0.0 or defer_time_decay_fusion:
+        if events_time_decay_weight != 0.0:
             kwargs.update(
                 events_time_decay_weight=events_time_decay_weight,
                 events_time_decay_protection=events_time_decay_protection,
-                defer_time_decay_fusion=defer_time_decay_fusion,
             )
         return await self._manager.search_in_tenant(self._ctx, **kwargs)
 
@@ -510,7 +508,6 @@ class VikingDBManagerProxy:
         limit: int = 10,
         events_time_decay_weight: float = 0.0,
         events_time_decay_protection: str = "0",
-        defer_time_decay_fusion: bool = False,
     ) -> List[Dict[str, Any]]:
         kwargs = {
             "parent_uri": parent_uri,
@@ -521,11 +518,10 @@ class VikingDBManagerProxy:
             "extra_filter": extra_filter,
             "limit": limit,
         }
-        if events_time_decay_weight != 0.0 or defer_time_decay_fusion:
+        if events_time_decay_weight != 0.0:
             kwargs.update(
                 events_time_decay_weight=events_time_decay_weight,
                 events_time_decay_protection=events_time_decay_protection,
-                defer_time_decay_fusion=defer_time_decay_fusion,
             )
         return await self._manager.search_children_in_tenant(self._ctx, **kwargs)
 

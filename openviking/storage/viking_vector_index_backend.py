@@ -1367,7 +1367,11 @@ class VikingVectorIndexBackend:
         ctx: RequestContext,
     ) -> List[Dict[str, Any]]:
         backend = self._get_backend_for_context(ctx)
-        filter = self._merge_filters(filter, self._tenant_filter(ctx))
+        acl_enabled = await self._acl_enabled(ctx)
+        filter = self._merge_filters(
+            filter,
+            self._tenant_filter(ctx, acl_enabled=acl_enabled),
+        )
         return await backend.search_by_random(
             filter=filter,
             limit=limit,
@@ -1499,7 +1503,11 @@ class VikingVectorIndexBackend:
     ) -> List[Dict[str, Any]]:
         if ctx:
             backend = self._get_backend_for_context(ctx)
-            filter = self._merge_filters(filter, self._tenant_filter(ctx))
+            acl_enabled = await self._acl_enabled(ctx)
+            filter = self._merge_filters(
+                filter,
+                self._tenant_filter(ctx, acl_enabled=acl_enabled),
+            )
         else:
             backend = self._get_default_backend()
         return await backend.search_by_keywords(
@@ -1567,14 +1575,15 @@ class VikingVectorIndexBackend:
         offset: int = 0,
         events_time_decay_weight: float = 0.0,
         events_time_decay_protection: str = "0",
-        defer_time_decay_fusion: bool = False,
     ) -> List[Dict[str, Any]]:
+        acl_enabled = await self._acl_enabled(ctx)
         scope_filter = self._build_scope_filter(
             ctx=ctx,
             context_type=context_type,
             target_directories=target_directories,
             extra_filter=extra_filter,
             level=level,
+            acl_enabled=acl_enabled,
         )
         event_root = f"viking://user/{ctx.user.user_id}/memories/events"
         event_scope_eligible = not target_directories or any(
@@ -1594,7 +1603,7 @@ class VikingVectorIndexBackend:
             offset=offset,
             events_time_decay_weight=events_time_decay_weight,
             events_time_decay_protection=events_time_decay_protection,
-            defer_time_decay_fusion=defer_time_decay_fusion,
+            defer_time_decay_fusion=False,
         )
 
     async def filter_in_tenant(
@@ -1615,12 +1624,14 @@ class VikingVectorIndexBackend:
         identical between the two — a separately hand-built filter would be one
         refactor away from silently losing them.
         """
+        acl_enabled = await self._acl_enabled(ctx)
         scope_filter = self._build_scope_filter(
             ctx=ctx,
             context_type=context_type,
             target_directories=target_directories,
             extra_filter=extra_filter,
             level=level,
+            acl_enabled=acl_enabled,
         )
         if scope_filter is None:
             raise InvalidArgumentError(
@@ -1646,7 +1657,6 @@ class VikingVectorIndexBackend:
         limit: int = 10,
         events_time_decay_weight: float = 0.0,
         events_time_decay_protection: str = "0",
-        defer_time_decay_fusion: bool = False,
     ) -> List[Dict[str, Any]]:
         # TODO：Better Alternative to Current Temporary Fix
 
@@ -1664,6 +1674,7 @@ class VikingVectorIndexBackend:
                     effective_target_directories = None
                     break
 
+        acl_enabled = await self._acl_enabled(ctx)
         merged_filter = self._merge_filters(
             PathScope("uri", parent_uri, depth=1),
             self._build_scope_filter(
@@ -1671,6 +1682,7 @@ class VikingVectorIndexBackend:
                 context_type=context_type,
                 target_directories=effective_target_directories,
                 extra_filter=extra_filter,
+                acl_enabled=acl_enabled,
             ),
         )
         event_root = f"viking://user/{ctx.user.user_id}/memories/events"
@@ -1686,7 +1698,7 @@ class VikingVectorIndexBackend:
             offset=0,
             events_time_decay_weight=events_time_decay_weight,
             events_time_decay_protection=events_time_decay_protection,
-            defer_time_decay_fusion=defer_time_decay_fusion,
+            defer_time_decay_fusion=True,
         )
 
     async def _search_with_event_time_decay(
@@ -1800,9 +1812,7 @@ class VikingVectorIndexBackend:
             if result.get("_time_score") is None:
                 result["_score"] = result.get("_origin_score", result.get("_score", 0.0))
                 result.pop("_time_score", None)
-                result["_event_time_decay_missing"] = True
                 continue
-            result["_event_time_decay"] = True
             if defer_time_decay_fusion:
                 # Keep VikingDB's raw explanation scores but defer their fusion
                 # until after model rerank and parent-score propagation.
@@ -2166,8 +2176,9 @@ class VikingVectorIndexBackend:
                 )
         # A chunk cannot carry ACL for its base file URI. Keep the old main record
         # when copy has no main record to replace it, accepting its stale content.
+        acl_enabled = await self._acl_enabled(ctx)
         preserved_acl_uris: set[str] = set()
-        if preserve_target_acl and self._acl_enabled(ctx):
+        if preserve_target_acl and acl_enabled:
             written_uris = {
                 rewrite_transfer_uri(str(record["uri"]), source_uri, target_uri)
                 for record in source_records
@@ -2199,7 +2210,7 @@ class VikingVectorIndexBackend:
             ):
                 affected_target_ids.append(str(record["id"]))
         target_acl_fields: Dict[str, Dict[str, Any]] = {}
-        if preserve_target_acl and self._acl_enabled(ctx) and replacement_target_uris:
+        if preserve_target_acl and acl_enabled and replacement_target_uris:
             assert self.acl_manager is not None
             acl_target_uris = {uri for uri in replacement_target_uris if is_acl_uri(uri)}
             target_acl_fields = {
@@ -2320,7 +2331,7 @@ class VikingVectorIndexBackend:
             return result
 
         timestamp = get_current_timestamp()
-        acl_enabled = self._acl_enabled(ctx)
+        acl_enabled = await self._acl_enabled(ctx)
         moved_acl_by_uri: Dict[str, Dict[str, Any]] = {}
         target_payloads: List[Dict[str, Any]] = []
         for record in source_records:
@@ -2442,16 +2453,18 @@ class VikingVectorIndexBackend:
         target_directories: Optional[List[str]],
         extra_filter: Optional[FilterExpr | Dict[str, Any]],
         level: Optional[List[int]] = None,
+        *,
+        acl_enabled: bool,
     ) -> Optional[FilterExpr]:
         filters: List[FilterExpr] = []
         if context_type:
             filters.append(Eq("context_type", context_type))
 
         targets = [target_dir for target_dir in target_directories or [] if target_dir]
-        tenant_filter = self._tenant_filter(ctx)
+        tenant_filter = self._tenant_filter(ctx, acl_enabled=acl_enabled)
         if (
             tenant_filter
-            and not self._acl_enabled(ctx)
+            and not acl_enabled
             and self._targets_within_visible_roots(ctx, targets)
         ):
             # The target scopes are already narrower than the tenant-visible
@@ -2491,14 +2504,19 @@ class VikingVectorIndexBackend:
             for target_parts in (tuple(uri_parts(target)) for target in targets)
         )
 
-    def _tenant_filter(self, ctx: RequestContext) -> Optional[FilterExpr]:
+    def _tenant_filter(
+        self,
+        ctx: RequestContext,
+        *,
+        acl_enabled: bool,
+    ) -> Optional[FilterExpr]:
         if ctx.bypass_acl:
             return Eq("account_id", ctx.account_id)
         if ctx.role == Role.ROOT:
             return None
 
         account_filter = Eq("account_id", ctx.account_id)
-        if not self._acl_enabled(ctx):
+        if not acl_enabled:
             return And(
                 [
                     account_filter,
@@ -2547,8 +2565,8 @@ class VikingVectorIndexBackend:
             access_filters.append(PathScope("uri", "viking://resources", depth=-1))
         return And([account_filter, Or(access_filters)])
 
-    def _acl_enabled(self, ctx: RequestContext) -> bool:
-        return self.acl_manager is not None and self.acl_manager.is_enabled(ctx.account_id)
+    async def _acl_enabled(self, ctx: RequestContext) -> bool:
+        return self.acl_manager is not None and await self.acl_manager.is_enabled(ctx.account_id)
 
     @staticmethod
     def _merge_filters(*filters: Optional[FilterExpr]) -> Optional[FilterExpr]:
