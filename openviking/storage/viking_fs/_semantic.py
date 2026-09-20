@@ -382,6 +382,8 @@ class _SemanticMixin:
         ctx: Optional[RequestContext] = None,
         level: Optional[List[int]] = None,
         image_url: Optional[str] = None,
+        events_time_decay_weight: float = 0.0,
+        events_time_decay_protection: str = "0",
     ):
         """Complex search with session context.
 
@@ -493,6 +495,8 @@ class _SemanticMixin:
                 score_threshold=score_threshold,
                 scope_dsl=filter,
                 level=level,
+                events_time_decay_weight=events_time_decay_weight,
+                events_time_decay_protection=events_time_decay_protection,
             )
 
         query_results = await asyncio.gather(*[_execute(tq) for tq in typed_queries])

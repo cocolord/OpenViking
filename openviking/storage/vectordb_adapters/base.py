@@ -484,6 +484,8 @@ class CollectionAdapter(ABC):
         output_fields: Optional[list[str]] = None,
         order_by: Optional[str] = None,
         order_desc: bool = False,
+        post_process_ops: Optional[list[Dict[str, Any]]] = None,
+        post_process_input_limit: Optional[int] = None,
     ) -> list[Dict[str, Any]]:
         coll = self.get_collection()
         vectordb_filter = self._compile_filter(filter)
@@ -497,6 +499,8 @@ class CollectionAdapter(ABC):
                 offset=offset,
                 filters=vectordb_filter,
                 output_fields=output_fields,
+                post_process_ops=post_process_ops,
+                post_process_input_limit=post_process_input_limit,
             )
         elif order_by:
             result = coll.search_by_scalar(
@@ -527,6 +531,10 @@ class CollectionAdapter(ABC):
             record = dict(item.fields) if item.fields else {}
             record["id"] = item.id
             record["_score"] = _normalize_result_score(item.score)
+            if item.origin_score is not None:
+                record["_origin_score"] = item.origin_score
+            if item.addition_score is not None:
+                record["_time_score"] = item.addition_score
             record = self._normalize_record_for_read(record)
             records.append(record)
         return records

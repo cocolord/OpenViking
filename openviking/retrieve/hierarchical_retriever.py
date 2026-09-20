@@ -27,6 +27,11 @@ from openviking.storage.expr import FilterExpr
 from openviking.storage.vikingdb_manager import VikingDBManager, VikingDBManagerProxy
 from openviking.telemetry import get_current_telemetry
 from openviking.utils.tags import normalize_search_tags
+from openviking.utils.time_decay import (
+    fuse_time_decay_scores,
+    parse_duration_ms,
+    validate_time_decay_weight,
+)
 from openviking.utils.time_utils import parse_iso_datetime
 from openviking.utils.token_estimation import (
     estimate_text_tokens,
@@ -108,6 +113,8 @@ class HierarchicalRetriever:
         score_gte: bool = False,
         scope_dsl: Optional[FilterExpr | Dict[str, Any]] = None,
         level: Optional[List[int]] = None,
+        events_time_decay_weight: float = 0.0,
+        events_time_decay_protection: str = "0",
     ) -> QueryResult:
         """
         Execute hierarchical retrieval.
@@ -121,6 +128,11 @@ class HierarchicalRetriever:
         """
         t0 = time.monotonic()
         telemetry = get_current_telemetry()
+        events_time_decay_weight = validate_time_decay_weight(events_time_decay_weight)
+        parse_duration_ms(
+            events_time_decay_protection,
+            parameter_name="events_time_decay_protection",
+        )
         effective_threshold = self._resolve_threshold(score_threshold)
         image_query = bool(getattr(query, "image_query", False))
         if mode is None:
@@ -176,6 +188,14 @@ class HierarchicalRetriever:
             search_limit = (
                 max(limit * 5, 50) if image_query else max(limit, self.GLOBAL_SEARCH_TOPK)
             )
+            decay_kwargs = (
+                {
+                    "events_time_decay_weight": events_time_decay_weight,
+                    "events_time_decay_protection": events_time_decay_protection,
+                }
+                if events_time_decay_weight > 0.0
+                else {}
+            )
             with telemetry.measure("search.vector_retrieval"):
                 quick_results = await vector_proxy.search_in_tenant(
                     query_vector=query_vector,
@@ -185,6 +205,7 @@ class HierarchicalRetriever:
                     extra_filter=scope_dsl,
                     level=level,
                     limit=search_limit,
+                    **decay_kwargs,
                 )
             telemetry.count("vector.searches", 1)
             telemetry.count("vector.scored", len(quick_results))
@@ -323,6 +344,8 @@ class HierarchicalRetriever:
                     scope_dsl=scope_dsl,
                     initial_candidates=initial_candidates,
                     level=level,
+                    events_time_decay_weight=events_time_decay_weight,
+                    events_time_decay_protection=events_time_decay_protection,
                 )
             apply_hotness = True
             rerank_used = self._rerank_client is not None and mode == RetrieverMode.THINKING
@@ -434,6 +457,8 @@ class HierarchicalRetriever:
         scope_dsl: Optional[FilterExpr | Dict[str, Any]] = None,
         initial_candidates: Optional[List[Dict[str, Any]]] = None,
         level: Optional[List[int]] = None,
+        events_time_decay_weight: float = 0.0,
+        events_time_decay_protection: str = "0",
     ) -> List[Dict[str, Any]]:
         """
         Recursive search with directory priority return and score propagation.
@@ -482,6 +507,15 @@ class HierarchicalRetriever:
             heapq.heappush(dir_queue, (-score, uri))
 
         async def search_children(current_uri: str) -> List[Dict[str, Any]]:
+            decay_kwargs = (
+                {
+                    "events_time_decay_weight": events_time_decay_weight,
+                    "events_time_decay_protection": events_time_decay_protection,
+                    "defer_time_decay_fusion": True,
+                }
+                if events_time_decay_weight > 0.0
+                else {}
+            )
             return await vector_proxy.search_children_in_tenant(
                 parent_uri=current_uri,
                 query_vector=query_vector,
@@ -490,6 +524,7 @@ class HierarchicalRetriever:
                 target_directories=target_dirs,
                 extra_filter=scope_dsl,
                 limit=max(limit * 2, 20),
+                **decay_kwargs,
             )
 
         parallelism = max(1, self.MAX_PARALLEL_CHILD_SEARCHES)
@@ -531,6 +566,17 @@ class HierarchicalRetriever:
                     final_score = (
                         alpha * score + (1 - alpha) * current_score if current_score else score
                     )
+                    time_score = r.get("_time_score")
+                    if r.get("_event_time_decay") and time_score is not None:
+                        origin_score = final_score
+                        final_score = fuse_time_decay_scores(
+                            origin_score=origin_score,
+                            addition_score=self._finite_score(time_score),
+                            weight=events_time_decay_weight,
+                        )
+                        r["_origin_score"] = origin_score
+                    elif r.get("_event_time_decay_missing"):
+                        r["_origin_score"] = final_score
 
                     if not self._passes_threshold(final_score, effective_threshold, score_gte):
                         logger.debug(
@@ -605,7 +651,8 @@ class HierarchicalRetriever:
             semantic_score = self._finite_score(c.get("_final_score", c.get("_score", 0.0)))
 
             alpha = self.hotness_alpha
-            if apply_hotness and alpha > 0:
+            decay_attempted = c.get("_event_time_decay") or c.get("_event_time_decay_missing")
+            if apply_hotness and alpha > 0 and not decay_attempted:
                 updated_at_raw = c.get("updated_at")
                 if isinstance(updated_at_raw, str):
                     try:
@@ -651,9 +698,9 @@ class HierarchicalRetriever:
                     abstract=abstract,
                     category=c.get("category", ""),
                     score=final_score,
-                    search_tags=normalize_search_tags(
-                        c.get("search_tags"), discard_invalid=True
-                    ),
+                    search_tags=normalize_search_tags(c.get("search_tags"), discard_invalid=True),
+                    origin_score=c.get("_origin_score"),
+                    time_score=c.get("_time_score"),
                 )
             )
 

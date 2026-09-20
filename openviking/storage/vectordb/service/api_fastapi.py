@@ -423,6 +423,8 @@ async def search_by_vector(request: SearchByVectorRequest, req: Request):
             filters=filters,
             sparse_vector=sparse_vector,
             output_fields=output_fields,
+            post_process_ops=data_utils.convert_dict(request.post_process_ops),
+            post_process_input_limit=request.post_process_input_limit,
         )
         return success_response("search success", asdict(result), request=req)
     except VikingDBException as e:

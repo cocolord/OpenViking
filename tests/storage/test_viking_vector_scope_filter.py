@@ -1,6 +1,8 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
+
 import pytest
 
 from openviking.server.identity import RequestContext, Role
@@ -408,3 +410,102 @@ async def test_search_by_random_reuses_account_filter_for_raw_dsl():
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_zero_decay_weight_keeps_the_original_single_search_call():
+    backend = object.__new__(VikingVectorIndexBackend)
+    backend.acl_manager = None
+    calls = []
+
+    async def fake_search(**kwargs):
+        calls.append(kwargs)
+        return [{"uri": "viking://resources/doc", "_score": 0.8}]
+
+    backend.search = fake_search
+    results = await backend.search_in_tenant(
+        ctx=_ctx(),
+        query_vector=[1.0],
+        context_type="memory",
+        limit=7,
+        offset=2,
+        events_time_decay_weight=0.0,
+    )
+
+    assert results == [{"uri": "viking://resources/doc", "_score": 0.8}]
+    assert len(calls) == 1
+    assert calls[0]["limit"] == 7
+    assert calls[0]["offset"] == 2
+    assert "post_process_ops" not in calls[0]
+
+
+@pytest.mark.asyncio
+async def test_decay_splits_current_user_event_l2_and_non_event_concurrently():
+    backend = object.__new__(VikingVectorIndexBackend)
+    backend.acl_manager = None
+    backend._events_time_decay_scale = "7d"
+    backend._events_time_decay_decay = 0.5
+    calls = []
+    both_started = asyncio.Event()
+
+    async def fake_search(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 2:
+            both_started.set()
+        await asyncio.wait_for(both_started.wait(), timeout=0.5)
+        if kwargs.get("post_process_ops"):
+            return [
+                {
+                    "uri": "viking://user/alice/memories/events/recent",
+                    "level": 2,
+                    "_score": 0.99,
+                    "_origin_score": 0.2,
+                    "_time_score": 1.0,
+                }
+            ]
+        return [{"uri": "viking://resources/doc", "level": 2, "_score": 0.5}]
+
+    backend.search = fake_search
+    results = await backend.search_in_tenant(
+        ctx=_ctx(),
+        query_vector=[1.0],
+        context_type="memory",
+        limit=5,
+        events_time_decay_weight=0.25,
+        events_time_decay_protection="1d",
+    )
+
+    assert len(calls) == 2
+    event_call = next(call for call in calls if call.get("post_process_ops"))
+    non_event_call = next(call for call in calls if not call.get("post_process_ops"))
+    assert event_call["post_process_input_limit"] == 15
+    assert event_call["filter"].conds[-2:] == [
+        PathScope("uri", "viking://user/alice/memories/events", depth=-1),
+        Eq("level", 2),
+    ]
+    assert isinstance(non_event_call["filter"].conds[-1], Or)
+    assert results[0]["_event_time_decay"] is True
+
+
+@pytest.mark.asyncio
+async def test_decay_does_not_split_a_peer_only_target():
+    backend = object.__new__(VikingVectorIndexBackend)
+    backend.acl_manager = None
+    calls = []
+
+    async def fake_search(**kwargs):
+        calls.append(kwargs)
+        return []
+
+    backend.search = fake_search
+    await backend.search_in_tenant(
+        ctx=_ctx(),
+        query_vector=[1.0],
+        context_type="memory",
+        target_directories=["viking://user/alice/peers/peer-a/memories/events"],
+        level=[2],
+        events_time_decay_weight=0.25,
+    )
+
+    assert len(calls) == 1
+    assert "post_process_ops" not in calls[0]

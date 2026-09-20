@@ -394,6 +394,8 @@ The `search()` method adds session context understanding and intent analysis cap
 | target_uri | str \| List[str] | No | "" | Limit search to specific URI prefix |
 | session | Session | No | None | Session for context-aware search (SDK) |
 | session_id | str | No | None | Session ID for context-aware search (HTTP) |
+| events_time_decay_weight | float | No | 0.0 | Weight of the event time score in `[0, 1)`; applies only to the current user's event L2 results. Zero preserves the original retrieval behavior |
+| events_time_decay_protection | str | No | "0" | No-decay protection period: `0` or a non-negative integer `Xm`/`Xh`/`Xd`; used only when the weight is positive |
 | context_type | str \| List[str] | No | None | Limit results to one or more `ContextType` values: `memory`, `resource`, or `skill` |
 | tags | List[str] | No | None | Explicit retrieval tags in strict `k=v` form. Multiple tags are combined with AND; a result must contain every requested tag |
 | node_limit | int | No | None | Optional HTTP alias; overrides `limit` when provided |
@@ -408,6 +410,8 @@ The `search()` method adds session context understanding and intent analysis cap
 | telemetry | bool \| object | No | False | Attach telemetry data to response |
 
 `search()` uses the same target resolution and explicit tag filtering rules as `find()`, including the peer collection filter selected by `X-OpenViking-Actor-Peer` or SDK `actor_peer_id`. When `image_url` is provided, `search()` uses direct image retrieval and skips session query planning.
+
+Event time decay applies only to L2 results under the current user's `viking://user/{user_id}/memories/events/`. It does not affect peer events, L0/L1, or `find`, `recall`, `grep`, and `glob`. Enabled event results use `score = origin_score * (1 - weight) + time_score * weight` and expose `origin_score` and `time_score`. A missing or invalid `updated_at` keeps the original score and returns `time_score` as `null`. The server must also configure the internal curve pair `retrieval.events_time_decay_scale` and `retrieval.events_time_decay_decay`; a positive-weight request fails when the curve is not configured instead of assuming a default.
 
 #### 3. Usage Examples
 
@@ -424,9 +428,11 @@ curl -X POST http://localhost:1933/api/v1/search/search \
     -d '{
         "query": "best practices",
         "session_id": "abc123",
-        "context_type": "skill",
+        "context_type": "memory",
         "since": "2h",
         "time_field": "updated_at",
+        "events_time_decay_weight": 0.2,
+        "events_time_decay_protection": "1d",
         "limit": 10
     }'
 ```

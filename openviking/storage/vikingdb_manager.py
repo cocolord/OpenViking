@@ -42,6 +42,9 @@ class VikingDBManager(VikingVectorIndexBackend):
         self,
         vectordb_config: VectorDBBackendConfig,
         queue_manager: Optional[QueueManager] = None,
+        *,
+        events_time_decay_scale: Optional[str] = None,
+        events_time_decay_decay: Optional[float] = None,
     ):
         """
         Initialize VikingDB Manager.
@@ -53,6 +56,8 @@ class VikingDBManager(VikingVectorIndexBackend):
         # Initialize the base VikingVectorIndexBackend without queue management
         super().__init__(
             config=vectordb_config,
+            events_time_decay_scale=events_time_decay_scale,
+            events_time_decay_decay=events_time_decay_decay,
         )
 
         # Queue management specific attributes
@@ -341,6 +346,8 @@ class VikingDBManagerProxy:
         output_fields: Optional[List[str]] = None,
         order_by: Optional[str] = None,
         order_desc: bool = False,
+        post_process_ops: Optional[List[Dict[str, Any]]] = None,
+        post_process_input_limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         return await self._manager.query(
             query_vector=query_vector,
@@ -351,6 +358,8 @@ class VikingDBManagerProxy:
             output_fields=output_fields,
             order_by=order_by,
             order_desc=order_desc,
+            post_process_ops=post_process_ops,
+            post_process_input_limit=post_process_input_limit,
             ctx=self._ctx,
         )
 
@@ -362,6 +371,8 @@ class VikingDBManagerProxy:
         limit: int = 10,
         offset: int = 0,
         output_fields: Optional[List[str]] = None,
+        post_process_ops: Optional[List[Dict[str, Any]]] = None,
+        post_process_input_limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         return await self._manager.search(
             query_vector=query_vector,
@@ -370,6 +381,8 @@ class VikingDBManagerProxy:
             limit=limit,
             offset=offset,
             output_fields=output_fields,
+            post_process_ops=post_process_ops,
+            post_process_input_limit=post_process_input_limit,
             ctx=self._ctx,
         )
 
@@ -445,18 +458,27 @@ class VikingDBManagerProxy:
         level: Optional[List[int]] = None,
         limit: int = 10,
         offset: int = 0,
+        events_time_decay_weight: float = 0.0,
+        events_time_decay_protection: str = "0",
+        defer_time_decay_fusion: bool = False,
     ) -> List[Dict[str, Any]]:
-        return await self._manager.search_in_tenant(
-            self._ctx,
-            query_vector=query_vector,
-            sparse_query_vector=sparse_query_vector,
-            context_type=context_type,
-            target_directories=target_directories,
-            extra_filter=extra_filter,
-            level=level,
-            limit=limit,
-            offset=offset,
-        )
+        kwargs = {
+            "query_vector": query_vector,
+            "sparse_query_vector": sparse_query_vector,
+            "context_type": context_type,
+            "target_directories": target_directories,
+            "extra_filter": extra_filter,
+            "level": level,
+            "limit": limit,
+            "offset": offset,
+        }
+        if events_time_decay_weight != 0.0 or defer_time_decay_fusion:
+            kwargs.update(
+                events_time_decay_weight=events_time_decay_weight,
+                events_time_decay_protection=events_time_decay_protection,
+                defer_time_decay_fusion=defer_time_decay_fusion,
+            )
+        return await self._manager.search_in_tenant(self._ctx, **kwargs)
 
     async def filter_in_tenant(
         self,
@@ -486,17 +508,26 @@ class VikingDBManagerProxy:
         target_directories: Optional[List[str]] = None,
         extra_filter: Optional[FilterExpr | Dict[str, Any]] = None,
         limit: int = 10,
+        events_time_decay_weight: float = 0.0,
+        events_time_decay_protection: str = "0",
+        defer_time_decay_fusion: bool = False,
     ) -> List[Dict[str, Any]]:
-        return await self._manager.search_children_in_tenant(
-            self._ctx,
-            parent_uri=parent_uri,
-            query_vector=query_vector,
-            sparse_query_vector=sparse_query_vector,
-            context_type=context_type,
-            target_directories=target_directories,
-            extra_filter=extra_filter,
-            limit=limit,
-        )
+        kwargs = {
+            "parent_uri": parent_uri,
+            "query_vector": query_vector,
+            "sparse_query_vector": sparse_query_vector,
+            "context_type": context_type,
+            "target_directories": target_directories,
+            "extra_filter": extra_filter,
+            "limit": limit,
+        }
+        if events_time_decay_weight != 0.0 or defer_time_decay_fusion:
+            kwargs.update(
+                events_time_decay_weight=events_time_decay_weight,
+                events_time_decay_protection=events_time_decay_protection,
+                defer_time_decay_fusion=defer_time_decay_fusion,
+            )
+        return await self._manager.search_children_in_tenant(self._ctx, **kwargs)
 
     async def get_context_by_uri(
         self,

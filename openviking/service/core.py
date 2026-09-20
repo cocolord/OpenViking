@@ -195,7 +195,10 @@ class OpenVikingService:
 
         # Initialize VikingDBManager with QueueManager
         self._vikingdb_manager = VikingDBManager(
-            vectordb_config=config.vectordb, queue_manager=self._queue_manager
+            vectordb_config=config.vectordb,
+            queue_manager=self._queue_manager,
+            events_time_decay_scale=self._config.retrieval.events_time_decay_scale,
+            events_time_decay_decay=self._config.retrieval.events_time_decay_decay,
         )
         self._vikingdb_manager.acl_manager = AclManager(self._vikingdb_manager)
 

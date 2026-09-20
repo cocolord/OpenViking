@@ -814,6 +814,25 @@ async def test_search_forwards_level_zero_and_omits_unset_time_filters():
 
 
 @pytest.mark.asyncio
+async def test_search_forwards_event_time_decay_options():
+    client = AsyncHTTPClient(url="http://localhost:1933")
+    client._request = AsyncMock(return_value=object())
+    client._handle_response_data = lambda _response: {"result": {}}
+
+    await client.search(
+        "hello",
+        options={
+            "events_time_decay_weight": 0.25,
+            "events_time_decay_protection": "2d",
+        },
+    )
+
+    payload = client._request.await_args.kwargs["json"]
+    assert payload["events_time_decay_weight"] == 0.25
+    assert payload["events_time_decay_protection"] == "2d"
+
+
+@pytest.mark.asyncio
 async def test_find_extra_forwards_unknown_fields_to_payload():
     client = AsyncHTTPClient(url="http://localhost:1933")
     client._request = AsyncMock(return_value=object())

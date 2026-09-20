@@ -189,9 +189,10 @@ def context_only_fields_error(supplied_fields, as_named_by_caller=None) -> Optio
     used = sorted(set(CONTEXT_ONLY_FIELDS) & set(supplied_fields))
     if not used:
         return None
-    names = sorted({name for field in used for name in ((as_named_by_caller or {}).get(field) or {field})})
-    return (f"{', '.join(names)} require mode='context'; "
-            "set mode='context' or drop these fields")
+    names = sorted(
+        {name for field in used for name in ((as_named_by_caller or {}).get(field) or {field})}
+    )
+    return f"{', '.join(names)} require mode='context'; set mode='context' or drop these fields"
 
 
 class SearchRequest(BaseModel):
@@ -222,6 +223,8 @@ class SearchRequest(BaseModel):
     level: Optional[Union[int, str, List[int]]] = None
     read_content: bool = False
     telemetry: TelemetryRequest = False
+    events_time_decay_weight: float = Field(default=0.0, ge=0.0, lt=1.0)
+    events_time_decay_protection: str = Field(default="0", pattern=r"^(0|[0-9]+[mhd])$")
 
     mode: Literal["list", "context"] = "list"
 
@@ -247,6 +250,15 @@ class SearchRequest(BaseModel):
 
         if self.read_content:
             raise ValueError("read_content is only supported in mode='list'")
+        decay_fields = {
+            "events_time_decay_weight",
+            "events_time_decay_protection",
+        } & self.model_fields_set
+        if decay_fields:
+            raise ValueError(
+                "events_time_decay_weight and events_time_decay_protection are only "
+                "supported in mode='list'"
+            )
         if self.target_uri:
             raise ValueError("target_uri is not supported in mode='context'")
         _reject_unknown_quota_and_detail(self.quotas, self.detail)
@@ -486,6 +498,8 @@ async def search(
             filter=effective_filter,
             level=_resolve_levels(request.level) or None,
             image_url=resolved_image_url,
+            events_time_decay_weight=request.events_time_decay_weight,
+            events_time_decay_protection=request.events_time_decay_protection,
         )
 
     execution = await run_operation(

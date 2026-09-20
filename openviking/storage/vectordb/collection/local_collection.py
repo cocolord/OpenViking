@@ -50,6 +50,13 @@ from openviking.storage.vectordb.utils.path_safety import (
     safe_join_name,
 )
 from openviking.storage.vectordb.utils.str_to_uint64 import str_to_uint64
+from openviking.utils.time_decay import (
+    apply_time_decay_to_search_items,
+    parse_time_decay_post_process_ops,
+)
+from openviking.utils.time_decay import (
+    post_process_input_limit as default_post_process_input_limit,
+)
 from openviking_cli.utils.logger import default_logger as logger
 
 # Use imported constants, no longer defined here
@@ -507,6 +514,8 @@ class LocalCollection(ICollection):
         filters: Optional[Dict[str, Any]] = None,
         sparse_vector: Optional[Dict[str, float]] = None,
         output_fields: Optional[List[str]] = None,
+        post_process_ops: Optional[List[Dict[str, Any]]] = None,
+        post_process_input_limit: Optional[int] = None,
     ) -> SearchResult:
         search_result = SearchResult()
         index = self.indexes.get(index_name)
@@ -519,21 +528,32 @@ class LocalCollection(ICollection):
             sparse_raw_terms = list(sparse_vector.keys())
             sparse_values = list(sparse_vector.values())
 
-        # Request more results to handle offset
-        actual_limit = limit + offset
+        fusion_spec = parse_time_decay_post_process_ops(post_process_ops)
+        final_window = limit + offset
+        if (
+            fusion_spec is not None
+            and post_process_input_limit is not None
+            and post_process_input_limit < final_window
+        ):
+            raise ValueError(
+                "post_process_input_limit must be greater than or equal to limit + offset"
+            )
+
+        # Score fusion must run on the expanded ANN candidate set before final
+        # pagination.  The no-op path intentionally preserves the old limit.
+        actual_limit = final_window
+        if fusion_spec is not None:
+            actual_limit = post_process_input_limit or default_post_process_input_limit(
+                limit, offset
+            )
         label_list, scores_list = index.search(
             dense_vector or [], actual_limit, filters, sparse_raw_terms, sparse_values
         )
-
-        # Apply offset by slicing the results
-        if offset > 0:
-            label_list = label_list[offset:]
-            scores_list = scores_list[offset:]
-
-        # Limit to requested size
-        if len(label_list) > limit:
-            label_list = label_list[:limit]
-            scores_list = scores_list[:limit]
+        # Some test doubles and older index implementations may return more
+        # than requested; keep hydration and scoring bounded to the actual ANN
+        # candidate budget.
+        label_list = label_list[:actual_limit]
+        scores_list = scores_list[:actual_limit]
 
         pk_list = label_list
         fields_list = []
@@ -614,6 +634,12 @@ class LocalCollection(ICollection):
             SearchItemResult(id=pk, fields=fields, score=score)
             for pk, score, fields in zip_longest(pk_list, scores_list, fields_list)
         ]
+        if fusion_spec is not None:
+            search_result.data = apply_time_decay_to_search_items(
+                search_result.data, fusion_spec, source_fields=cands_fields
+            )
+
+        search_result.data = search_result.data[offset : offset + limit]
         return search_result
 
     def search_by_id(

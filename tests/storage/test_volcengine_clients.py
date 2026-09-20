@@ -1079,3 +1079,43 @@ def test_http_collection_update_data_posts_to_update_endpoint(monkeypatch):
         "collection_name": "context",
         "fields": '[{"id": "doc-1", "name": "updated"}]',
     }
+
+
+def test_http_collection_vector_search_only_sends_post_process_fields_when_enabled(
+    monkeypatch,
+):
+    calls = []
+
+    class _Response:
+        status_code = 200
+        text = '{"data": {"data": []}}'
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(json)
+        return _Response()
+
+    monkeypatch.setattr(
+        "openviking.storage.vectordb.collection.http_collection.requests.post",
+        _fake_post,
+    )
+
+    from openviking.storage.vectordb.collection.http_collection import HttpCollection
+
+    collection = HttpCollection(
+        ip="127.0.0.1",
+        port=1933,
+        meta_data={"ProjectName": "default", "CollectionName": "context"},
+    )
+    collection.search_by_vector("default", dense_vector=[1.0])
+    ops = [{"op": "score_fusion"}]
+    collection.search_by_vector(
+        "default",
+        dense_vector=[1.0],
+        post_process_ops=ops,
+        post_process_input_limit=30,
+    )
+
+    assert "post_process_ops" not in calls[0]
+    assert "post_process_input_limit" not in calls[0]
+    assert calls[1]["post_process_ops"] == ops
+    assert calls[1]["post_process_input_limit"] == 30

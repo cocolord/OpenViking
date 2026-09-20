@@ -30,7 +30,8 @@ class FindOptions(_ExtraOptions, total=False):
 
 
 class SearchOptions(FindOptions, total=False):
-    pass
+    events_time_decay_weight: float
+    events_time_decay_protection: str
 
 
 class SearchContextOptions(_ExtraOptions, total=False):

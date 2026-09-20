@@ -14,8 +14,9 @@ from openviking.core.context import ContextLevel
 from openviking.retrieve.hierarchical_retriever import HierarchicalRetriever, RetrieverMode
 from openviking.server.identity import RequestContext, Role
 from openviking.storage.abstract_overview import render_abstract_overview
+from openviking.utils.time_decay import fuse_time_decay_scores
 from openviking.utils.token_estimation import estimate_text_tokens
-from openviking_cli.retrieve.types import ContextType, TypedQuery
+from openviking_cli.retrieve.types import ContextType, FindResult, TypedQuery
 from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils.config import RerankConfig, RetrievalConfig
 
@@ -202,6 +203,25 @@ class DirectChildProxy:
         ]
 
 
+class TimeDecayChildProxy:
+    def __init__(self):
+        self.calls = []
+
+    async def search_children_in_tenant(self, parent_uri: str, **kwargs):
+        self.calls.append({"parent_uri": parent_uri, **kwargs})
+        return [
+            _result(
+                f"{parent_uri}/event",
+                0.2,
+                abstract="event",
+                context_type="memory",
+                _origin_score=0.2,
+                _time_score=0.9,
+                _event_time_decay=True,
+            )
+        ]
+
+
 class FakeRerankClient:
     def __init__(self, scores):
         self.scores = list(scores)
@@ -222,6 +242,10 @@ def _ctx() -> RequestContext:
 
 def _query() -> TypedQuery:
     return TypedQuery(query="hello", context_type=ContextType.RESOURCE, intent="")
+
+
+def _memory_query() -> TypedQuery:
+    return TypedQuery(query="hello", context_type=ContextType.MEMORY, intent="")
 
 
 def _config() -> RerankConfig:
@@ -370,10 +394,12 @@ async def test_retrieve_falls_back_to_vector_scores_when_rerank_returns_none(mon
         lambda config: fake_client,
     )
 
-    storage = QuickSearchStorage([
-        _result("viking://resources/a/deep-a.md", 0.2, abstract="deep A"),
-        _result("viking://resources/b/deep-b.md", 0.8, abstract="deep B"),
-    ])
+    storage = QuickSearchStorage(
+        [
+            _result("viking://resources/a/deep-a.md", 0.2, abstract="deep A"),
+            _result("viking://resources/b/deep-b.md", 0.8, abstract="deep B"),
+        ]
+    )
     storage.acl_manager = SimpleNamespace(is_enabled=lambda _account_id: True)
 
     async def no_hierarchical_children(*_args, **_kwargs):
@@ -714,3 +740,100 @@ async def test_convert_to_matched_contexts_defaults_tags_and_body_previews():
         markdown,
         "",
     ]
+
+
+@pytest.mark.asyncio
+async def test_quick_mode_forwards_time_decay_only_when_enabled():
+    class DecayAwareQuickStorage(QuickSearchStorage):
+        async def search_in_tenant(self, *args, **kwargs):
+            self.search_calls.append(dict(kwargs))
+            return [dict(result) for result in self.results]
+
+    storage = DecayAwareQuickStorage(
+        [
+            _result(
+                "viking://user/user1/memories/events/recent",
+                0.75,
+                context_type="memory",
+                _origin_score=0.4,
+                _time_score=1.0,
+                _event_time_decay=True,
+            )
+        ]
+    )
+    retriever = HierarchicalRetriever(storage=storage, embedder=DummyEmbedder())
+
+    result = await retriever.retrieve(
+        _memory_query(),
+        ctx=_ctx(),
+        limit=1,
+        mode=RetrieverMode.QUICK,
+        events_time_decay_weight=0.25,
+        events_time_decay_protection="1d",
+    )
+
+    assert storage.search_calls[0]["events_time_decay_weight"] == 0.25
+    assert storage.search_calls[0]["events_time_decay_protection"] == "1d"
+    assert result.matched_contexts[0].score == pytest.approx(0.75)
+    assert result.matched_contexts[0].origin_score == pytest.approx(0.4)
+    assert result.matched_contexts[0].time_score == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_thinking_time_decay_fuses_once_after_rerank_and_propagation(monkeypatch):
+    fake_client = FakeRerankClient([0.8])
+    retriever = HierarchicalRetriever(
+        storage=DummyStorage(),
+        embedder=None,
+        rerank_config=None,
+        retrieval_config=RetrievalConfig(
+            hotness_alpha=0.5,
+            score_propagation_alpha=0.25,
+        ),
+    )
+    retriever._rerank_client = fake_client
+    proxy = TimeDecayChildProxy()
+    fusion_calls = []
+
+    def tracked_fusion(*, origin_score, addition_score, weight):
+        fusion_calls.append((origin_score, addition_score, weight))
+        return fuse_time_decay_scores(
+            origin_score=origin_score, addition_score=addition_score, weight=weight
+        )
+
+    monkeypatch.setattr(
+        "openviking.retrieve.hierarchical_retriever.fuse_time_decay_scores",
+        tracked_fusion,
+    )
+    monkeypatch.setattr(
+        "openviking.retrieve.hierarchical_retriever.hotness_score",
+        lambda *args, **kwargs: pytest.fail("legacy hotness must not run for time-decayed events"),
+    )
+
+    candidates = await retriever._recursive_search(
+        vector_proxy=proxy,
+        query="hello",
+        query_vector=[1.0],
+        sparse_query_vector=None,
+        starting_points=[("viking://user/user1/memories/events", 0.4)],
+        limit=1,
+        mode=RetrieverMode.THINKING,
+        events_time_decay_weight=0.25,
+        events_time_decay_protection="2d",
+    )
+    matched = await retriever._convert_to_matched_contexts(
+        candidates, ctx=_ctx(), apply_hotness=True
+    )
+
+    propagated_rerank_score = 0.25 * 0.8 + 0.75 * 0.4
+    expected = fuse_time_decay_scores(
+        origin_score=propagated_rerank_score, addition_score=0.9, weight=0.25
+    )
+    assert fusion_calls == [(pytest.approx(propagated_rerank_score), 0.9, 0.25)]
+    assert proxy.calls[0]["defer_time_decay_fusion"] is True
+    assert candidates[0]["_final_score"] == pytest.approx(expected)
+    assert matched[0].score == pytest.approx(expected)
+    assert matched[0].origin_score == pytest.approx(propagated_rerank_score)
+    assert matched[0].time_score == pytest.approx(0.9)
+    payload = FindResult(memories=[matched[0]], resources=[], skills=[]).to_dict()
+    assert payload["memories"][0]["time_score"] == pytest.approx(0.9)
