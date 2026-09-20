@@ -107,10 +107,11 @@ def test_builder_and_local_parser_share_cloud_contract():
     assert fused == pytest.approx(0.8 * 0.8 + 0.2 * 0.5)
 
 
-def test_builder_omits_zero_offset_for_cloud_date_time_duration():
+@pytest.mark.parametrize("protection", ["0", "0m", "0h", "0d"])
+def test_builder_omits_zero_offset_for_cloud_date_time_duration(protection):
     ops = build_time_decay_post_process_ops(
         weight=0.2,
-        protection="0",
+        protection=protection,
         origin=datetime(2026, 1, 8, tzinfo=timezone.utc),
         scale="7d",
         decay=0.5,

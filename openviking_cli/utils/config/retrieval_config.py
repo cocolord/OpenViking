@@ -74,5 +74,3 @@ class RetrievalConfig(BaseModel):
                 "retrieval.events_time_decay_decay must be configured together"
             )
         return self
-
-    model_config = {"extra": "forbid"}

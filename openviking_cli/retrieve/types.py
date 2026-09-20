@@ -284,11 +284,10 @@ class MatchedContext:
     overview: Optional[str] = None
     category: str = ""
     score: float = 0.0
+    match_reason: str = ""
+    search_tags: List[str] = field(default_factory=list)
     origin_score: Optional[float] = None
     time_score: Optional[float] = None
-    match_reason: str = ""
-
-    search_tags: List[str] = field(default_factory=list)
 
 
 @dataclass

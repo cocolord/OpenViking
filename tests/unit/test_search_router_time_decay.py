@@ -53,6 +53,8 @@ async def test_search_router_forwards_time_decay_parameters(monkeypatch):
         ("events_time_decay_weight", 1.0),
         ("events_time_decay_weight", float("nan")),
         ("events_time_decay_weight", float("inf")),
+        ("events_time_decay_weight", False),
+        ("events_time_decay_weight", True),
         ("events_time_decay_protection", "1w"),
         ("events_time_decay_protection", "-1d"),
     ],
@@ -60,6 +62,15 @@ async def test_search_router_forwards_time_decay_parameters(monkeypatch):
 def test_search_request_rejects_invalid_time_decay_parameters(field, value):
     with pytest.raises(ValidationError):
         search_router.SearchRequest(query="sample", **{field: value})
+
+
+def test_search_request_keeps_numeric_string_weight_compatibility():
+    request = search_router.SearchRequest(
+        query="sample",
+        events_time_decay_weight="0.25",
+    )
+
+    assert request.events_time_decay_weight == 0.25
 
 
 def test_find_request_rejects_time_decay_parameters():

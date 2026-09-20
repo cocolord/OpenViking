@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, Union
 
 from fastapi import APIRouter, Depends
 from fastapi import Response as FastAPIResponse
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from openviking.core.path_variables import resolve_path_variables
 from openviking.core.uri_validation import validate_request_viking_uri
@@ -239,6 +239,13 @@ class SearchRequest(BaseModel):
     other_peer_penalty: Optional[Union[float, Dict[str, float]]] = None
     rewrite: Union[bool, Literal["auto"]] = False
     rewrite_max_bullets: int = Field(default=6, ge=1, le=20)
+
+    @field_validator("events_time_decay_weight", mode="before")
+    @classmethod
+    def _reject_boolean_time_decay_weight(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("events_time_decay_weight must be a number, not a boolean")
+        return value
 
     @model_validator(mode="after")
     def _validate_mode(self) -> "SearchRequest":

@@ -167,7 +167,7 @@ def build_time_decay_post_process_ops(
 ) -> list[dict[str, Any]]:
     """Build the VikingDB score-fusion payload; zero weight emits no operator."""
     checked_weight = validate_time_decay_weight(weight)
-    parse_duration_ms(protection, parameter_name="events_time_decay_protection")
+    protection_ms = parse_duration_ms(protection, parameter_name="events_time_decay_protection")
     if checked_weight == 0.0:
         return []
     if scale is None or decay is None:
@@ -192,7 +192,7 @@ def build_time_decay_post_process_ops(
     }
     # VikingDB documents offset as optional with a zero default, while its
     # date_time parser rejects explicit zero durations (both "0" and "0d").
-    if protection != "0":
+    if protection_ms > 0:
         addition["offset"] = protection
     return [
         {
