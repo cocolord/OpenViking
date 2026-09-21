@@ -157,29 +157,20 @@ async def _get_existing_created_at(
         return None
 
 
-async def resolve_source_updated_at(
-    uri: str,
-    ctx: Optional[RequestContext],
-    fallback: object = None,
-) -> Optional[datetime]:
-    """Read the source mtime, falling back to an existing index timestamp."""
-    try:
-        stat_result = await get_viking_fs().stat(uri, ctx=ctx, skip_count=True)
-        updated_at = _coerce_datetime((stat_result or {}).get("modTime"))
-        if updated_at is not None:
-            return updated_at
-    except Exception:
-        pass
-    return _coerce_datetime(fallback)
-
-
 async def _resolve_context_timestamps(
     uri: str,
     ctx: Optional[RequestContext],
     *,
     preserve_existing_created_at: bool = False,
 ) -> tuple[datetime, datetime]:
-    updated_at = await resolve_source_updated_at(uri, ctx) or datetime.now(timezone.utc)
+    updated_at = datetime.now(timezone.utc)
+    try:
+        stat_result = await get_viking_fs().stat(uri, ctx=ctx, skip_count=True)
+        stat_mod_time = _coerce_datetime((stat_result or {}).get("modTime"))
+        if stat_mod_time is not None:
+            updated_at = stat_mod_time
+    except Exception:
+        pass
 
     created_at = updated_at
     if preserve_existing_created_at:

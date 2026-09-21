@@ -45,7 +45,6 @@ from openviking.utils.embedding_utils import (
     _apply_ingest_options,
     _truncate_abstract_bytes,
     get_resource_content_type,
-    resolve_source_updated_at,
     vectorize_directory_meta,
     vectorize_file,
 )
@@ -1687,7 +1686,6 @@ class ReindexExecutor:
                         level=ContextLevel.DETAIL,
                         ctx=ctx,
                         ingest_options=ingest_options,
-                        existing_record=existing,
                     )
                     file_counters.rebuilt_records += 1
                 except Exception as exc:
@@ -1706,7 +1704,6 @@ class ReindexExecutor:
                     level=ContextLevel.DETAIL,
                     ctx=ctx,
                     ingest_options=ingest_options,
-                    existing_record=existing,
                 )
                 file_counters.rebuilt_records += 1
                 file_counters.warnings.append(
@@ -1863,7 +1860,6 @@ class ReindexExecutor:
         ctx: RequestContext,
         meta: Optional[dict[str, Any]] = None,
         ingest_options: IngestOptions | None = None,
-        existing_record: Optional[dict[str, Any]] = None,
     ) -> None:
         service = get_service()
         assert service.vikingdb_manager is not None
@@ -1882,12 +1878,6 @@ class ReindexExecutor:
             owner_space=owner_space_for_uri(uri),
             meta=merged_meta,
         )
-        if context_type == ContextType.MEMORY.value and level == ContextLevel.DETAIL:
-            # Reindexing must not make old events look freshly updated. Assign
-            # after construction so an unknown source time stays None.
-            context.updated_at = await resolve_source_updated_at(
-                uri, owner_ctx, (existing_record or {}).get("updated_at")
-            )
         context.set_vectorize(Vectorize(text=vector_text))
         msg = EmbeddingMsgConverter.from_context(context)
         _apply_ingest_options(msg, ingest_options)
@@ -1926,7 +1916,6 @@ class ReindexExecutor:
             level=level,
             limit=1,
             ctx=ctx,
-            output_fields=["abstract", "updated_at"],
         )
         return records[0] if records else None
 

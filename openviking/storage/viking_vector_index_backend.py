@@ -1915,7 +1915,6 @@ class VikingVectorIndexBackend:
         limit: int = 1,
         *,
         ctx: RequestContext,
-        output_fields: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         conds: List[FilterExpr] = [
             PathScope("uri", uri, depth=0),
@@ -1928,7 +1927,7 @@ class VikingVectorIndexBackend:
         return await backend.filter(
             filter=And(conds),
             limit=limit,
-            output_fields=LOOKUP_OUTPUT_FIELDS if output_fields is None else output_fields,
+            output_fields=LOOKUP_OUTPUT_FIELDS,
         )
 
     async def get_l2_abstracts_by_uris(

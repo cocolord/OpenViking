@@ -525,7 +525,6 @@ class VikingDBManagerProxy:
         limit: int = 1,
         *,
         ctx: Optional[RequestContext] = None,
-        output_fields: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         return await self._manager.get_context_by_uri(
             uri=uri,
@@ -533,7 +532,6 @@ class VikingDBManagerProxy:
             level=level,
             limit=limit,
             ctx=ctx if ctx is not None else self._ctx,
-            output_fields=output_fields,
         )
 
     async def delete_account_data(self, account_id: str) -> int:
