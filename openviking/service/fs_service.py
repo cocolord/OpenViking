@@ -11,7 +11,12 @@ from collections.abc import Coroutine
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Literal, Optional
 
 from openviking.core.context import ContextLevel
-from openviking.core.namespace import classify_uri, context_type_for_uri, uri_leaf_name
+from openviking.core.namespace import (
+    classify_uri,
+    context_type_for_uri,
+    is_session_uri,
+    uri_leaf_name,
+)
 from openviking.privacy import (
     UserPrivacyConfigService,
     get_skill_name_from_uri,
@@ -50,6 +55,8 @@ logger = get_logger(__name__)
 
 def _may_include_memory_content(uri: str) -> bool:
     """Return whether a public subtree read can contain memory files."""
+    if is_session_uri(uri):
+        return False
     classification = classify_uri(uri)
     if classification.is_memory:
         return True

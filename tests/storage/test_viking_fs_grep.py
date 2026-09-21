@@ -107,6 +107,87 @@ async def test_grep_without_config_uses_documented_remote_threshold(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_session_grep_forces_fs_engine_in_auto_mode(monkeypatch):
+    viking_fs = VikingFS(agfs=_DummyAgfs())
+    monkeypatch.setattr(viking_fs, "stat", AsyncMock(return_value={"isDir": True}))
+    resolve_engine = AsyncMock(return_value="vikingdb_then_fs")
+    grep_fs = AsyncMock(
+        return_value={"matches": [], "count": 0, "match_count": 0, "files_scanned": 0}
+    )
+    grep_vikingdb = AsyncMock()
+    monkeypatch.setattr(viking_fs, "_resolve_grep_engine", resolve_engine)
+    monkeypatch.setattr(viking_fs, "_grep_fs", grep_fs)
+    monkeypatch.setattr(viking_fs, "_grep_vikingdb_then_fs", grep_vikingdb)
+
+    await viking_fs.grep(
+        "viking://user/alice/sessions/session-1",
+        pattern="needle",
+    )
+
+    resolve_engine.assert_not_awaited()
+    grep_fs.assert_awaited_once()
+    grep_vikingdb.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_primary_only_session_grep_uses_native_agfs(monkeypatch):
+    viking_fs = VikingFS(agfs=_DummyAgfs())
+    native_result = {"matches": [], "count": 0, "match_count": 0, "files_scanned": 4}
+    native_grep = AsyncMock(return_value=native_result)
+    fallback_grep = AsyncMock()
+    monkeypatch.setattr(viking_fs, "_session_native_grep_safe", AsyncMock(return_value=True))
+    monkeypatch.setattr(viking_fs, "_grep_with_agfs", native_grep)
+    monkeypatch.setattr(viking_fs, "_grep_encrypted", fallback_grep)
+
+    result = await viking_fs._grep_fs(
+        uri="viking://user/alice/sessions/session-1",
+        pattern="needle",
+        exclude_uri="viking://user/alice/sessions/session-1/tools",
+        case_insensitive=True,
+        node_limit=7,
+        level_limit=3,
+        ctx=None,
+    )
+
+    assert result == native_result
+    native_grep.assert_awaited_once_with(
+        uri="viking://user/alice/sessions/session-1",
+        pattern="needle",
+        exclude_uri="viking://user/alice/sessions/session-1/tools",
+        case_insensitive=True,
+        node_limit=7,
+        level_limit=3,
+        ctx=None,
+    )
+    fallback_grep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_session_grep_with_visible_legacy_data_uses_merge_fallback(monkeypatch):
+    viking_fs = VikingFS(agfs=_DummyAgfs())
+    fallback_result = {"matches": [], "count": 0, "match_count": 0, "files_scanned": 2}
+    native_grep = AsyncMock()
+    fallback_grep = AsyncMock(return_value=fallback_result)
+    monkeypatch.setattr(viking_fs, "_session_native_grep_safe", AsyncMock(return_value=False))
+    monkeypatch.setattr(viking_fs, "_grep_with_agfs", native_grep)
+    monkeypatch.setattr(viking_fs, "_grep_encrypted", fallback_grep)
+
+    result = await viking_fs._grep_fs(
+        uri="viking://user/alice/sessions/session-1",
+        pattern="needle",
+        exclude_uri=None,
+        case_insensitive=False,
+        node_limit=None,
+        level_limit=10,
+        ctx=None,
+    )
+
+    assert result == fallback_result
+    native_grep.assert_not_awaited()
+    fallback_grep.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("node_limit", "expected_remote_limit"),
     [

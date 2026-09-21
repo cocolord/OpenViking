@@ -304,6 +304,14 @@ async def test_grep_projects_memory_content_but_keeps_resource_fast_path(request
     await service.grep("viking://resources", "secret", ctx=request_context)
     assert "content_transform" not in viking_fs.grep.await_args.kwargs
 
+    viking_fs.grep.reset_mock()
+    await service.grep(
+        "viking://user/ryoma/sessions/session-1",
+        "secret",
+        ctx=request_context,
+    )
+    assert "content_transform" not in viking_fs.grep.await_args.kwargs
+
 
 @pytest.mark.asyncio
 async def test_grep_projects_tags_for_each_match(request_context):

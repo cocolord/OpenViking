@@ -75,7 +75,7 @@ class _GrepMixin:
         # persisted raw content, so it cannot safely recall projected results.
         resolved_engine = (
             "fs"
-            if content_transform is not None
+            if content_transform is not None or self._legacy_session_alias(uri) is not None
             else await self._resolve_grep_engine(engine, uri, ctx, switch_to_remote_threshold)
         )
         tags_by_uri: Dict[str, List[str]] = {}
@@ -235,7 +235,12 @@ class _GrepMixin:
         allowed_uris=None,
     ):
         """Filesystem grep path: prefer native agfs grep and fall back if unavailable."""
-        if content_transform is None and allowed_uris is None:
+        native_safe = (
+            content_transform is None
+            and allowed_uris is None
+            and await self._session_native_grep_safe(uri, ctx)
+        )
+        if native_safe:
             try:
                 return await self._grep_with_agfs(
                     uri=uri,
@@ -260,6 +265,34 @@ class _GrepMixin:
             content_transform=content_transform,
             allowed_uris=allowed_uris,
         )
+
+    async def _session_native_grep_safe(self, uri: str, ctx: Optional[RequestContext]) -> bool:
+        """Return whether native grep sees every visible path for ``uri``.
+
+        Canonical session reads merge the current user namespace with two
+        historical storage layouts. Native AGFS grep accepts one physical
+        root, so it is complete only when no visible legacy candidate exists.
+        """
+        legacy_uri = self._legacy_session_alias(uri)
+        if legacy_uri is None:
+            return True
+
+        real_ctx = self._ctx_or_default(ctx)
+        if self._is_session_root_uri(uri):
+            legacy_path = self._legacy_session_path(legacy_uri, ctx=ctx)
+            owner_user_id = self._safe_uri_parts(uri)[1]
+            legacy_items = await self._legacy_session_root_items(
+                legacy_path, real_ctx, uri.rstrip("/"), owner_user_id
+            )
+            return not legacy_items
+
+        primary_path = self._uri_to_path(uri, ctx=ctx)
+        for path in self._read_paths(uri, ctx=ctx)[1:]:
+            if not await self._agfs_path_exists(path):
+                continue
+            if await self._read_path_visible(uri, path, primary_path, real_ctx):
+                return False
+        return True
 
     async def _grep_vikingdb_then_fs(
         self,
