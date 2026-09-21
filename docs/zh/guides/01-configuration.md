@@ -88,7 +88,7 @@ PATCH /api/v1/admin/accounts/{account_id}/configuration
 }
 ```
 
-PATCH 采用三态语义：字段缺失表示不修改，具体值表示设置或替换，`null` 表示删除当前层的覆盖。对象递归合并，数组整体替换。响应返回目标层的显式值，不返回继承值或最终生效值。权限、校验、fallback 和兼容接口详见 [Admin API - 运行时配置](../api/08-admin.md#runtime_configuration)；实现设计见 [运行时配置设计](../../design/runtime-configuration-design.md)。
+PATCH 采用三态语义：字段缺失表示不修改，具体值表示设置或替换，`null` 表示删除当前层的覆盖。对象递归合并，数组整体替换。响应返回目标层的显式值，不返回继承值或最终生效值。权限、校验、fallback 和兼容接口详见 [Admin API - 运行时配置](../api/08-admin.md#runtime-configuration)；实现设计见 [运行时配置设计](../../design/runtime-configuration-design.md)。
 
 ## 配置示例
 
@@ -652,11 +652,12 @@ provider，并设置 `storage.vectordb.sparse_weight > 0`。自托管模型的�
 | `thinking` | bool | 启用思考模式（仅对部分火山模型生效，默认：`false`） |
 | `max_concurrent` | int | 语义处理阶段 LLM 最大并发调用数（默认：`32`） |
 | `max_retries` | int | VLM provider 瞬时错误的最大重试次数（默认：`3`；`0` 表示禁用重试） |
-| `credentials` | array | 有序 VLM 凭据/模型列表，索引 0 优先级最高。每项可单独覆盖 `provider`、`model`、`api_key`、`api_base`、`api_version`、`extra_headers`、`extra_request_body` 和 `reasoning_effort` |
+| `credentials` | array | 有序 VLM 凭据/模型列表，索引 0 优先级最高。每项可单独覆盖 `provider`、`model`、`api_key`、`api_base`、`api_version`、`extra_headers`、`extra_request_body`、`reasoning_effort` 和 `keepalive_expiry` |
 | `failback_timeout_seconds` | float | 切换到低优先级 credential 后，尝试逐级切回的时间阈值（默认：`600`） |
 | `failback_request_count` | int | 低优先级 credential 成功处理多少次请求后尝试逐级切回（默认：`50`） |
 | `backup` | object | 可选的备用 VLM 配置（结构与 `vlm` 相同），当主 VLM 遇到限流、`5xx`、超时或连接失败等可重试错误时自动切换。仅支持 1 层备用 &mdash; 备用 VLM 本身不能再嵌套 `backup` |
 | `timeout` | float | 单次 VLM API 请求的 HTTP 超时时间（秒），传递给底层 OpenAI/LiteLLM 客户端。慢端点（如 DashScope、本地推理）可调大。必须 `> 0`（默认：`600.0`） |
+| `keepalive_expiry` | float | OpenAI 兼容 VLM 客户端的空闲连接保留秒数。设为 `0` 可禁用空闲连接复用；不设置时使用 OpenAI SDK 默认值。必须 `>= 0` |
 | `extra_headers` | object | 兼容 HTTP provider 的自定义请求头。`kimi` 默认已注入所需订阅请求头，也支持在这里覆盖或扩展 |
 | `extra_request_body` | object | 传给 OpenAI 兼容 completion 请求的额外 JSON body 字段，可用于 Ollama `{"think": false}` 等 provider 专有参数 |
 | `reasoning_effort` | str | `openai`、`azure`、`kimi`、`glm` 和 `openai-codex` 的推理强度，显式配置时发送；可用值由模型决定。不设置时，GPT-5/o 系列名称保留 `low`，其他模型不发送。Chat Completions 请求中，`extra_request_body.reasoning_effort` 优先 |
@@ -1335,8 +1336,8 @@ RAGFS 默认使用 Rust binding 模式，通过 Rust 实现直接访问文件系
 
 - `memory.session_auto_commit` 是服务端全局配置，不是单个 session 的业务 policy。
 - session 级别的自动触发参数通过 session 级 `auto_commit_policy` 设置（见下表）。可以在创建 session 时通过 `POST /api/v1/sessions` 设置，也可以通过 `PATCH /api/v1/sessions/{session_id}/config` 部分更新。PATCH 时省略 `auto_commit_policy` 会保留现有策略，传 `null` 会禁用自动 commit；通过 `GET /api/v1/sessions/{session_id}` 查看生效策略。
-- `default_enabled=false` 时，未传 `auto_commit_policy` 创建的 session 保持 auto commit 关闭，返回 `auto_commit_policy: null`。显式传 `{}` 或任意 policy 字段会为该 session 开启 auto commit，并用下方默认值补齐缺失字段。
-- `default_enabled=true` 时，未传 `auto_commit_policy` 创建的 session 会带上下方默认 policy。
+- `default_enabled=false` 时，既无显式 policy、也无 `server.user_config_defaults.auto_commit_policy` 的新 Session 保持 auto commit 关闭，并返回 `auto_commit_policy: null`。任一 policy 存在时都会启用自动 Commit，并用下方默认值补齐缺失字段。
+- `default_enabled=true` 时，既无显式 policy、也无部署级默认 policy 的新 Session 会带上下方内置 policy。
 - `idle_enabled=false` 时：
   - 不会启动 `SessionAutoCommitScheduler`
 - `idle_enabled=true` 时：
@@ -1702,6 +1703,7 @@ ov add-resource ./docs --exclude "*.tmp"
 | `user_config_defaults.add_targets.resource_uri` | str | `add_resource` 未传 `to` 和 `parent` 时使用的部署级默认资源添加目录。`viking://~/...` 会按请求用户解析。 | `null` |
 | `user_config_defaults.add_targets.skill_uri` | str | `add_skill` 未传 `target_uri` 时使用的部署级默认技能添加根目录。仅允许 `viking://~/skills` 和 `viking://agent/skills`。 | `null` |
 | `user_config_defaults.memory_policy` | object | Session 和 User 都未显式配置策略时使用的部署级默认记忆抽取策略。 | `null` |
+| `user_config_defaults.auto_commit_policy` | object | 新建 Session 未显式指定策略时使用的部署级自动 Commit 默认策略。 | `null` |
 | `agent_evolution.enabled` | bool | Agent 进化的集群启动默认值，运行时可由 Account 或 Cluster Admin settings 覆盖。开启时，session commit 可按 session `memory_policy` 生成或更新 cases、trajectories 和 experiences；关闭后已有记忆仍可读取和检索。 | `false` |
 
 省略 `auth_mode`（或设为 `null`）时，配置了非空 `root_api_key` 则选择 `api_key`，否则选择 `dev`。`dev` 仅允许监听 localhost，不进行身份认证。`root_api_key` 不能配置为空字符串。

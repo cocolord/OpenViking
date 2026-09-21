@@ -305,6 +305,10 @@ def create_app(
         if callable(user_memory_policy_setter):
             user_memory_policy_setter(config.user_config_defaults.memory_policy)
 
+        auto_commit_setter = getattr(sessions, "set_default_user_auto_commit_policy", None)
+        if callable(auto_commit_setter):
+            auto_commit_setter(config.user_config_defaults.auto_commit_policy)
+
     if service is not None:
         _configure_session_runtime(service)
 

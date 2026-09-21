@@ -209,10 +209,10 @@ def test_parser_api_upload_defaults():
     assert config.upload_part_size_bytes == 8 * 1024 * 1024
 
 
-def test_directory_safety_limits_have_bounded_defaults():
+def test_directory_safety_limit_defaults():
     config = DirectoryConfig()
 
-    assert config.max_files == 1000
+    assert config.max_files is None
     assert config.max_depth == 10
     assert config.max_concurrent == 4
 
@@ -222,7 +222,7 @@ def test_directory_safety_limits_load_from_parser_config():
         {
             "parsers": {
                 "directory": {
-                    "max_files": 20,
+                    "max_files": None,
                     "max_depth": 5,
                     "max_concurrent": 2,
                 }
@@ -230,7 +230,7 @@ def test_directory_safety_limits_load_from_parser_config():
         }
     )
 
-    assert config.directory.max_files == 20
+    assert config.directory.max_files is None
     assert config.directory.max_depth == 5
     assert config.directory.max_concurrent == 2
 

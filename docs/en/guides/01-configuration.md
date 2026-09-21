@@ -87,7 +87,7 @@ The request body wraps a sparse patch in `settings`:
 }
 ```
 
-PATCH uses three states: an omitted field is unchanged, a concrete value sets or replaces the value, and `null` removes the override at that layer. Objects merge recursively and arrays replace as a whole. The response contains explicit values at the addressed layer, not inherited or effective values. See [Admin API - Runtime Configuration](../api/08-admin.md#runtime_configuration) for permissions, validation, fallback, and compatibility details. The implementation design is documented in [Runtime Configuration Design](../../design/runtime-configuration-design.md).
+PATCH uses three states: an omitted field is unchanged, a concrete value sets or replaces the value, and `null` removes the override at that layer. Objects merge recursively and arrays replace as a whole. The response contains explicit values at the addressed layer, not inherited or effective values. See [Admin API - Runtime Configuration](../api/08-admin.md#runtime-configuration) for permissions, validation, fallback, and compatibility details. The implementation design is documented in [Runtime Configuration Design](../../design/runtime-configuration-design.md).
 
 ## Configuration Examples
 
@@ -683,11 +683,12 @@ Vision Language Model for semantic extraction (L0/L1 generation).
 | `thinking` | bool | Enable thinking mode for VolcEngine models (default: `false`) |
 | `max_concurrent` | int | Maximum concurrent semantic LLM calls (default: `32`) |
 | `max_retries` | int | Maximum retry attempts for transient VLM provider errors (default: `3`; `0` disables retry) |
-| `credentials` | array | Ordered VLM credential/model list, with index 0 having the highest priority. Each item can override `provider`, `model`, `api_key`, `api_base`, `api_version`, `extra_headers`, `extra_request_body`, and `reasoning_effort` |
+| `credentials` | array | Ordered VLM credential/model list, with index 0 having the highest priority. Each item can override `provider`, `model`, `api_key`, `api_base`, `api_version`, `extra_headers`, `extra_request_body`, `reasoning_effort`, and `keepalive_expiry` |
 | `failback_timeout_seconds` | float | Time threshold for attempting a step back toward a higher-priority credential after failover (default: `600`) |
 | `failback_request_count` | int | Successful requests on a lower-priority credential before attempting a step back (default: `50`) |
 | `backup` | object | Optional backup VLM configuration (same shape as `vlm`) for automatic failover when the primary fails with retryable errors such as rate limits, `5xx` responses, or connection/timeout failures. Only one level of failover is supported &mdash; the backup itself cannot define a nested `backup` |
 | `timeout` | float | Per-request HTTP timeout in seconds passed to the underlying OpenAI/LiteLLM client. Increase for slow endpoints (e.g., DashScope, local inference). Must be `> 0` (default: `600.0`) |
+| `keepalive_expiry` | float | Idle connection lifetime in seconds for OpenAI-compatible VLM clients. Set to `0` to disable idle connection reuse; unset uses the OpenAI SDK default. Must be `>= 0` |
 | `extra_headers` | object | Custom HTTP headers for compatible HTTP providers. `kimi` also accepts header overrides, but already injects the required subscription headers by default |
 | `extra_request_body` | object | Extra JSON body fields for OpenAI-compatible completion requests, useful for provider-specific options such as Ollama `{"think": false}` |
 | `reasoning_effort` | str | Reasoning effort for `openai`, `azure`, `kimi`, `glm`, and `openai-codex`; explicit values are forwarded, and accepted values depend on the model. When unset, GPT-5/o-series names retain `low`; other models omit the field. For Chat Completions, `extra_request_body.reasoning_effort` takes precedence |
@@ -1360,8 +1361,8 @@ Notes:
 
 - `memory.session_auto_commit` is a server-wide control surface, not a per-session business policy.
 - Per-session auto-commit behavior is configured through the session-level `auto_commit_policy` (see the table below). Set it when creating a session with `POST /api/v1/sessions`, or partially update it through `PATCH /api/v1/sessions/{session_id}/config`. Omitting `auto_commit_policy` from a PATCH preserves it; sending `null` disables automatic commits. Use `GET /api/v1/sessions/{session_id}` to inspect the effective policy.
-- When `default_enabled=false`, sessions created without `auto_commit_policy` keep auto commit disabled and return `auto_commit_policy: null`. Providing `{}` or any policy field explicitly enables auto commit for that session and fills missing fields from the defaults below.
-- When `default_enabled=true`, sessions created without `auto_commit_policy` get the default policy below.
+- When `default_enabled=false`, sessions created without an explicit or `server.user_config_defaults.auto_commit_policy` policy keep auto commit disabled and return `auto_commit_policy: null`. Providing either policy enables auto commit and fills missing fields from the defaults below.
+- When `default_enabled=true`, sessions without an explicit or deployment-default policy get the built-in policy below.
 - When `idle_enabled=false`:
   - `SessionAutoCommitScheduler` is not started
 - When `idle_enabled=true`:
@@ -1730,6 +1731,7 @@ When running OpenViking as an HTTP service, add a `server` section to `ov.conf`:
 | `user_config_defaults.add_targets.resource_uri` | str | Deployment default resource add directory used when `add_resource` omits both `to` and `parent`. `viking://~/...` resolves per request user. | `null` |
 | `user_config_defaults.add_targets.skill_uri` | str | Deployment default skill add root used when `add_skill` omits `target_uri`. Only `viking://~/skills` and `viking://agent/skills` are accepted. | `null` |
 | `user_config_defaults.memory_policy` | object | Deployment default memory extraction policy used when neither the Session nor the User has an explicit policy. | `null` |
+| `user_config_defaults.auto_commit_policy` | object | Deployment default auto-commit policy for newly created sessions without an explicit policy. | `null` |
 | `agent_evolution.enabled` | bool | Startup cluster default for Agent Evolution. Account and Cluster Admin settings may override it at runtime. When enabled, session commits may generate or update cases, trajectories, and experiences according to the session `memory_policy`. Existing memories remain readable and searchable when disabled. | `false` |
 
 Omitting `auth_mode` (or setting it to `null`) selects `api_key` when a non-empty `root_api_key` is configured, and `dev` otherwise. `dev` is allowed only on localhost and accepts requests without authentication. An empty-string `root_api_key` is invalid.
