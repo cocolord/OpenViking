@@ -288,6 +288,7 @@ class VikingDBCollection(ICollection):
                 "post_process_ops": post_process_ops,
                 "post_process_input_limit": post_process_input_limit,
             }
+            data["return_detail_info"] = True
         resp_data = self._data_post(path, data)
         return self._parse_search_result(resp_data)
 
