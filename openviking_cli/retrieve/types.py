@@ -349,7 +349,7 @@ class FindResult:
             include_provenance: If True, include query_results with thinking
                 trace and searched_directories for retrieval observability.
         """
-        result = {
+        result: Dict[str, Any] = {
             "memories": [self._context_to_dict(m) for m in self.memories],
             "resources": [self._context_to_dict(r) for r in self.resources],
             "skills": [self._context_to_dict(s) for s in self.skills],
@@ -374,7 +374,7 @@ class FindResult:
         ``search_tags`` is surfaced under the ``tags`` key to match the
         ``tags`` filter parameter accepted by find/search.
         """
-        result = {
+        result: Dict[str, Any] = {
             "context_type": ctx.context_type.value,
             "uri": ctx.uri,
             "level": ctx.level,

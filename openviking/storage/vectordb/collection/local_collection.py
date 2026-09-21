@@ -51,6 +51,7 @@ from openviking.storage.vectordb.utils.path_safety import (
 )
 from openviking.storage.vectordb.utils.str_to_uint64 import str_to_uint64
 from openviking.utils.time_decay import (
+    MAX_VECTOR_POST_PROCESS_INPUT_LIMIT,
     apply_time_decay_to_search_items,
     parse_time_decay_post_process_ops,
 )
@@ -538,6 +539,14 @@ class LocalCollection(ICollection):
             raise ValueError(
                 "post_process_input_limit must be greater than or equal to limit + offset"
             )
+        if (
+            fusion_spec is not None
+            and post_process_input_limit is not None
+            and post_process_input_limit > MAX_VECTOR_POST_PROCESS_INPUT_LIMIT
+        ):
+            raise ValueError(
+                f"post_process_input_limit must not exceed {MAX_VECTOR_POST_PROCESS_INPUT_LIMIT}"
+            )
 
         # Score fusion must run on the expanded ANN candidate set before final
         # pagination.  The no-op path intentionally preserves the old limit.
@@ -549,11 +558,13 @@ class LocalCollection(ICollection):
         label_list, scores_list = index.search(
             dense_vector or [], actual_limit, filters, sparse_raw_terms, sparse_values
         )
-        # Some test doubles and older index implementations may return more
-        # than requested; keep hydration and scoring bounded to the actual ANN
-        # candidate budget.
-        label_list = label_list[:actual_limit]
-        scores_list = scores_list[:actual_limit]
+        if fusion_spec is None:
+            # Preserve the original hydration budget when decay is disabled.
+            label_list = label_list[offset : offset + limit]
+            scores_list = scores_list[offset : offset + limit]
+        else:
+            label_list = label_list[:actual_limit]
+            scores_list = scores_list[:actual_limit]
 
         pk_list = label_list
         fields_list = []
@@ -638,8 +649,7 @@ class LocalCollection(ICollection):
             search_result.data = apply_time_decay_to_search_items(
                 search_result.data, fusion_spec, source_fields=cands_fields
             )
-
-        search_result.data = search_result.data[offset : offset + limit]
+            search_result.data = search_result.data[offset : offset + limit]
         return search_result
 
     def search_by_id(

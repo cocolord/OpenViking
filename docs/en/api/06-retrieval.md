@@ -411,7 +411,7 @@ The `search()` method adds session context understanding and intent analysis cap
 
 `search()` uses the same target resolution and explicit tag filtering rules as `find()`, including the peer collection filter selected by `X-OpenViking-Actor-Peer` or SDK `actor_peer_id`. When `image_url` is provided, `search()` uses direct image retrieval and skips session query planning.
 
-Event time decay applies only to L2 results under the current user's `viking://user/{user_id}/memories/events/`. It does not affect peer events, L0/L1, or `find`, `recall`, `grep`, and `glob`. Enabled event results use `score = origin_score * (1 - weight) + time_score * weight` and expose `origin_score` and `time_score`. A missing or invalid `updated_at` keeps the original score and returns `time_score` as `null`. The server must also configure the internal curve pair `retrieval.events_time_decay_scale` and `retrieval.events_time_decay_decay`; a positive-weight request fails when the curve is not configured instead of assuming a default.
+Event time decay applies only to L2 results under the current user's `viking://user/{user_id}/memories/events/`. It does not affect peer events, L0/L1, or `find`, `recall`, `grep`, and `glob`. Enabled event results use `score = origin_score * (1 - weight) + time_score * weight` and expose `origin_score` and `time_score`. A missing or invalid `updated_at` keeps the original score and returns `time_score` as `null`. The curve is owned by the server; callers only provide the per-request weight and protection period. No `ov.conf` or `ovcli.conf` change is required.
 
 #### 3. Usage Examples
 

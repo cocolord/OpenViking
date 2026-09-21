@@ -135,6 +135,14 @@ impl CliContext {
     }
 }
 
+fn parse_events_time_decay_weight(value: &str) -> std::result::Result<f64, String> {
+    let weight: f64 = value.parse().map_err(|_| "weight must be a number")?;
+    if !weight.is_finite() || !(0.0..1.0).contains(&weight) {
+        return Err("weight must be a finite number in [0, 1)".to_string());
+    }
+    Ok(weight)
+}
+
 #[derive(Parser)]
 #[command(name = "openviking")]
 #[command(about = "OpenViking - An Agent-native context database")]
@@ -914,6 +922,21 @@ enum Commands {
         /// Include the full visible content for every matched URI
         #[arg(long, help_heading = "Advanced options")]
         read_content: bool,
+        /// Event freshness weight in [0, 1); 0 keeps the original ranking
+        #[arg(
+            long,
+            alias = "events_time_decay_weight",
+            value_parser = parse_events_time_decay_weight,
+            help_heading = "Advanced options"
+        )]
+        events_time_decay_weight: Option<f64>,
+        /// Protection duration: 0 or a non-negative integer with m, h, or d
+        #[arg(
+            long,
+            alias = "events_time_decay_protection",
+            help_heading = "Advanced options"
+        )]
+        events_time_decay_protection: Option<String>,
     },
     /// [Data] Run content pattern search
     Grep {
@@ -3760,6 +3783,8 @@ async fn main() {
             context_type,
             tags,
             read_content,
+            events_time_decay_weight,
+            events_time_decay_protection,
         } => {
             handlers::handle_search(
                 query,
@@ -3774,6 +3799,8 @@ async fn main() {
                 context_type,
                 tags,
                 read_content,
+                events_time_decay_weight,
+                events_time_decay_protection,
                 ctx,
             )
             .await
@@ -4010,6 +4037,57 @@ mod tests {
                 assert_eq!(context_type, Some(vec!["skill".to_string()]));
             }
             _ => panic!("expected search command"),
+        }
+    }
+
+    #[test]
+    fn cli_search_decay_aliases_reject_duplicates() {
+        for flag in ["--events-time-decay-weight", "--events_time_decay_weight"] {
+            let cli = Cli::try_parse_from([
+                "ov",
+                "search",
+                "event",
+                flag,
+                "0.25",
+                "--events_time_decay_protection",
+                "30m",
+            ])
+            .unwrap();
+            match cli.command {
+                Commands::Search {
+                    events_time_decay_weight,
+                    events_time_decay_protection,
+                    ..
+                } => {
+                    assert_eq!(events_time_decay_weight, Some(0.25));
+                    assert_eq!(events_time_decay_protection.as_deref(), Some("30m"));
+                }
+                _ => panic!("expected search command"),
+            }
+        }
+        assert!(
+            Cli::try_parse_from([
+                "ov",
+                "search",
+                "event",
+                "--events-time-decay-weight",
+                "0.25",
+                "--events_time_decay_weight",
+                "0.5"
+            ])
+            .is_err()
+        );
+        for invalid in ["NaN", "inf", "1"] {
+            assert!(
+                Cli::try_parse_from([
+                    "ov",
+                    "search",
+                    "event",
+                    "--events-time-decay-weight",
+                    invalid
+                ])
+                .is_err()
+            );
         }
     }
 

@@ -378,6 +378,14 @@ export class OpenVikingClient {
       image_url: imageUrl,
       session_id:
         kind === "search" ? (options as SearchOptions).sessionId : undefined,
+      events_time_decay_weight:
+        kind === "search"
+          ? (options as SearchOptions).eventsTimeDecayWeight
+          : undefined,
+      events_time_decay_protection:
+        kind === "search"
+          ? (options as SearchOptions).eventsTimeDecayProtection
+          : undefined,
       limit: options.limit,
       node_limit: options.nodeLimit,
       score_threshold: options.scoreThreshold,

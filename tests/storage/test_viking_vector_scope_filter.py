@@ -470,8 +470,6 @@ async def test_zero_decay_weight_keeps_the_original_single_search_call():
 async def test_decay_splits_current_user_event_l2_and_non_event_concurrently():
     backend = object.__new__(VikingVectorIndexBackend)
     backend.acl_manager = None
-    backend._events_time_decay_scale = "7d"
-    backend._events_time_decay_decay = 0.5
     calls = []
     both_started = asyncio.Event()
 
@@ -513,6 +511,49 @@ async def test_decay_splits_current_user_event_l2_and_non_event_concurrently():
     assert isinstance(non_event_call["filter"].conds[-1], Or)
     assert results[0]["_origin_score"] == pytest.approx(0.2)
     assert results[0]["_time_score"] == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_decay_rerank_prefetch_keeps_expanded_origin_candidates():
+    backend = object.__new__(VikingVectorIndexBackend)
+    backend.acl_manager = None
+    calls = []
+
+    async def fake_search(**kwargs):
+        calls.append(kwargs)
+        candidates = [
+            {
+                "uri": "viking://user/alice/memories/events/fresh",
+                "level": 2,
+                "_score": 0.9,
+                "_origin_score": 0.1,
+                "_time_score": 1.0,
+            },
+            {
+                "uri": "viking://user/alice/memories/events/old",
+                "level": 2,
+                "_score": 0.2,
+                "_origin_score": 0.99,
+                "_time_score": 0.0,
+            },
+        ]
+        return candidates[: kwargs["limit"]]
+
+    backend.search = fake_search
+    results = await backend.search_in_tenant(
+        ctx=_ctx(),
+        query_vector=[1.0],
+        context_type="memory",
+        target_directories=["viking://user/alice/memories/events"],
+        level=[2],
+        limit=1,
+        events_time_decay_weight=0.8,
+        for_rerank=True,
+    )
+
+    assert calls[0]["limit"] == 3
+    assert calls[0]["post_process_input_limit"] == 3
+    assert [result["_score"] for result in results] == pytest.approx([0.1, 0.99])
 
 
 @pytest.mark.asyncio

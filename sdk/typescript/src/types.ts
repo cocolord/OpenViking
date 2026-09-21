@@ -156,6 +156,8 @@ export interface FindOptions {
 /** Session-aware semantic retrieval options. */
 export interface SearchOptions extends FindOptions {
   sessionId?: string;
+  eventsTimeDecayWeight?: number;
+  eventsTimeDecayProtection?: string;
 }
 /** Server-side context assembly options. */
 export interface SearchContextOptions {
@@ -339,6 +341,8 @@ export interface MatchedContext {
   level?: number;
   abstract?: string;
   score?: number;
+  origin_score?: number | null;
+  time_score?: number | null;
   tags?: string[];
   [key: string]: unknown;
 }

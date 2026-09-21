@@ -413,7 +413,7 @@ openviking find "红色海报风格" --image ./poster.png --uri "viking://resour
 
 `search()` 使用和 `find()` 相同的目标解析和显式标签过滤规则，包括由 `X-OpenViking-Actor-Peer` 或 SDK `actor_peer_id` 选择的 peer 集合过滤。提供 `image_url` 时，`search()` 会直接执行图片检索并跳过会话 query planning。
 
-事件时间衰减只作用于当前用户 `viking://user/{user_id}/memories/events/` 下的 L2 结果，不作用于 peer event、L0/L1，也不接入 `find`、`recall`、`grep` 或 `glob`。启用后按 `score = origin_score * (1 - weight) + time_score * weight` 融合；命中的 event 结果额外返回 `origin_score` 和 `time_score`。缺失或非法 `updated_at` 的结果保持原分，`time_score` 为 `null`。服务端还需成对配置内部曲线参数 `retrieval.events_time_decay_scale` 和 `retrieval.events_time_decay_decay`；未配置时，权重大于 0 的请求会失败，而不会猜测默认曲线。
+事件时间衰减只作用于当前用户 `viking://user/{user_id}/memories/events/` 下的 L2 结果，不作用于 peer event、L0/L1，也不接入 `find`、`recall`、`grep` 或 `glob`。启用后按 `score = origin_score * (1 - weight) + time_score * weight` 融合；命中的 event 结果额外返回 `origin_score` 和 `time_score`。缺失或非法 `updated_at` 的结果保持原分，`time_score` 为 `null`。衰减曲线由服务端内部维护，调用方只需按请求传入权重和保护期，无需修改 `ov.conf` 或 `ovcli.conf`。
 
 #### 3. 使用示例
 

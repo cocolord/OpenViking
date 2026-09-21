@@ -3,6 +3,7 @@
 """Semantic retrieval mixin for VikingFS."""
 
 import asyncio
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
 from openviking.core.context import ContextLevel
@@ -24,6 +25,7 @@ from openviking.storage.viking_fs._base import (
 )
 from openviking.telemetry import get_current_telemetry
 from openviking.utils.image_search import build_multimodal_embedding_input
+from openviking.utils.time_decay import validate_time_decay_weight
 from openviking_cli.exceptions import NotFoundError
 
 
@@ -398,6 +400,8 @@ class _SemanticMixin:
             FindResult
         """
         _ensure_non_empty_search_query(query, image_url)
+        events_time_decay_weight = validate_time_decay_weight(events_time_decay_weight)
+        request_now = datetime.now(timezone.utc) if events_time_decay_weight > 0 else None
         telemetry = get_current_telemetry()
         from openviking.retrieve.hierarchical_retriever import HierarchicalRetriever
         from openviking.retrieve.intent_analyzer import IntentAnalyzer
@@ -497,6 +501,7 @@ class _SemanticMixin:
                 level=level,
                 events_time_decay_weight=events_time_decay_weight,
                 events_time_decay_protection=events_time_decay_protection,
+                request_now=request_now,
             )
 
         query_results = await asyncio.gather(*[_execute(tq) for tq in typed_queries])

@@ -8,6 +8,7 @@ import asyncio
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, AsyncIterator, Awaitable, Callable, Container, Dict, List, Mapping, Optional
 
 from openviking.core.namespace import (
@@ -41,7 +42,6 @@ from openviking.storage.vectordb_adapters import create_collection_adapter
 from openviking.utils.tags import merge_search_tags
 from openviking.utils.time_decay import (
     build_time_decay_post_process_ops,
-    parse_time_decay_post_process_ops,
     post_process_input_limit,
     validate_time_decay_weight,
 )
@@ -937,13 +937,7 @@ class VikingVectorIndexBackend:
 
     ALLOWED_CONTEXT_TYPES = {"resource", "skill", "memory"}
 
-    def __init__(
-        self,
-        config: Optional[VectorDBBackendConfig],
-        *,
-        events_time_decay_scale: Optional[str] = None,
-        events_time_decay_decay: Optional[float] = None,
-    ):
+    def __init__(self, config: Optional[VectorDBBackendConfig]):
         if config is None:
             raise ValueError("VectorDB backend config is required")
 
@@ -957,9 +951,6 @@ class VikingVectorIndexBackend:
         self._collection_name = config.name or "context"
         self._index_name = config.index_name or DEFAULT_INDEX_NAME
         self.acl_manager: Optional[AclManager] = None
-        self._events_time_decay_scale = events_time_decay_scale
-        self._events_time_decay_decay = events_time_decay_decay
-
         self._account_backends: Dict[str, _SingleAccountBackend] = {}
         self._root_backend: Optional[_SingleAccountBackend] = None
         # Share a single adapter (and its underlying PersistStore/RocksDB instance)
@@ -1575,6 +1566,8 @@ class VikingVectorIndexBackend:
         offset: int = 0,
         events_time_decay_weight: float = 0.0,
         events_time_decay_protection: str = "0",
+        request_now: Optional[datetime] = None,
+        for_rerank: bool = False,
     ) -> List[Dict[str, Any]]:
         acl_enabled = await self._acl_enabled(ctx)
         scope_filter = self._build_scope_filter(
@@ -1585,25 +1578,50 @@ class VikingVectorIndexBackend:
             level=level,
             acl_enabled=acl_enabled,
         )
+        if events_time_decay_weight == 0.0:
+            return await self.search(
+                query_vector=query_vector,
+                sparse_query_vector=sparse_query_vector,
+                filter=scope_filter,
+                limit=limit,
+                offset=offset,
+                output_fields=RETRIEVAL_OUTPUT_FIELDS,
+                ctx=ctx,
+            )
+
+        weight = validate_time_decay_weight(events_time_decay_weight)
         event_root = f"viking://user/{ctx.user.user_id}/memories/events"
-        event_scope_eligible = not target_directories or any(
-            self._paths_overlap(resolve_uri(target).uri, event_root)
-            for target in target_directories
-            if target
-        )
+        resolved_targets = [
+            resolve_uri(target).uri for target in (target_directories or []) if target
+        ]
+        if (
+            context_type not in (None, "memory")
+            or (level is not None and 2 not in level)
+            or (
+                resolved_targets
+                and not any(self._paths_overlap(target, event_root) for target in resolved_targets)
+            )
+        ):
+            return await self._search_retrieval_scope(
+                ctx, query_vector, sparse_query_vector, scope_filter, limit, offset
+            )
+
         return await self._search_with_event_time_decay(
             ctx=ctx,
             query_vector=query_vector,
             sparse_query_vector=sparse_query_vector,
             scope_filter=scope_filter,
-            context_type=context_type,
-            level=level,
-            event_scope_eligible=event_scope_eligible,
+            event_root=event_root,
+            event_scope_only=level is not None
+            and set(level) == {2}
+            and bool(resolved_targets)
+            and all(self._is_path_within(target, event_root) for target in resolved_targets),
             limit=limit,
             offset=offset,
-            events_time_decay_weight=events_time_decay_weight,
+            weight=weight,
             events_time_decay_protection=events_time_decay_protection,
-            defer_time_decay_fusion=False,
+            request_now=request_now,
+            for_rerank=for_rerank,
         )
 
     async def filter_in_tenant(
@@ -1657,6 +1675,7 @@ class VikingVectorIndexBackend:
         limit: int = 10,
         events_time_decay_weight: float = 0.0,
         events_time_decay_protection: str = "0",
+        request_now: Optional[datetime] = None,
     ) -> List[Dict[str, Any]]:
         # TODO：Better Alternative to Current Temporary Fix
 
@@ -1685,21 +1704,74 @@ class VikingVectorIndexBackend:
                 acl_enabled=acl_enabled,
             ),
         )
+        if events_time_decay_weight == 0.0:
+            return await self.search(
+                query_vector=query_vector,
+                sparse_query_vector=sparse_query_vector,
+                filter=merged_filter,
+                limit=limit,
+                output_fields=RETRIEVAL_OUTPUT_FIELDS,
+                ctx=ctx,
+            )
+
+        weight = validate_time_decay_weight(events_time_decay_weight)
         event_root = f"viking://user/{ctx.user.user_id}/memories/events"
-        return await self._search_with_event_time_decay(
+        if context_type not in (None, "memory") or not self._is_path_within(parent_uri, event_root):
+            return await self._search_retrieval_scope(
+                ctx, query_vector, sparse_query_vector, merged_filter, limit
+            )
+
+        return await self._search_children_with_event_time_decay(
             ctx=ctx,
             query_vector=query_vector,
             sparse_query_vector=sparse_query_vector,
             scope_filter=merged_filter,
-            context_type=context_type,
-            level=None,
-            event_scope_eligible=self._paths_overlap(parent_uri, event_root),
             limit=limit,
-            offset=0,
-            events_time_decay_weight=events_time_decay_weight,
-            events_time_decay_protection=events_time_decay_protection,
-            defer_time_decay_fusion=True,
+            weight=weight,
+            protection=events_time_decay_protection,
+            request_now=request_now,
         )
+
+    async def _search_children_with_event_time_decay(
+        self,
+        *,
+        ctx: RequestContext,
+        query_vector: Optional[List[float]],
+        sparse_query_vector: Optional[Dict[str, float]],
+        scope_filter: Optional[FilterExpr],
+        limit: int,
+        weight: float,
+        protection: str,
+        request_now: Optional[datetime],
+    ) -> List[Dict[str, Any]]:
+        ops = build_time_decay_post_process_ops(
+            weight=weight,
+            protection=protection,
+            origin=request_now,
+        )
+        event_limit = post_process_input_limit(limit)
+        directory_results, event_results = await asyncio.gather(
+            self._search_retrieval_scope(
+                ctx,
+                query_vector,
+                sparse_query_vector,
+                self._merge_filters(scope_filter, In("level", [0, 1])),
+                limit,
+            ),
+            self._search_retrieval_scope(
+                ctx,
+                query_vector,
+                sparse_query_vector,
+                self._merge_filters(scope_filter, Eq("level", 2)),
+                event_limit,
+                post_process_ops=ops,
+                post_process_input_limit=event_limit,
+            ),
+        )
+        for result in event_results:
+            if result.get("_origin_score") is not None:
+                result["_score"] = result["_origin_score"]
+        return directory_results + event_results
 
     async def _search_with_event_time_decay(
         self,
@@ -1708,33 +1780,15 @@ class VikingVectorIndexBackend:
         query_vector: Optional[List[float]],
         sparse_query_vector: Optional[Dict[str, float]],
         scope_filter: Optional[FilterExpr],
-        context_type: Optional[str],
-        level: Optional[List[int]],
-        event_scope_eligible: bool,
+        event_root: str,
+        event_scope_only: bool,
         limit: int,
         offset: int,
-        events_time_decay_weight: float,
+        weight: float,
         events_time_decay_protection: str,
-        defer_time_decay_fusion: bool,
+        request_now: Optional[datetime],
+        for_rerank: bool,
     ) -> List[Dict[str, Any]]:
-        weight = validate_time_decay_weight(events_time_decay_weight)
-        if (
-            weight == 0.0
-            or context_type not in (None, "memory")
-            or (level is not None and 2 not in level)
-            or not event_scope_eligible
-        ):
-            return await self.search(
-                query_vector=query_vector,
-                sparse_query_vector=sparse_query_vector,
-                filter=scope_filter,
-                limit=limit,
-                offset=offset,
-                output_fields=RETRIEVAL_OUTPUT_FIELDS,
-                ctx=ctx,
-            )
-
-        event_root = f"viking://user/{ctx.user.user_id}/memories/events"
         event_filter = self._merge_filters(
             scope_filter,
             PathScope("uri", event_root, depth=-1),
@@ -1760,72 +1814,82 @@ class VikingVectorIndexBackend:
         ops = build_time_decay_post_process_ops(
             weight=weight,
             protection=events_time_decay_protection,
-            scale=getattr(self, "_events_time_decay_scale", None),
-            decay=getattr(self, "_events_time_decay_decay", None),
+            origin=request_now,
         )
         event_post_process_input_limit = post_process_input_limit(final_window)
-        event_search_kwargs: Dict[str, Any] = {
-            "query_vector": query_vector,
-            "sparse_query_vector": sparse_query_vector,
-            "filter": event_filter,
-            "limit": final_window,
-            "output_fields": RETRIEVAL_OUTPUT_FIELDS,
-            "ctx": ctx,
-        }
-        if defer_time_decay_fusion:
-            # THINKING must rerank the raw ANN pool before the one and only
-            # score fusion. Fetch the same expanded candidate budget used by
-            # VikingDB's post processor, but calculate only its time score
-            # locally so no fused ordering is truncated prematurely.
-            event_search_kwargs["limit"] = event_post_process_input_limit
-        else:
-            event_search_kwargs.update(
+        event_limit = event_post_process_input_limit if for_rerank else final_window
+        if event_scope_only:
+            event_results = await self._search_retrieval_scope(
+                ctx,
+                query_vector,
+                sparse_query_vector,
+                event_filter,
+                event_limit,
                 post_process_ops=ops,
                 post_process_input_limit=event_post_process_input_limit,
             )
-
-        non_event_results, event_results = await asyncio.gather(
-            self.search(
-                query_vector=query_vector,
-                sparse_query_vector=sparse_query_vector,
-                filter=non_event_filter,
-                limit=final_window,
-                output_fields=RETRIEVAL_OUTPUT_FIELDS,
-                ctx=ctx,
-            ),
-            self.search(**event_search_kwargs),
-        )
-        deferred_spec = parse_time_decay_post_process_ops(ops) if defer_time_decay_fusion else None
+            non_event_results: List[Dict[str, Any]] = []
+        else:
+            non_event_results, event_results = await asyncio.gather(
+                self._search_retrieval_scope(
+                    ctx,
+                    query_vector,
+                    sparse_query_vector,
+                    non_event_filter,
+                    final_window,
+                ),
+                self._search_retrieval_scope(
+                    ctx,
+                    query_vector,
+                    sparse_query_vector,
+                    event_filter,
+                    event_limit,
+                    post_process_ops=ops,
+                    post_process_input_limit=event_post_process_input_limit,
+                ),
+            )
         for result in event_results:
-            if deferred_spec is not None:
-                origin_score = result.get("_score", 0.0)
-                _, time_score = deferred_spec.fuse_optional(
-                    origin_score, result.get(deferred_spec.field)
-                )
-                result["_origin_score"] = origin_score
-                if time_score is not None:
-                    result["_time_score"] = time_score
-
             # Missing or invalid decay time means this candidate did not
-            # participate in time fusion. Keep the raw origin score and let
-            # THINKING retain legacy hotness behavior for that candidate.
+            # participate in time fusion. Keep the raw origin score.
             if result.get("_time_score") is None:
                 result["_score"] = result.get("_origin_score", result.get("_score", 0.0))
                 result.pop("_time_score", None)
-                continue
-            if defer_time_decay_fusion:
-                # Keep VikingDB's raw explanation scores but defer their fusion
-                # until after model rerank and parent-score propagation.
-                result["_score"] = result.get("_origin_score", result.get("_score", 0.0))
+            elif for_rerank and result.get("_origin_score") is not None:
+                result["_score"] = result["_origin_score"]
 
-        if defer_time_decay_fusion:
-            # Do not truncate the two branches before model rerank. The final
-            # event score is computed only after rerank and parent propagation.
+        if for_rerank:
             return non_event_results + event_results
 
         merged = non_event_results + event_results
         merged.sort(key=lambda item: item.get("_score", 0.0), reverse=True)
         return merged[offset : offset + limit]
+
+    async def _search_retrieval_scope(
+        self,
+        ctx: RequestContext,
+        query_vector: Optional[List[float]],
+        sparse_query_vector: Optional[Dict[str, float]],
+        scope_filter: Optional[FilterExpr],
+        limit: int,
+        offset: int = 0,
+        *,
+        post_process_ops: Optional[List[Dict[str, Any]]] = None,
+        post_process_input_limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        kwargs: Dict[str, Any] = {}
+        if post_process_ops:
+            kwargs["post_process_ops"] = post_process_ops
+            kwargs["post_process_input_limit"] = post_process_input_limit
+        return await self.search(
+            query_vector=query_vector,
+            sparse_query_vector=sparse_query_vector,
+            filter=scope_filter,
+            limit=limit,
+            offset=offset,
+            output_fields=RETRIEVAL_OUTPUT_FIELDS,
+            ctx=ctx,
+            **kwargs,
+        )
 
     @staticmethod
     def _paths_overlap(left: str, right: str) -> bool:
@@ -1835,6 +1899,14 @@ class VikingVectorIndexBackend:
         common = min(len(left_parts), len(right_parts))
         return left_parts[:common] == right_parts[:common]
 
+    @staticmethod
+    def _is_path_within(path: str, parent: str) -> bool:
+        path_parts = uri_parts(path)
+        parent_parts = uri_parts(parent)
+        return (
+            len(path_parts) >= len(parent_parts) and path_parts[: len(parent_parts)] == parent_parts
+        )
+
     async def get_context_by_uri(
         self,
         uri: str,
@@ -1843,6 +1915,7 @@ class VikingVectorIndexBackend:
         limit: int = 1,
         *,
         ctx: RequestContext,
+        output_fields: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         conds: List[FilterExpr] = [
             PathScope("uri", uri, depth=0),
@@ -1855,7 +1928,7 @@ class VikingVectorIndexBackend:
         return await backend.filter(
             filter=And(conds),
             limit=limit,
-            output_fields=LOOKUP_OUTPUT_FIELDS,
+            output_fields=LOOKUP_OUTPUT_FIELDS if output_fields is None else output_fields,
         )
 
     async def get_l2_abstracts_by_uris(
@@ -2462,11 +2535,7 @@ class VikingVectorIndexBackend:
 
         targets = [target_dir for target_dir in target_directories or [] if target_dir]
         tenant_filter = self._tenant_filter(ctx, acl_enabled=acl_enabled)
-        if (
-            tenant_filter
-            and not acl_enabled
-            and self._targets_within_visible_roots(ctx, targets)
-        ):
+        if tenant_filter and not acl_enabled and self._targets_within_visible_roots(ctx, targets):
             # The target scopes are already narrower than the tenant-visible
             # roots. Keep account isolation, but avoid recursively evaluating
             # the broader path scopes as an additional filter.
@@ -2475,7 +2544,9 @@ class VikingVectorIndexBackend:
             filters.append(tenant_filter)
 
         if targets:
-            uri_conds = [PathScope("uri", target_dir, depth=-1) for target_dir in targets]
+            uri_conds: List[FilterExpr] = [
+                PathScope("uri", target_dir, depth=-1) for target_dir in targets
+            ]
             if uri_conds:
                 filters.append(Or(uri_conds))
 
@@ -2569,7 +2640,7 @@ class VikingVectorIndexBackend:
         return self.acl_manager is not None and await self.acl_manager.is_enabled(ctx.account_id)
 
     @staticmethod
-    def _merge_filters(*filters: Optional[FilterExpr]) -> Optional[FilterExpr]:
+    def _merge_filters(*filters: Optional[FilterExpr | Dict[str, Any]]) -> Optional[FilterExpr]:
         non_empty: List[FilterExpr] = []
         for item in filters:
             if not item:

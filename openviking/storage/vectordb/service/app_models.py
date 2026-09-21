@@ -110,7 +110,7 @@ class SearchByVectorRequest(BaseModel):
     offset: Optional[int] = Field(0, description="Result offset")
     post_process_ops: Optional[Any] = Field(None, description="Post-processing operators")
     post_process_input_limit: Optional[int] = Field(
-        None, description="Candidate count passed to post-processing"
+        None, ge=1, le=100_000, description="Candidate count passed to post-processing"
     )
 
 

@@ -173,6 +173,8 @@ pub async fn search(
     context_type: Option<Vec<String>>,
     tags: Option<Vec<String>>,
     read_content: bool,
+    events_time_decay_weight: Option<f64>,
+    events_time_decay_protection: Option<String>,
     output_format: OutputFormat,
     compact: bool,
 ) -> Result<()> {
@@ -191,6 +193,8 @@ pub async fn search(
             context_type,
             tags,
             read_content,
+            events_time_decay_weight,
+            events_time_decay_protection,
         )
         .await?;
     output_search_results(
@@ -427,6 +431,15 @@ fn render_search_result_card(
 
         if let Some(score) = search_result_score(object) {
             metadata.push(theme::warning(score).bold().to_string());
+            for field in ["origin_score", "time_score"] {
+                if let Some(value) = object.and_then(|item| item.get(field)) {
+                    let value = value
+                        .as_f64()
+                        .map(|score| format!("{score:.3}"))
+                        .unwrap_or_else(|| "not provided".to_string());
+                    metadata.push(format!("{field} {value}"));
+                }
+            }
         }
     }
 

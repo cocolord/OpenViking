@@ -21,6 +21,12 @@ from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
 
 DEFAULT_POST_PROCESS_FACTOR = 3
 MAX_VECTOR_POST_PROCESS_INPUT_LIMIT = 100_000
+# This curve is an internal ranking contract validated against VikingDB's
+# score_fusion operator; it is intentionally not part of ov.conf/ovcli.conf.
+EVENT_TIME_DECAY_SCALE = "7d"
+EVENT_TIME_DECAY_DECAY = 0.5
+# Match VikingDB's date_time duration limit: 3000 years of 365 days.
+MAX_DURATION_MS = 3000 * 365 * 24 * 60 * 60 * 1000
 
 _DURATION_RE = re.compile(r"^(0|[0-9]+[mhd])$")
 _DURATION_MULTIPLIERS_MS = {
@@ -40,6 +46,10 @@ def validate_time_decay_weight(value: Any) -> float:
     return weight
 
 
+def _blend_scores(origin_score: float, addition_score: float, weight: float) -> float:
+    return (1.0 - weight) * origin_score + weight * addition_score
+
+
 def parse_duration_ms(value: Any, *, parameter_name: str = "duration") -> int:
     """Parse ``0`` or a non-negative integer duration with m/h/d units."""
     if not isinstance(value, str) or not _DURATION_RE.fullmatch(value):
@@ -48,7 +58,10 @@ def parse_duration_ms(value: Any, *, parameter_name: str = "duration") -> int:
         )
     if value == "0":
         return 0
-    return int(value[:-1]) * _DURATION_MULTIPLIERS_MS[value[-1]]
+    duration_ms = int(value[:-1]) * _DURATION_MULTIPLIERS_MS[value[-1]]
+    if duration_ms > MAX_DURATION_MS:
+        raise ValueError(f"{parameter_name} exceeds the maximum duration of 1095000d")
+    return duration_ms
 
 
 def _datetime_to_epoch_ms(value: Any) -> float:
@@ -66,26 +79,6 @@ def _datetime_to_epoch_ms(value: Any) -> float:
             value = value.replace(tzinfo=timezone.utc)
         return value.timestamp() * 1000.0
     raise ValueError("time value must be an epoch millisecond number or ISO 8601 string")
-
-
-def exponential_decay_score(
-    source_time: Any,
-    *,
-    origin: Any,
-    offset_ms: int,
-    scale_ms: int,
-    decay: float,
-) -> float:
-    """Calculate VikingDB's exponential date-time decay score."""
-    if scale_ms <= 0:
-        raise ValueError("time-decay scale must be greater than zero")
-    if not 0.0 < decay < 1.0:
-        raise ValueError("time-decay decay must be in (0, 1)")
-    distance_ms = max(
-        0.0,
-        abs(_datetime_to_epoch_ms(source_time) - _datetime_to_epoch_ms(origin)) - offset_ms,
-    )
-    return math.exp(math.log(decay) * distance_ms / scale_ms)
 
 
 @dataclass(frozen=True)
@@ -117,21 +110,21 @@ class TimeDecayFusionSpec:
             0.0, abs(_datetime_to_epoch_ms(source_time) - self.origin_ms) - self.offset_ms
         )
         addition_score = self.factor * math.exp(self._decay_rate * distance_ms)
-        final_score = (1.0 - self.weight) * origin_score + self.weight * addition_score
+        final_score = _blend_scores(origin_score, addition_score, self.weight)
         return final_score, addition_score
 
     def fuse_optional(self, origin_score: float, source_time: Any) -> tuple[float, Optional[float]]:
         """Fuse only reliable source times; otherwise preserve the origin score."""
         try:
             return self.fuse(origin_score, source_time)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return origin_score, None
 
 
 def fuse_time_decay_scores(*, origin_score: float, addition_score: float, weight: float) -> float:
     """Blend semantic and time scores directly, as defined by the PRD."""
     checked_weight = validate_time_decay_weight(weight)
-    return (1.0 - checked_weight) * origin_score + checked_weight * addition_score
+    return _blend_scores(origin_score, addition_score, checked_weight)
 
 
 def apply_time_decay_to_search_items(
@@ -161,25 +154,13 @@ def build_time_decay_post_process_ops(
     weight: float,
     protection: str,
     origin: Optional[datetime] = None,
-    scale: Optional[str] = None,
-    decay: Optional[float] = None,
     field: str = "updated_at",
 ) -> list[dict[str, Any]]:
     """Build the VikingDB score-fusion payload; zero weight emits no operator."""
     checked_weight = validate_time_decay_weight(weight)
-    protection_ms = parse_duration_ms(protection, parameter_name="events_time_decay_protection")
     if checked_weight == 0.0:
         return []
-    if scale is None or decay is None:
-        raise ValueError(
-            "event time-decay curve is not configured; set retrieval.events_time_decay_scale "
-            "and retrieval.events_time_decay_decay"
-        )
-    scale_ms = parse_duration_ms(scale, parameter_name="time-decay scale")
-    if scale_ms <= 0:
-        raise ValueError("time-decay scale must be greater than zero")
-    if not 0.0 < decay < 1.0:
-        raise ValueError("time-decay decay must be in (0, 1)")
+    protection_ms = parse_duration_ms(protection, parameter_name="events_time_decay_protection")
     request_time = origin or datetime.now(timezone.utc)
     addition = {
         "factor": 1,
@@ -187,8 +168,8 @@ def build_time_decay_post_process_ops(
         "field": field,
         "func": "exp",
         "origin": format_iso8601(request_time),
-        "scale": scale,
-        "decay": decay,
+        "scale": EVENT_TIME_DECAY_SCALE,
+        "decay": EVENT_TIME_DECAY_DECAY,
     }
     # VikingDB documents offset as optional with a zero default, while its
     # date_time parser rejects explicit zero durations (both "0" and "0d").
@@ -236,13 +217,9 @@ def parse_time_decay_post_process_ops(
         raise ValueError("local time-decay fusion requires an exponential decay_func")
 
     scale_ms = parse_duration_ms(addition.get("scale"), parameter_name="time-decay scale")
-    if scale_ms <= 0:
-        raise ValueError("time-decay scale must be greater than zero")
     if "decay" not in addition:
         raise ValueError("local time-decay fusion requires an explicit decay")
     decay = float(addition["decay"])
-    if not math.isfinite(decay) or not 0.0 < decay < 1.0:
-        raise ValueError("time-decay decay must be in (0, 1)")
     factor = float(addition.get("factor", 1.0))
     if not math.isfinite(factor) or factor == 0.0:
         raise ValueError("time-decay factor must be finite and non-zero")
@@ -263,7 +240,12 @@ def parse_time_decay_post_process_ops(
 def post_process_input_limit(limit: int, offset: int = 0) -> int:
     """Return VikingDB's default 3x candidate budget for vector search."""
     final_window = limit + offset
-    return max(
-        final_window,
-        min(MAX_VECTOR_POST_PROCESS_INPUT_LIMIT, final_window * DEFAULT_POST_PROCESS_FACTOR),
+    if final_window > MAX_VECTOR_POST_PROCESS_INPUT_LIMIT:
+        raise ValueError(
+            "time-decay search limit + offset must not exceed "
+            f"{MAX_VECTOR_POST_PROCESS_INPUT_LIMIT}"
+        )
+    return min(
+        final_window * DEFAULT_POST_PROCESS_FACTOR,
+        MAX_VECTOR_POST_PROCESS_INPUT_LIMIT,
     )

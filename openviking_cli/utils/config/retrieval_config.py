@@ -1,9 +1,7 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
 
-from typing import Optional
-
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 
 class RetrievalConfig(BaseModel):
@@ -47,30 +45,3 @@ class RetrievalConfig(BaseModel):
             "(same path as no-session search)."
         ),
     )
-    events_time_decay_scale: Optional[str] = Field(
-        default=None,
-        pattern=r"^[1-9][0-9]*[mhd]$",
-        description=(
-            "Internal event time-decay curve scale. Required when a search enables "
-            "events_time_decay_weight; intentionally has no guessed product default."
-        ),
-    )
-    events_time_decay_decay: Optional[float] = Field(
-        default=None,
-        gt=0.0,
-        lt=1.0,
-        allow_inf_nan=False,
-        description=(
-            "Internal event time-decay score at one scale interval. Required when a "
-            "search enables events_time_decay_weight."
-        ),
-    )
-
-    @model_validator(mode="after")
-    def validate_time_decay_curve(self) -> "RetrievalConfig":
-        if (self.events_time_decay_scale is None) != (self.events_time_decay_decay is None):
-            raise ValueError(
-                "retrieval.events_time_decay_scale and "
-                "retrieval.events_time_decay_decay must be configured together"
-            )
-        return self

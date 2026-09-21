@@ -35,20 +35,20 @@ class _FakeIndexes:
 
 class _FakeStoreManager:
     def __init__(self, candidates, fields_payloads=None):
-        self.candidates = candidates
+        self.candidates = {candidate.label: candidate for candidate in candidates}
         self.fields_payloads = fields_payloads
         self.calls = []
 
     def fetch_cands_data(self, labels):
         self.calls.append(("data", list(labels)))
-        return list(self.candidates)
+        return [self.candidates.get(label) for label in labels]
 
     def fetch_cands_fields(self, labels):
         self.calls.append(("fields", list(labels)))
         if self.fields_payloads is not None:
             return list(self.fields_payloads)
         return [
-            candidate.fields if candidate is not None else None for candidate in self.candidates
+            self.candidates[label].fields if label in self.candidates else None for label in labels
         ]
 
 
@@ -194,7 +194,8 @@ def test_search_by_vector_fuses_expanded_candidates_before_pagination():
     assert result.data[0].fields == {"uri": "/docs/fresh"}
 
 
-def test_search_by_vector_without_fusion_preserves_ann_window_and_order():
+@pytest.mark.parametrize(("offset", "label", "doc_id"), [(0, 11, "first"), (1, 12, "second")])
+def test_search_by_vector_without_fusion_preserves_ann_window_and_order(offset, label, doc_id):
     store = _FakeStoreManager(
         [
             _candidate(11, "first", "/docs/one", []),
@@ -203,11 +204,11 @@ def test_search_by_vector_without_fusion_preserves_ann_window_and_order():
     )
     collection = _collection(store, labels=(11, 12), scores=(0.9, 0.8))
 
-    result = collection.search_by_vector("default", dense_vector=[1.0, 0.0], limit=1)
+    result = collection.search_by_vector("default", dense_vector=[1.0, 0.0], limit=1, offset=offset)
 
-    assert collection.indexes.index.calls[0][0][1] == 1
-    assert store.calls == [("data", [11])]
-    assert [item.id for item in result.data] == ["first"]
+    assert collection.indexes.index.calls[0][0][1] == offset + 1
+    assert store.calls == [("data", [label])]
+    assert [item.id for item in result.data] == [doc_id]
     assert result.data[0].origin_score is None
 
 
@@ -219,8 +220,6 @@ def test_search_by_vector_time_decay_keeps_score_when_time_is_unreliable(source_
         weight=0.8,
         protection="0",
         origin=datetime(2026, 9, 17, tzinfo=timezone.utc),
-        scale="7d",
-        decay=0.5,
     )
 
     result = collection.search_by_vector(

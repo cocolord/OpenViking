@@ -43,6 +43,7 @@ from openviking.utils.search_filters import (
     merge_search_filter,
 )
 from openviking.utils.tags import build_search_tags_filter
+from openviking.utils.time_decay import parse_duration_ms
 from openviking_cli.exceptions import InvalidArgumentError, NotFoundError
 
 
@@ -224,7 +225,7 @@ class SearchRequest(BaseModel):
     read_content: bool = False
     telemetry: TelemetryRequest = False
     events_time_decay_weight: float = Field(default=0.0, ge=0.0, lt=1.0)
-    events_time_decay_protection: str = Field(default="0", pattern=r"^(0|[0-9]+[mhd])$")
+    events_time_decay_protection: str = "0"
 
     mode: Literal["list", "context"] = "list"
 
@@ -253,6 +254,11 @@ class SearchRequest(BaseModel):
             error = context_only_fields_error(self.model_fields_set)
             if error:
                 raise ValueError(error)
+            if self.events_time_decay_weight > 0.0:
+                parse_duration_ms(
+                    self.events_time_decay_protection,
+                    parameter_name="events_time_decay_protection",
+                )
             return self
 
         if self.read_content:

@@ -5,6 +5,7 @@ VikingDB Manager class that extends VikingVectorIndexBackend with queue manageme
 """
 
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Any, AsyncIterator, Dict, List, Mapping, Optional, Tuple
 
 from openviking.server.identity import RequestContext
@@ -42,9 +43,6 @@ class VikingDBManager(VikingVectorIndexBackend):
         self,
         vectordb_config: VectorDBBackendConfig,
         queue_manager: Optional[QueueManager] = None,
-        *,
-        events_time_decay_scale: Optional[str] = None,
-        events_time_decay_decay: Optional[float] = None,
     ):
         """
         Initialize VikingDB Manager.
@@ -54,11 +52,7 @@ class VikingDBManager(VikingVectorIndexBackend):
             queue_manager: QueueManager instance.
         """
         # Initialize the base VikingVectorIndexBackend without queue management
-        super().__init__(
-            config=vectordb_config,
-            events_time_decay_scale=events_time_decay_scale,
-            events_time_decay_decay=events_time_decay_decay,
-        )
+        super().__init__(config=vectordb_config)
 
         # Queue management specific attributes
         self._queue_manager = queue_manager
@@ -346,8 +340,6 @@ class VikingDBManagerProxy:
         output_fields: Optional[List[str]] = None,
         order_by: Optional[str] = None,
         order_desc: bool = False,
-        post_process_ops: Optional[List[Dict[str, Any]]] = None,
-        post_process_input_limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         return await self._manager.query(
             query_vector=query_vector,
@@ -358,8 +350,6 @@ class VikingDBManagerProxy:
             output_fields=output_fields,
             order_by=order_by,
             order_desc=order_desc,
-            post_process_ops=post_process_ops,
-            post_process_input_limit=post_process_input_limit,
             ctx=self._ctx,
         )
 
@@ -371,8 +361,6 @@ class VikingDBManagerProxy:
         limit: int = 10,
         offset: int = 0,
         output_fields: Optional[List[str]] = None,
-        post_process_ops: Optional[List[Dict[str, Any]]] = None,
-        post_process_input_limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         return await self._manager.search(
             query_vector=query_vector,
@@ -381,8 +369,6 @@ class VikingDBManagerProxy:
             limit=limit,
             offset=offset,
             output_fields=output_fields,
-            post_process_ops=post_process_ops,
-            post_process_input_limit=post_process_input_limit,
             ctx=self._ctx,
         )
 
@@ -460,8 +446,10 @@ class VikingDBManagerProxy:
         offset: int = 0,
         events_time_decay_weight: float = 0.0,
         events_time_decay_protection: str = "0",
+        request_now: Optional[datetime] = None,
+        for_rerank: bool = False,
     ) -> List[Dict[str, Any]]:
-        kwargs = {
+        kwargs: Dict[str, Any] = {
             "query_vector": query_vector,
             "sparse_query_vector": sparse_query_vector,
             "context_type": context_type,
@@ -475,6 +463,8 @@ class VikingDBManagerProxy:
             kwargs.update(
                 events_time_decay_weight=events_time_decay_weight,
                 events_time_decay_protection=events_time_decay_protection,
+                request_now=request_now,
+                for_rerank=for_rerank,
             )
         return await self._manager.search_in_tenant(self._ctx, **kwargs)
 
@@ -508,8 +498,9 @@ class VikingDBManagerProxy:
         limit: int = 10,
         events_time_decay_weight: float = 0.0,
         events_time_decay_protection: str = "0",
+        request_now: Optional[datetime] = None,
     ) -> List[Dict[str, Any]]:
-        kwargs = {
+        kwargs: Dict[str, Any] = {
             "parent_uri": parent_uri,
             "query_vector": query_vector,
             "sparse_query_vector": sparse_query_vector,
@@ -522,6 +513,7 @@ class VikingDBManagerProxy:
             kwargs.update(
                 events_time_decay_weight=events_time_decay_weight,
                 events_time_decay_protection=events_time_decay_protection,
+                request_now=request_now,
             )
         return await self._manager.search_children_in_tenant(self._ctx, **kwargs)
 
@@ -533,6 +525,7 @@ class VikingDBManagerProxy:
         limit: int = 1,
         *,
         ctx: Optional[RequestContext] = None,
+        output_fields: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         return await self._manager.get_context_by_uri(
             uri=uri,
@@ -540,6 +533,7 @@ class VikingDBManagerProxy:
             level=level,
             limit=limit,
             ctx=ctx if ctx is not None else self._ctx,
+            output_fields=output_fields,
         )
 
     async def delete_account_data(self, account_id: str) -> int:

@@ -64,6 +64,7 @@ from openviking.server.local_input_guard import (
     is_remote_resource_source,
 )
 from openviking.server.resource_ingest import ingest_temp_upload
+from openviking.server.routers.search import context_only_fields_error
 from openviking.server.temp_upload_store import TempUploadStore
 from openviking.server.upload_token_store import upload_token_store
 from openviking.utils.media_limits import MAX_INLINE_TOOL_RESULT_MEDIA_BYTES
@@ -76,7 +77,6 @@ from openviking_cli.exceptions import (
     UnauthenticatedError,
 )
 from openviking_cli.utils import get_logger
-from openviking.server.routers.search import context_only_fields_error
 
 logger = get_logger(__name__)
 
@@ -306,6 +306,8 @@ async def search(
     rewrite: Literal["off", "auto"] = "off",
     rewrite_max_bullets: Annotated[int, Field(ge=1, le=20)] = 6,
     read_content: bool = False,
+    events_time_decay_weight: Annotated[float, Field(strict=True, ge=0.0, lt=1.0)] = 0.0,
+    events_time_decay_protection: str = "0",
 ) -> str:
     """Deep semantic retrieval with optional session context and intent analysis.
 
@@ -319,6 +321,8 @@ async def search(
     ctx = _get_ctx()
     context_filter = _resolve_context_type_filter(context_type)
     if mode == "context":
+        if events_time_decay_weight != 0.0 or events_time_decay_protection != "0":
+            raise InvalidArgumentError("Event time decay is only supported in mode='list'")
         if read_content:
             raise InvalidArgumentError("read_content is only supported in mode='list'")
         if target_uri:
@@ -389,7 +393,8 @@ async def search(
             "other_peer_penalties": (other_peer_penalties, None),
             "rewrite": (rewrite, "off"),
             "rewrite_max_bullets": (rewrite_max_bullets, 6),
-        }.items() if value != default
+        }.items()
+        if value != default
     }
     as_named_by_caller: Dict[str, set] = {}
     for name in supplied_by_caller:
@@ -414,6 +419,8 @@ async def search(
         score_threshold=0.35 if min_score is None else min_score,
         filter=context_filter,
         level=level,
+        events_time_decay_weight=events_time_decay_weight,
+        events_time_decay_protection=events_time_decay_protection,
     )
     return await _format_search_result(result, service=service, ctx=ctx, read_content=read_content)
 
@@ -453,6 +460,10 @@ async def _format_search_result(result, *, service, ctx, read_content: bool = Fa
         ).strip()
         score = getattr(m, "score", 0.0)
         line = f"- [{ctx_type} {score * 100:.0f}%] {m.uri}\n    {abstract}"
+        origin_score = getattr(m, "origin_score", None)
+        time_score = getattr(m, "time_score", None)
+        if origin_score is not None or time_score is not None:
+            line += f"\n    origin_score={origin_score}, time_score={time_score}"
         if m.uri in contents:
             line += f"\n\n    {contents[m.uri]}"
         lines.append(line)

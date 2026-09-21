@@ -283,23 +283,25 @@ type FindOptions struct {
 
 // SearchOptions controls Search.
 type SearchOptions struct {
-	TargetURI         any
-	Image             string
-	SessionID         string
-	Limit             int
-	NodeLimit         *int
-	ScoreThreshold    *float64
-	Filter            map[string]any
-	ContextType       any
-	IncludeProvenance *bool
-	ReadContent       *bool
-	Telemetry         any
-	Since             string
-	Until             string
-	TimeField         string
-	Level             []int
-	Tags              []string
-	Extra             map[string]any
+	EventsTimeDecayWeight     *float64
+	EventsTimeDecayProtection string
+	TargetURI                 any
+	Image                     string
+	SessionID                 string
+	Limit                     int
+	NodeLimit                 *int
+	ScoreThreshold            *float64
+	Filter                    map[string]any
+	ContextType               any
+	IncludeProvenance         *bool
+	ReadContent               *bool
+	Telemetry                 any
+	Since                     string
+	Until                     string
+	TimeField                 string
+	Level                     []int
+	Tags                      []string
+	Extra                     map[string]any
 }
 
 // SearchContextOptions controls server-side context assembly.
@@ -515,6 +517,8 @@ type MatchedContext struct {
 	Content     string   `json:"content,omitempty"`
 	Overview    string   `json:"overview,omitempty"`
 	Category    string   `json:"category,omitempty"`
+	OriginScore *float64 `json:"origin_score"`
+	TimeScore   *float64 `json:"time_score"`
 	Score       float64  `json:"score,omitempty"`
 	MatchReason string   `json:"match_reason,omitempty"`
 	Tags        []string `json:"tags,omitempty"`

@@ -254,9 +254,8 @@ class VikingDBCollection(ICollection):
     def _parse_search_result(
         self,
         data: Dict[str, Any],
-        post_process_ops: Optional[List[Dict[str, Any]]] = None,
     ) -> SearchResult:
-        return parse_remote_search_result(data, post_process_ops=post_process_ops)
+        return parse_remote_search_result(data)
 
     def search_by_vector(
         self,
@@ -290,7 +289,7 @@ class VikingDBCollection(ICollection):
                 "post_process_input_limit": post_process_input_limit,
             }
         resp_data = self._data_post(path, data)
-        return self._parse_search_result(resp_data, post_process_ops=post_process_ops)
+        return self._parse_search_result(resp_data)
 
     def search_by_id(
         self,
