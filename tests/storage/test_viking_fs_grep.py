@@ -11,6 +11,7 @@ from openviking.server.identity import RequestContext, Role
 from openviking.storage.acl import AclEntry, AclLevel, AclMode, DirectAcl, EffectiveAcl
 from openviking.storage.expr import And, PathScope, RawDSL
 from openviking.storage.viking_fs import _DEFAULT_GREP_FILE_CONCURRENCY, VikingFS
+from openviking.storage.viking_fs import _grep as grep_module
 from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils.config.grep_config import GrepConfig
 
@@ -80,6 +81,138 @@ async def test_collect_grep_files_skips_directory_vector_count(monkeypatch):
         level_limit=1,
     ) == []
     stat.assert_awaited_once_with("viking://resources", ctx=None, skip_count=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry_count", [999, 1000, 1001, 10000])
+async def test_collect_grep_files_paginates_wide_directories(monkeypatch, entry_count):
+    viking_fs = VikingFS(agfs=_DummyAgfs())
+    entries = [
+        {"name": f"archive_{index:05d}.jsonl", "isDir": False} for index in range(entry_count)
+    ]
+    offsets = []
+
+    async def fake_ls(uri, node_limit, offset, ctx=None):
+        assert uri == "viking://user/test/sessions/session-1/history"
+        offsets.append(offset)
+        return entries[offset : offset + node_limit]
+
+    monkeypatch.setattr(viking_fs, "stat", AsyncMock(return_value={"isDir": True}))
+    monkeypatch.setattr(viking_fs, "ls", fake_ls)
+
+    files = await viking_fs._collect_grep_files(
+        "viking://user/test/sessions/session-1/history",
+        excluded_prefix=None,
+        level_limit=1,
+    )
+
+    assert len(files) == entry_count
+    assert files[-1].endswith(f"archive_{entry_count - 1:05d}.jsonl")
+    assert offsets == list(range(0, entry_count + 1, grep_module._GREP_LS_PAGE_SIZE))
+
+
+@pytest.mark.asyncio
+async def test_grep_fallback_finds_match_after_first_directory_page(monkeypatch):
+    viking_fs = VikingFS(agfs=_DummyAgfs())
+    entries = [
+        {"name": f"archive_{index:04d}.jsonl", "isDir": False} for index in range(1001)
+    ]
+
+    async def fake_ls(uri, node_limit, offset, ctx=None):
+        return entries[offset : offset + node_limit]
+
+    async def fake_read(uri, ctx=None):
+        return b"needle" if uri.endswith("archive_1000.jsonl") else b"haystack"
+
+    monkeypatch.setattr(viking_fs, "stat", AsyncMock(return_value={"isDir": True}))
+    monkeypatch.setattr(viking_fs, "ls", fake_ls)
+    monkeypatch.setattr(viking_fs, "read", fake_read)
+
+    result = await viking_fs._grep_encrypted(
+        "viking://user/test/sessions/session-1/history",
+        pattern="needle",
+        level_limit=1,
+    )
+
+    assert result["matches"] == [
+        {
+            "line": 1,
+            "uri": (
+                "viking://user/test/sessions/session-1/history/archive_1000.jsonl"
+            ),
+            "content": "needle",
+        }
+    ]
+    assert result["files_scanned"] == 1001
+
+
+@pytest.mark.asyncio
+async def test_collect_grep_files_preserves_dfs_order_across_pages(monkeypatch):
+    viking_fs = VikingFS(agfs=_DummyAgfs())
+    entries = {
+        "viking://resources": [
+            {"name": "a.md", "isDir": False},
+            {"name": "dir", "isDir": True},
+            {"name": "z.md", "isDir": False},
+        ],
+        "viking://resources/dir": [
+            {"name": "nested.md", "isDir": False},
+        ],
+    }
+
+    async def fake_ls(uri, node_limit, offset, ctx=None):
+        return entries.get(uri, [])[offset : offset + node_limit]
+
+    monkeypatch.setattr(grep_module, "_GREP_LS_PAGE_SIZE", 2)
+    monkeypatch.setattr(viking_fs, "stat", AsyncMock(return_value={"isDir": True}))
+    monkeypatch.setattr(viking_fs, "ls", fake_ls)
+
+    assert await viking_fs._collect_grep_files(
+        "viking://resources",
+        excluded_prefix=None,
+        level_limit=1,
+    ) == [
+        "viking://resources/a.md",
+        "viking://resources/dir/nested.md",
+        "viking://resources/z.md",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_collect_grep_files_propagates_later_page_failure(monkeypatch):
+    viking_fs = VikingFS(agfs=_DummyAgfs())
+
+    async def fake_ls(uri, node_limit, offset, ctx=None):
+        if offset:
+            raise RuntimeError("page 2 failed")
+        return [{"name": f"file_{index:04d}.md", "isDir": False} for index in range(node_limit)]
+
+    monkeypatch.setattr(viking_fs, "stat", AsyncMock(return_value={"isDir": True}))
+    monkeypatch.setattr(viking_fs, "ls", fake_ls)
+
+    with pytest.raises(RuntimeError, match="page 2 failed"):
+        await viking_fs._collect_grep_files(
+            "viking://resources",
+            excluded_prefix=None,
+            level_limit=1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_collect_grep_files_propagates_root_stat_failure(monkeypatch):
+    viking_fs = VikingFS(agfs=_DummyAgfs())
+    monkeypatch.setattr(
+        viking_fs,
+        "stat",
+        AsyncMock(side_effect=RuntimeError("root stat failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="root stat failed"):
+        await viking_fs._collect_grep_files(
+            "viking://resources",
+            excluded_prefix=None,
+            level_limit=1,
+        )
 
 
 def test_grep_config_default_switch_to_remote_threshold_is_10000():

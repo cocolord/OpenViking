@@ -14,6 +14,8 @@ from openviking.storage.expr import And, PathScope, RawDSL
 from openviking.storage.viking_fs._base import logger
 from openviking_cli.utils.config.grep_config import GrepEngine
 
+_GREP_LS_PAGE_SIZE = 1000
+
 
 def _pkg():
     return sys.modules[__package__]
@@ -649,23 +651,31 @@ class _GrepMixin:
                 logger.debug(f"Skipping excluded uri during grep: {normalized_current_uri}")
                 return
 
-            try:
-                entries = await self.ls(normalized_current_uri, ctx=ctx)
-            except Exception:
-                return
+            offset = 0
+            while True:
+                entries = await self.ls(
+                    normalized_current_uri,
+                    node_limit=_GREP_LS_PAGE_SIZE,
+                    offset=offset,
+                    ctx=ctx,
+                )
 
-            for entry in entries:
-                entry_uri = f"{normalized_current_uri.rstrip('/')}/{entry['name']}"
-                if excluded_prefix and (
-                    entry_uri == excluded_prefix or entry_uri.startswith(excluded_prefix + "/")
-                ):
-                    logger.debug(f"Skipping excluded uri during grep: {entry_uri}")
-                    continue
+                for entry in entries:
+                    entry_uri = f"{normalized_current_uri.rstrip('/')}/{entry['name']}"
+                    if excluded_prefix and (
+                        entry_uri == excluded_prefix or entry_uri.startswith(excluded_prefix + "/")
+                    ):
+                        logger.debug(f"Skipping excluded uri during grep: {entry_uri}")
+                        continue
 
-                if entry.get("isDir"):
-                    await search_recursive(entry_uri, current_depth + 1)
-                elif allowed_uris is None or entry_uri in allowed_uris:
-                    file_uris.append(entry_uri)
+                    if entry.get("isDir"):
+                        await search_recursive(entry_uri, current_depth + 1)
+                    elif allowed_uris is None or entry_uri in allowed_uris:
+                        file_uris.append(entry_uri)
+
+                if len(entries) < _GREP_LS_PAGE_SIZE:
+                    break
+                offset += len(entries)
 
         normalized_uri = uri
         if excluded_prefix and (
@@ -673,10 +683,7 @@ class _GrepMixin:
         ):
             logger.debug(f"Skipping excluded uri during grep: {normalized_uri}")
             return file_uris
-        try:
-            root_stat = await self.stat(normalized_uri, ctx=ctx, skip_count=True)
-        except Exception:
-            return file_uris
+        root_stat = await self.stat(normalized_uri, ctx=ctx, skip_count=True)
         if not root_stat.get("isDir", False):
             if allowed_uris is None or normalized_uri in allowed_uris:
                 file_uris.append(normalized_uri)
