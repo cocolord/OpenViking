@@ -394,7 +394,7 @@ The `search()` method adds session context understanding and intent analysis cap
 | target_uri | str \| List[str] | No | "" | Limit search to specific URI prefix |
 | session | Session | No | None | Session for context-aware search (SDK) |
 | session_id | str | No | None | Session ID for context-aware search (HTTP) |
-| events_time_decay_weight | float | No | 0.0 | Weight of the event time score in `[0, 1)`; applies only to the current user's event L2 results. Zero preserves the original retrieval behavior |
+| events_time_decay_weight | float | No | 0.0 | Weight of the event time score in `[0, 1)`; applies to user and peer event L2 results. Zero preserves the original retrieval behavior |
 | events_time_decay_protection | str | No | "0" | No-decay protection period: `0` or a non-negative integer `Xm`/`Xh`/`Xd`; used only when the weight is positive |
 | context_type | str \| List[str] | No | None | Limit results to one or more `ContextType` values: `memory`, `resource`, or `skill` |
 | tags | List[str] | No | None | Explicit retrieval tags in strict `k=v` form. Multiple tags are combined with AND; a result must contain every requested tag |
@@ -411,7 +411,7 @@ The `search()` method adds session context understanding and intent analysis cap
 
 `search()` uses the same target resolution and explicit tag filtering rules as `find()`, including the peer collection filter selected by `X-OpenViking-Actor-Peer` or SDK `actor_peer_id`. When `image_url` is provided, `search()` uses direct image retrieval and skips session query planning.
 
-Event time decay applies only to L2 results under the current user's `viking://user/{user_id}/memories/events/`. It does not affect peer events, L0/L1, or `find`, `recall`, `grep`, and `glob`. Enabled event results use `score = origin_score * (1 - weight) + time_score * weight` and expose `origin_score` and `time_score`. A missing or invalid `updated_at` keeps the original score and returns `time_score` as `null`. The curve is owned by the server; callers only provide the per-request weight and protection period. No `ov.conf` or `ovcli.conf` change is required.
+Event time decay applies to L2 results under both `viking://user/{user_id}/memories/events/` and `viking://user/{user_id}/peers/{peer_id}/memories/events/`. It does not affect other memory types, L0/L1, or `find`, `recall`, `grep`, and `glob`. Enabled event results use `score = origin_score * (1 - weight) + time_score * weight` and expose `origin_score` and `time_score`; the CLI labels these as semantic, time, and final scores. Time is read from the existing indexed `updated_at` field; no reindex or timestamp rewrite is required. A missing or invalid value keeps the original score and returns `time_score` as `null`. The curve is owned by the server; callers only provide the per-request weight and protection period. No `ov.conf` or `ovcli.conf` change is required.
 
 #### 3. Usage Examples
 
@@ -549,6 +549,10 @@ openviking search "best practices" --context-type skill
 
 # Search with time filter
 openviking search "watch vs scheduled" --after 2026-03-15 --before 2026-03-20
+
+# Rank user and peer event memories with time decay
+openviking search "recent decisions" --context-type memory --level 2 \
+    --events-time-decay-weight 0.2 --events-time-decay-protection 1d
 
 # Search without session (still performs intent analysis)
 openviking search "how to implement OAuth 2.0 authorization code flow"

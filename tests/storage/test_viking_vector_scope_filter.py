@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: Apache-2.0
 
-import asyncio
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -463,54 +463,59 @@ async def test_zero_decay_weight_keeps_the_original_single_search_call():
     assert len(calls) == 1
     assert calls[0]["limit"] == 7
     assert calls[0]["offset"] == 2
-    assert "post_process_ops" not in calls[0]
 
 
 @pytest.mark.asyncio
-async def test_decay_splits_current_user_event_l2_and_non_event_concurrently():
+async def test_decay_fuses_user_and_peer_events_from_one_candidate_search():
     backend = object.__new__(VikingVectorIndexBackend)
     backend.acl_manager = None
     calls = []
-    both_started = asyncio.Event()
 
     async def fake_search(**kwargs):
         calls.append(kwargs)
-        if len(calls) == 2:
-            both_started.set()
-        await asyncio.wait_for(both_started.wait(), timeout=0.5)
-        if kwargs.get("post_process_ops"):
-            return [
-                {
-                    "uri": "viking://user/alice/memories/events/recent",
-                    "level": 2,
-                    "_score": 0.99,
-                    "_origin_score": 0.2,
-                    "_time_score": 1.0,
-                }
-            ]
-        return [{"uri": "viking://resources/doc", "level": 2, "_score": 0.5}]
+        return [
+            {
+                "uri": "viking://user/alice/memories/events/old",
+                "level": 2,
+                "updated_at": "2026-01-01T00:00:00Z",
+                "_score": 0.9,
+            },
+            {
+                "uri": "viking://user/alice/peers/peer-a/memories/events/recent",
+                "level": 2,
+                "updated_at": "2026-01-08T00:00:00Z",
+                "_score": 0.6,
+            },
+            {
+                "uri": "viking://user/alice/memories/preferences/pref.md",
+                "level": 2,
+                "updated_at": "2026-01-08T00:00:00Z",
+                "_score": 0.75,
+            },
+        ]
 
     backend.search = fake_search
     results = await backend.search_in_tenant(
         ctx=_ctx(),
         query_vector=[1.0],
         context_type="memory",
-        limit=5,
-        events_time_decay_weight=0.25,
-        events_time_decay_protection="1d",
+        limit=3,
+        events_time_decay_weight=0.5,
+        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
     )
 
-    assert len(calls) == 2
-    event_call = next(call for call in calls if call.get("post_process_ops"))
-    non_event_call = next(call for call in calls if not call.get("post_process_ops"))
-    assert event_call["post_process_input_limit"] == 15
-    assert event_call["filter"].conds[-2:] == [
-        PathScope("uri", "viking://user/alice/memories/events", depth=-1),
-        Eq("level", 2),
+    assert len(calls) == 1
+    assert calls[0]["limit"] == 9
+    assert [item["uri"] for item in results] == [
+        "viking://user/alice/peers/peer-a/memories/events/recent",
+        "viking://user/alice/memories/preferences/pref.md",
+        "viking://user/alice/memories/events/old",
     ]
-    assert isinstance(non_event_call["filter"].conds[-1], Or)
-    assert results[0]["_origin_score"] == pytest.approx(0.2)
+    assert results[0]["_origin_score"] == pytest.approx(0.6)
     assert results[0]["_time_score"] == pytest.approx(1.0)
+    assert "_origin_score" not in results[1]
+    assert "_time_score" not in results[1]
+    assert results[2]["_time_score"] == pytest.approx(0.5)
 
 
 @pytest.mark.asyncio
@@ -526,15 +531,13 @@ async def test_decay_rerank_prefetch_keeps_expanded_origin_candidates():
                 "uri": "viking://user/alice/memories/events/fresh",
                 "level": 2,
                 "_score": 0.9,
-                "_origin_score": 0.1,
-                "_time_score": 1.0,
+                "updated_at": "2026-01-08T00:00:00Z",
             },
             {
-                "uri": "viking://user/alice/memories/events/old",
+                "uri": "viking://user/alice/peers/peer-a/memories/events/old",
                 "level": 2,
-                "_score": 0.2,
-                "_origin_score": 0.99,
-                "_time_score": 0.0,
+                "_score": 0.8,
+                "updated_at": "2026-01-01T00:00:00Z",
             },
         ]
         return candidates[: kwargs["limit"]]
@@ -544,20 +547,57 @@ async def test_decay_rerank_prefetch_keeps_expanded_origin_candidates():
         ctx=_ctx(),
         query_vector=[1.0],
         context_type="memory",
-        target_directories=["viking://user/alice/memories/events"],
+        target_directories=["viking://user/alice"],
         level=[2],
         limit=1,
         events_time_decay_weight=0.8,
         for_rerank=True,
+        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
     )
 
     assert calls[0]["limit"] == 3
-    assert calls[0]["post_process_input_limit"] == 3
-    assert [result["_score"] for result in results] == pytest.approx([0.1, 0.99])
+    assert [result["_score"] for result in results] == pytest.approx([0.9, 0.8])
+    assert [result["_origin_score"] for result in results] == pytest.approx([0.9, 0.8])
+    assert [result["_time_score"] for result in results] == pytest.approx([1.0, 0.5])
 
 
 @pytest.mark.asyncio
-async def test_decay_does_not_split_a_peer_only_target():
+async def test_decay_applies_to_a_peer_only_target():
+    backend = object.__new__(VikingVectorIndexBackend)
+    backend.acl_manager = None
+    calls = []
+
+    async def fake_search(**kwargs):
+        calls.append(kwargs)
+        return [
+            {
+                "uri": "viking://user/alice/peers/peer-a/memories/events/recent",
+                "level": 2,
+                "updated_at": "2026-01-08T00:00:00Z",
+                "_score": 0.2,
+            }
+        ]
+
+    backend.search = fake_search
+    results = await backend.search_in_tenant(
+        ctx=_ctx(),
+        query_vector=[1.0],
+        context_type="memory",
+        target_directories=["viking://user/alice/peers/peer-a/memories/events"],
+        level=[2],
+        events_time_decay_weight=0.25,
+        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["limit"] == 30
+    assert results[0]["_score"] == pytest.approx(0.4)
+    assert results[0]["_origin_score"] == pytest.approx(0.2)
+    assert results[0]["_time_score"] == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_decay_applies_under_bare_user_target():
     backend = object.__new__(VikingVectorIndexBackend)
     backend.acl_manager = None
     calls = []
@@ -571,10 +611,46 @@ async def test_decay_does_not_split_a_peer_only_target():
         ctx=_ctx(),
         query_vector=[1.0],
         context_type="memory",
-        target_directories=["viking://user/alice/peers/peer-a/memories/events"],
+        target_directories=["viking://user"],
         level=[2],
+        limit=2,
         events_time_decay_weight=0.25,
     )
 
     assert len(calls) == 1
-    assert "post_process_ops" not in calls[0]
+    assert calls[0]["limit"] == 6
+
+
+@pytest.mark.asyncio
+async def test_decay_applies_to_children_of_a_peer_event_directory():
+    backend = object.__new__(VikingVectorIndexBackend)
+    backend.acl_manager = None
+    calls = []
+
+    async def fake_search(**kwargs):
+        calls.append(kwargs)
+        return [
+            {
+                "uri": "viking://user/alice/peers/peer-a/memories/events/recent",
+                "level": 2,
+                "updated_at": "2026-01-08T00:00:00Z",
+                "_score": 0.2,
+            }
+        ]
+
+    backend.search = fake_search
+    results = await backend.search_children_in_tenant(
+        ctx=_ctx(),
+        parent_uri="viking://user/alice/peers/peer-a/memories/events",
+        query_vector=[1.0],
+        context_type="memory",
+        limit=2,
+        events_time_decay_weight=0.25,
+        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["limit"] == 6
+    assert results[0]["_score"] == pytest.approx(0.2)
+    assert results[0]["_origin_score"] == pytest.approx(0.2)
+    assert results[0]["_time_score"] == pytest.approx(1.0)

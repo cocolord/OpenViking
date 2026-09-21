@@ -1,11 +1,6 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
-"""VikingDB-compatible event time-decay score fusion helpers.
-
-The product contract blends the semantic and time scores directly. Keeping
-that contract in one module lets local collections and VikingDB requests use
-the same curve and ranking semantics.
-"""
+"""Event time-decay validation and score fusion helpers."""
 
 from __future__ import annotations
 
@@ -15,14 +10,14 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import datetime, timezone
 from numbers import Real
-from typing import Any, Iterable, Mapping, Optional, Sequence
+from typing import Any, Optional
 
-from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
+from openviking.utils.time_utils import parse_iso_datetime
 
-DEFAULT_POST_PROCESS_FACTOR = 3
-MAX_VECTOR_POST_PROCESS_INPUT_LIMIT = 100_000
-# This curve is an internal ranking contract validated against VikingDB's
-# score_fusion operator; it is intentionally not part of ov.conf/ovcli.conf.
+DEFAULT_TIME_DECAY_CANDIDATE_FACTOR = 3
+MAX_TIME_DECAY_CANDIDATES = 100_000
+# This curve is an internal ranking contract; it is intentionally not part of
+# ov.conf or ovcli.conf.
 EVENT_TIME_DECAY_SCALE = "7d"
 EVENT_TIME_DECAY_DECAY = 0.5
 # Match VikingDB's date_time duration limit: 3000 years of 365 days.
@@ -91,7 +86,6 @@ class TimeDecayFusionSpec:
     offset_ms: int
     scale_ms: int
     decay: float
-    factor: float = 1.0
     _decay_rate: float = dataclass_field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -109,7 +103,7 @@ class TimeDecayFusionSpec:
         distance_ms = max(
             0.0, abs(_datetime_to_epoch_ms(source_time) - self.origin_ms) - self.offset_ms
         )
-        addition_score = self.factor * math.exp(self._decay_rate * distance_ms)
+        addition_score = math.exp(self._decay_rate * distance_ms)
         final_score = _blend_scores(origin_score, addition_score, self.weight)
         return final_score, addition_score
 
@@ -127,125 +121,32 @@ def fuse_time_decay_scores(*, origin_score: float, addition_score: float, weight
     return _blend_scores(origin_score, addition_score, checked_weight)
 
 
-def apply_time_decay_to_search_items(
-    items: Iterable[Any],
-    spec: TimeDecayFusionSpec,
-    *,
-    source_fields: Optional[Iterable[Mapping[str, Any]]] = None,
-) -> list[Any]:
-    """Apply local score fusion to SearchItemResult-like objects and stable-sort them."""
-    processed = list(items)
-    fields_iter: list[Optional[Mapping[str, Any]]] = (
-        list(source_fields) if source_fields is not None else [None] * len(processed)
-    )
-    for item, raw_fields in zip(processed, fields_iter, strict=False):
-        origin_score = float(item.score or 0.0)
-        fields = raw_fields if isinstance(raw_fields, Mapping) else item.fields
-        if not isinstance(fields, Mapping):
-            fields = {}
-        item.score, item.addition_score = spec.fuse_optional(origin_score, fields.get(spec.field))
-        item.origin_score = origin_score
-    processed.sort(key=lambda item: item.score or 0.0, reverse=True)
-    return processed
-
-
-def build_time_decay_post_process_ops(
+def build_time_decay_fusion_spec(
     *,
     weight: float,
     protection: str,
     origin: Optional[datetime] = None,
     field: str = "updated_at",
-) -> list[dict[str, Any]]:
-    """Build the VikingDB score-fusion payload; zero weight emits no operator."""
-    checked_weight = validate_time_decay_weight(weight)
-    if checked_weight == 0.0:
-        return []
-    protection_ms = parse_duration_ms(protection, parameter_name="events_time_decay_protection")
-    request_time = origin or datetime.now(timezone.utc)
-    addition = {
-        "factor": 1,
-        "base_value_from": "decay_func",
-        "field": field,
-        "func": "exp",
-        "origin": format_iso8601(request_time),
-        "scale": EVENT_TIME_DECAY_SCALE,
-        "decay": EVENT_TIME_DECAY_DECAY,
-    }
-    # VikingDB documents offset as optional with a zero default, while its
-    # date_time parser rejects explicit zero durations (both "0" and "0d").
-    if protection_ms > 0:
-        addition["offset"] = protection
-    return [
-        {
-            "op": "score_fusion",
-            "fusion_by": "add",
-            "addition_score_weight": checked_weight,
-            "normalize_for_origin_score": {"enable": False},
-            "normalize_for_addition_score": {"enable": False},
-            "addition_score": [addition],
-        }
-    ]
-
-
-def parse_time_decay_post_process_ops(
-    post_process_ops: Optional[Sequence[Mapping[str, Any]]],
-) -> Optional[TimeDecayFusionSpec]:
-    """Parse the score-fusion subset emitted by this module for local use."""
-    if not post_process_ops:
-        return None
-    if len(post_process_ops) != 1:
-        raise ValueError("local vector search supports one score_fusion operator")
-
-    op = post_process_ops[0]
-    if op.get("op") != "score_fusion" or op.get("fusion_by") != "add":
-        raise ValueError("local vector search only supports additive score_fusion")
-    disabled_normalization = {"enable": False}
-    for key in ("normalize_for_origin_score", "normalize_for_addition_score"):
-        if op.get(key) != disabled_normalization:
-            raise ValueError("local time-decay fusion requires score normalization to be disabled")
-
-    weight = validate_time_decay_weight(op.get("addition_score_weight"))
-    if weight == 0.0:
-        raise ValueError("score_fusion addition_score_weight must be in (0, 1)")
-    additions = op.get("addition_score")
-    if not isinstance(additions, list) or len(additions) != 1:
-        raise ValueError("local time-decay fusion requires exactly one addition_score item")
-    addition = additions[0]
-    if not isinstance(addition, Mapping):
-        raise ValueError("addition_score item must be an object")
-    if addition.get("base_value_from") != "decay_func" or addition.get("func") != "exp":
-        raise ValueError("local time-decay fusion requires an exponential decay_func")
-
-    scale_ms = parse_duration_ms(addition.get("scale"), parameter_name="time-decay scale")
-    if "decay" not in addition:
-        raise ValueError("local time-decay fusion requires an explicit decay")
-    decay = float(addition["decay"])
-    factor = float(addition.get("factor", 1.0))
-    if not math.isfinite(factor) or factor == 0.0:
-        raise ValueError("time-decay factor must be finite and non-zero")
-
+) -> TimeDecayFusionSpec:
+    """Compile the fixed event time-decay curve for one retrieval request."""
     return TimeDecayFusionSpec(
-        weight=weight,
-        field=str(addition.get("field", "")),
-        origin_ms=_datetime_to_epoch_ms(addition.get("origin", datetime.now(timezone.utc))),
-        offset_ms=parse_duration_ms(
-            addition.get("offset", "0"), parameter_name="time-decay offset"
-        ),
-        scale_ms=scale_ms,
-        decay=decay,
-        factor=factor,
+        weight=validate_time_decay_weight(weight),
+        field=field,
+        origin_ms=origin or datetime.now(timezone.utc),
+        offset_ms=parse_duration_ms(protection, parameter_name="events_time_decay_protection"),
+        scale_ms=parse_duration_ms(EVENT_TIME_DECAY_SCALE, parameter_name="time-decay scale"),
+        decay=EVENT_TIME_DECAY_DECAY,
     )
 
 
-def post_process_input_limit(limit: int, offset: int = 0) -> int:
-    """Return VikingDB's default 3x candidate budget for vector search."""
+def time_decay_candidate_limit(limit: int, offset: int = 0) -> int:
+    """Return the bounded candidate budget used before local score fusion."""
     final_window = limit + offset
-    if final_window > MAX_VECTOR_POST_PROCESS_INPUT_LIMIT:
+    if final_window > MAX_TIME_DECAY_CANDIDATES:
         raise ValueError(
-            "time-decay search limit + offset must not exceed "
-            f"{MAX_VECTOR_POST_PROCESS_INPUT_LIMIT}"
+            f"time-decay search limit + offset must not exceed {MAX_TIME_DECAY_CANDIDATES}"
         )
     return min(
-        final_window * DEFAULT_POST_PROCESS_FACTOR,
-        MAX_VECTOR_POST_PROCESS_INPUT_LIMIT,
+        final_window * DEFAULT_TIME_DECAY_CANDIDATE_FACTOR,
+        MAX_TIME_DECAY_CANDIDATES,
     )

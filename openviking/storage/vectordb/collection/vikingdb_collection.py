@@ -9,8 +9,8 @@ from openviking.storage.vectordb.collection.result import (
     AggregateResult,
     DataItem,
     FetchDataInCollectionResult,
+    SearchItemResult,
     SearchResult,
-    parse_remote_search_result,
 )
 from openviking.storage.vectordb.collection.vikingdb_clients import (
     VIKINGDB_APIS,
@@ -251,11 +251,19 @@ class VikingDBCollection(ICollection):
                 result.ids_not_exist = data.get("ids_not_exist", [])
         return result
 
-    def _parse_search_result(
-        self,
-        data: Dict[str, Any],
-    ) -> SearchResult:
-        return parse_remote_search_result(data)
+    def _parse_search_result(self, data: Dict[str, Any]) -> SearchResult:
+        result = SearchResult()
+        if isinstance(data, dict) and "data" in data:
+            data_list = data.get("data", [])
+            result.data = [
+                SearchItemResult(
+                    id=item.get("id"),
+                    fields=item.get("fields"),
+                    score=item.get("score"),
+                )
+                for item in data_list
+            ]
+        return result
 
     def search_by_vector(
         self,
@@ -266,8 +274,6 @@ class VikingDBCollection(ICollection):
         filters: Optional[Dict[str, Any]] = None,
         sparse_vector: Optional[Dict[str, float]] = None,
         output_fields: Optional[List[str]] = None,
-        post_process_ops: Optional[List[Dict[str, Any]]] = None,
-        post_process_input_limit: Optional[int] = None,
     ) -> SearchResult:
         path = "/api/vikingdb/data/search/vector"
         data = {
@@ -283,12 +289,6 @@ class VikingDBCollection(ICollection):
         }
         if sparse_vector:
             data["sparse_vector"] = sparse_vector
-        if post_process_ops:
-            data["advance"] = {
-                "post_process_ops": post_process_ops,
-                "post_process_input_limit": post_process_input_limit,
-            }
-            data["return_detail_info"] = True
         resp_data = self._data_post(path, data)
         return self._parse_search_result(resp_data)
 

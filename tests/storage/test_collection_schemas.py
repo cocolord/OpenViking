@@ -1518,46 +1518,6 @@ def test_private_vikingdb_collection_ignores_unknown_fields_on_fetch_and_search(
     assert all(data["ignore_unknown_fields"] is True for _, data in calls)
 
 
-@pytest.mark.parametrize(
-    "collection",
-    [
-        VolcengineApiKeyCollection(
-            api_key="vk-test-token",
-            host="https://vikingdb.example.com",
-            meta_data={
-                "ProjectName": "default",
-                "CollectionName": "context",
-                "IndexName": "default",
-            },
-        ),
-        VolcengineCollection(
-            ak="ak",
-            sk="sk",
-            region="cn-beijing",
-            meta_data={"ProjectName": "default", "CollectionName": "context"},
-        ),
-        VikingDBCollection(
-            host="https://vikingdb.example.com",
-            meta_data={"ProjectName": "default", "CollectionName": "context"},
-        ),
-    ],
-)
-def test_vector_search_requests_detail_only_with_post_process(collection):
-    calls = []
-    collection._data_post = lambda path, data: calls.append((path, data)) or {}
-
-    collection.search_by_vector("default", dense_vector=[0.1, 0.2])
-    collection.search_by_vector(
-        "default",
-        dense_vector=[0.1, 0.2],
-        post_process_ops=[{"op": "score_fusion"}],
-        post_process_input_limit=30,
-    )
-
-    assert "return_detail_info" not in calls[0][1]
-    assert calls[1][1]["return_detail_info"] is True
-
-
 @pytest.mark.asyncio
 async def test_init_context_collection_uses_backend_specific_schema(monkeypatch):
     captured = {}

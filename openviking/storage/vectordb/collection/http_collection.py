@@ -393,28 +393,22 @@ class HttpCollection(ICollection):
         filters: Optional[Dict[str, Any]] = None,
         sparse_vector: Optional[Dict[str, float]] = None,
         output_fields: Optional[List[str]] = None,
-        post_process_ops: Optional[List[Dict[str, Any]]] = None,
-        post_process_input_limit: Optional[int] = None,
     ) -> SearchResult:
         url = self.url_prefix + "api/vikingdb/data/search/vector"
-        request_body = {
-            "project": self.project_name,
-            "collection_name": self.collection_name,
-            "index_name": index_name,
-            "dense_vector": json.dumps(dense_vector) if dense_vector else None,
-            "sparse_vector": json.dumps(sparse_vector) if sparse_vector else None,
-            "filter": json.dumps(filters) if filters else None,
-            "output_fields": json.dumps(output_fields) if output_fields else None,
-            "limit": limit,
-            "offset": offset,
-        }
-        if post_process_ops:
-            request_body["post_process_ops"] = post_process_ops
-            request_body["post_process_input_limit"] = post_process_input_limit
         response = requests.post(
             url,
             headers=headers,
-            json=request_body,
+            json={
+                "project": self.project_name,
+                "collection_name": self.collection_name,
+                "index_name": index_name,
+                "dense_vector": json.dumps(dense_vector) if dense_vector else None,
+                "sparse_vector": json.dumps(sparse_vector) if sparse_vector else None,
+                "filter": json.dumps(filters) if filters else None,
+                "output_fields": json.dumps(output_fields) if output_fields else None,
+                "limit": limit,
+                "offset": offset,
+            },
             timeout=DEFAULT_TIMEOUT,
         )
         # logger.info(f"SearchByVector response: {response.text}")
@@ -429,8 +423,6 @@ class HttpCollection(ICollection):
                     id=item.get("id"),
                     fields=item.get("fields"),
                     score=item.get("score"),
-                    origin_score=item.get("origin_score"),
-                    addition_score=item.get("addition_score"),
                 )
                 for item in data.get("data", [])
             ]

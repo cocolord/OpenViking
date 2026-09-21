@@ -517,8 +517,8 @@ type MatchedContext struct {
 	Content     string   `json:"content,omitempty"`
 	Overview    string   `json:"overview,omitempty"`
 	Category    string   `json:"category,omitempty"`
-	OriginScore *float64 `json:"origin_score"`
-	TimeScore   *float64 `json:"time_score"`
+	OriginScore *float64 `json:"origin_score,omitempty"`
+	TimeScore   *float64 `json:"time_score,omitempty"`
 	Score       float64  `json:"score,omitempty"`
 	MatchReason string   `json:"match_reason,omitempty"`
 	Tags        []string `json:"tags,omitempty"`

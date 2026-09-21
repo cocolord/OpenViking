@@ -395,7 +395,7 @@ openviking find "红色海报风格" --image ./poster.png --uri "viking://resour
 | target_uri | str \| List[str] | 否 | "" | 限制搜索范围到指定的 URI 前缀 |
 | session | Session | 否 | None | 用于上下文感知搜索的会话（SDK）|
 | session_id | str | 否 | None | 用于上下文感知搜索的会话 ID（HTTP）|
-| events_time_decay_weight | float | 否 | 0.0 | 事件时间分的融合权重，范围 `[0, 1)`；仅当前用户 events L2 生效，0 保持原检索行为 |
+| events_time_decay_weight | float | 否 | 0.0 | 事件时间分的融合权重，范围 `[0, 1)`；对 user 和 peer 的 events L2 生效，0 保持原检索行为 |
 | events_time_decay_protection | str | 否 | "0" | 不衰减保护期，支持 `0` 或非负整数 `Xm`/`Xh`/`Xd`；仅权重大于 0 时使用 |
 | context_type | str \| List[str] | 否 | None | 限定一个或多个 `ContextType` 取值：`memory`、`resource` 或 `skill` |
 | tags | List[str] | 否 | None | 显式检索标签，必须是严格的 `k=v` 格式。多个 tags 之间是 AND 关系，结果必须同时包含所有请求的标签 |
@@ -413,7 +413,7 @@ openviking find "红色海报风格" --image ./poster.png --uri "viking://resour
 
 `search()` 使用和 `find()` 相同的目标解析和显式标签过滤规则，包括由 `X-OpenViking-Actor-Peer` 或 SDK `actor_peer_id` 选择的 peer 集合过滤。提供 `image_url` 时，`search()` 会直接执行图片检索并跳过会话 query planning。
 
-事件时间衰减只作用于当前用户 `viking://user/{user_id}/memories/events/` 下的 L2 结果，不作用于 peer event、L0/L1，也不接入 `find`、`recall`、`grep` 或 `glob`。启用后按 `score = origin_score * (1 - weight) + time_score * weight` 融合；命中的 event 结果额外返回 `origin_score` 和 `time_score`。缺失或非法 `updated_at` 的结果保持原分，`time_score` 为 `null`。衰减曲线由服务端内部维护，调用方只需按请求传入权重和保护期，无需修改 `ov.conf` 或 `ovcli.conf`。
+事件时间衰减同时作用于 `viking://user/{user_id}/memories/events/` 和 `viking://user/{user_id}/peers/{peer_id}/memories/events/` 下的 L2 结果，不作用于其他记忆类型、L0/L1，也不接入 `find`、`recall`、`grep` 或 `glob`。启用后按 `score = origin_score * (1 - weight) + time_score * weight` 融合；命中的 event 结果额外返回 `origin_score` 和 `time_score`，CLI 分别展示为 semantic、time 和 final 分。时间取自已有索引的 `updated_at` 字段，无需重新索引或改写时间戳；字段缺失或非法时保持原分，`time_score` 为 `null`。衰减曲线由服务端内部维护，调用方只需按请求传入权重和保护期，无需修改 `ov.conf` 或 `ovcli.conf`。
 
 #### 3. 使用示例
 
@@ -551,6 +551,10 @@ openviking search "best practices" --context-type skill
 
 # 带时间过滤的搜索
 openviking search "watch vs scheduled" --after 2026-03-15 --before 2026-03-20
+
+# 对 user 和 peer 的事件记忆启用时间衰减排序
+openviking search "recent decisions" --context-type memory --level 2 \
+    --events-time-decay-weight 0.2 --events-time-decay-protection 1d
 
 # 不带会话的搜索（仍进行意图分析）
 openviking search "how to implement OAuth 2.0 authorization code flow"
