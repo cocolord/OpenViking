@@ -194,8 +194,7 @@ class OpenVikingService:
 
         # Initialize VikingDBManager with QueueManager
         self._vikingdb_manager = VikingDBManager(
-            vectordb_config=config.vectordb,
-            queue_manager=self._queue_manager,
+            vectordb_config=config.vectordb, queue_manager=self._queue_manager
         )
         self._vikingdb_manager.acl_manager = AclManager(self._vikingdb_manager)
 
@@ -229,7 +228,11 @@ class OpenVikingService:
         if manager is None:
             return
         base_config = self._config.model_copy(
-            update={"agent_evolution": self._agent_evolution_base_config.model_copy(deep=True)}
+            update={
+                "agent_evolution": self._agent_evolution_base_config.model_copy(
+                    deep=True
+                )
+            }
         )
         await manager.replace_base_config(base_config)
 
@@ -247,7 +250,11 @@ class OpenVikingService:
         if self._agfs_client is None:
             raise RuntimeError("AGFS client not initialized")
         base_config = self._config.model_copy(
-            update={"agent_evolution": self._agent_evolution_base_config.model_copy(deep=True)},
+            update={
+                "agent_evolution": self._agent_evolution_base_config.model_copy(
+                    deep=True
+                )
+            },
         )
         manager = build_runtime_config_manager(
             AsyncAGFSClient(self._agfs_client),
