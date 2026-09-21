@@ -297,6 +297,7 @@ def test_volcengine_collection_update_data_posts_to_update_endpoint(monkeypatch)
         "project": "default",
         "collection_name": "context",
         "data": [{"id": "doc-1", "name": "updated"}],
+        "ignore_unknown_fields": True,
     }
 
 
@@ -334,6 +335,7 @@ def test_volcengine_collection_update_data_sanitizes_uri_fields(monkeypatch):
         "project": "default",
         "collection_name": "context",
         "data": [{"id": "doc-1", "uri": "/resources/demo", "parent_uri": "/resources"}],
+        "ignore_unknown_fields": True,
     }
 
 
@@ -484,6 +486,7 @@ def test_volcengine_api_key_collection_update_data_posts_to_update_endpoint(monk
         "project": "default",
         "collection_name": "context",
         "data": [{"id": "doc-1", "name": "updated"}],
+        "ignore_unknown_fields": True,
     }
 
 
@@ -523,6 +526,7 @@ def test_volcengine_api_key_collection_update_data_sanitizes_uri_fields(monkeypa
         "project": "default",
         "collection_name": "context",
         "data": [{"id": "doc-1", "uri": "/resources/demo", "parent_uri": "/resources"}],
+        "ignore_unknown_fields": True,
     }
 
 
@@ -1119,3 +1123,39 @@ def test_http_collection_vector_search_only_sends_post_process_fields_when_enabl
     assert "post_process_input_limit" not in calls[0]
     assert calls[1]["post_process_ops"] == ops
     assert calls[1]["post_process_input_limit"] == 30
+
+
+def test_http_adapter_strict_count_propagates_http_failure(monkeypatch):
+    from openviking.storage.vectordb.collection.collection import Collection
+    from openviking.storage.vectordb.collection.http_collection import HttpCollection
+    from openviking.storage.vectordb_adapters.http_adapter import HttpCollectionAdapter
+
+    class _Response:
+        status_code = 503
+        text = "unavailable"
+
+        @staticmethod
+        def raise_for_status():
+            raise requests.HTTPError("503 unavailable")
+
+    monkeypatch.setattr(
+        "openviking.storage.vectordb.collection.http_collection.requests.post",
+        lambda *args, **kwargs: _Response(),
+    )
+    adapter = HttpCollectionAdapter(
+        host="127.0.0.1",
+        port=1933,
+        project_name="default",
+        collection_name="context",
+        index_name="default",
+    )
+    adapter._collection = Collection(
+        HttpCollection(
+            ip="127.0.0.1",
+            port=1933,
+            meta_data={"ProjectName": "default", "CollectionName": "context"},
+        )
+    )
+
+    with pytest.raises(requests.HTTPError, match="503 unavailable"):
+        adapter.strict_count()
