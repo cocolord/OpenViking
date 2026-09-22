@@ -8,6 +8,7 @@ import sys
 import time
 from typing import Any, Callable, Dict, List, Optional, Set
 
+from openviking.core.namespace import is_session_uri
 from openviking.pyagfs.exceptions import AGFSNotSupportedError
 from openviking.server.identity import RequestContext
 from openviking.storage.expr import And, PathScope, RawDSL
@@ -75,7 +76,7 @@ class _GrepMixin:
         # persisted raw content, so it cannot safely recall projected results.
         resolved_engine = (
             "fs"
-            if content_transform is not None or self._legacy_session_alias(uri) is not None
+            if content_transform is not None or is_session_uri(uri)
             else await self._resolve_grep_engine(engine, uri, ctx, switch_to_remote_threshold)
         )
         tags_by_uri: Dict[str, List[str]] = {}

@@ -107,7 +107,14 @@ async def test_grep_without_config_uses_documented_remote_threshold(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_session_grep_forces_fs_engine_in_auto_mode(monkeypatch):
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "viking://user/alice/sessions/session-1",
+        "viking://session/session-1",
+    ],
+)
+async def test_session_grep_forces_fs_engine_in_auto_mode(monkeypatch, uri):
     viking_fs = VikingFS(agfs=_DummyAgfs())
     monkeypatch.setattr(viking_fs, "stat", AsyncMock(return_value={"isDir": True}))
     resolve_engine = AsyncMock(return_value="vikingdb_then_fs")
@@ -120,7 +127,7 @@ async def test_session_grep_forces_fs_engine_in_auto_mode(monkeypatch):
     monkeypatch.setattr(viking_fs, "_grep_vikingdb_then_fs", grep_vikingdb)
 
     await viking_fs.grep(
-        "viking://user/alice/sessions/session-1",
+        uri,
         pattern="needle",
     )
 
