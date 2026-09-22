@@ -26,7 +26,7 @@ from openviking.storage.viking_fs._base import (
 from openviking.telemetry import get_current_telemetry
 from openviking.utils.image_search import build_multimodal_embedding_input
 from openviking.utils.time_decay import validate_time_decay_weight
-from openviking_cli.exceptions import NotFoundError
+from openviking_cli.exceptions import InvalidArgumentError, NotFoundError
 
 
 class _SemanticMixin:
@@ -201,6 +201,8 @@ class _SemanticMixin:
         ctx: Optional[RequestContext] = None,
         level: Optional[List[int]] = None,
         image_url: Optional[str] = None,
+        events_time_decay_weight: float = 0.0,
+        events_time_decay_protection: str = "0",
     ):
         """Semantic search.
 
@@ -225,8 +227,14 @@ class _SemanticMixin:
         filter_only = is_filter_only_query(query, image_url)
         if filter_only:
             _ensure_filter_present(filter)
+            if events_time_decay_weight != 0.0:
+                raise InvalidArgumentError(
+                    "events_time_decay_weight requires a semantic query or image"
+                )
         else:
             _ensure_non_empty_search_query(query, image_url)
+        events_time_decay_weight = validate_time_decay_weight(events_time_decay_weight)
+        request_now = datetime.now(timezone.utc) if events_time_decay_weight > 0 else None
 
         telemetry = get_current_telemetry()
         from openviking.retrieve.hierarchical_retriever import (
@@ -293,6 +301,9 @@ class _SemanticMixin:
             score_threshold=score_threshold,
             scope_dsl=filter,
             level=level,
+            events_time_decay_weight=events_time_decay_weight,
+            events_time_decay_protection=events_time_decay_protection,
+            request_now=request_now,
         )
 
         # Convert QueryResult to FindResult

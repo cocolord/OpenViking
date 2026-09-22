@@ -850,6 +850,21 @@ enum Commands {
         /// Include the full visible content for every matched URI
         #[arg(long, help_heading = "Advanced options")]
         read_content: bool,
+        /// Event freshness weight in [0, 1); 0 keeps the original ranking
+        #[arg(
+            long,
+            alias = "events_time_decay_weight",
+            value_parser = parse_events_time_decay_weight,
+            help_heading = "Advanced options"
+        )]
+        events_time_decay_weight: Option<f64>,
+        /// Protection duration: 0 or a non-negative integer with m, h, or d
+        #[arg(
+            long,
+            alias = "events_time_decay_protection",
+            help_heading = "Advanced options"
+        )]
+        events_time_decay_protection: Option<String>,
     },
     /// [Experimental][Data] Run context-aware retrieval
     Search {
@@ -3753,6 +3768,8 @@ async fn main() {
             context_type,
             tags,
             read_content,
+            events_time_decay_weight,
+            events_time_decay_protection,
         } => {
             handlers::handle_find(
                 query,
@@ -3766,6 +3783,8 @@ async fn main() {
                 context_type,
                 tags,
                 read_content,
+                events_time_decay_weight,
+                events_time_decay_protection,
                 ctx,
             )
             .await

@@ -77,6 +77,126 @@ class _RecordingAsyncAdapter:
         return []
 
 
+def _backend_with_mode(mode: str) -> VikingVectorIndexBackend:
+    backend = object.__new__(VikingVectorIndexBackend)
+    backend.acl_manager = None
+    backend._get_backend_for_context = lambda _ctx: SimpleNamespace(_mode=mode)
+    return backend
+
+
+@pytest.mark.asyncio
+async def test_cloud_event_scope_uses_one_post_process_query():
+    backend = _backend_with_mode("vikingdb")
+    calls = []
+
+    async def fake_search(**kwargs):
+        calls.append(kwargs)
+        return []
+
+    backend.search = fake_search
+    await backend.search_in_tenant(
+        ctx=_ctx(),
+        query_vector=[1.0],
+        context_type="memory",
+        target_directories=["viking://user/alice/memories/events"],
+        level=[2],
+        limit=10,
+        events_time_decay_weight=0.25,
+        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["limit"] == 10
+    assert calls[0]["return_detail_info"] is True
+    assert calls[0]["advance"]["post_process_input_limit"] == 30
+    assert calls[0]["advance"]["post_process_ops"][0]["addition_score_weight"] == 0.25
+
+
+@pytest.mark.asyncio
+async def test_cloud_mixed_scope_splits_event_and_non_event_queries():
+    backend = _backend_with_mode("vikingdb")
+    calls = []
+
+    async def fake_search(**kwargs):
+        calls.append(kwargs)
+        if kwargs.get("advance"):
+            return [{"uri": "viking://user/alice/memories/events/new", "_score": 0.7}]
+        return [{"uri": "viking://user/alice/memories/preferences/p", "_score": 0.8}]
+
+    backend.search = fake_search
+    results = await backend.search_in_tenant(
+        ctx=_ctx(),
+        query_vector=[1.0],
+        context_type="memory",
+        target_directories=["viking://user/alice/memories"],
+        limit=10,
+        events_time_decay_weight=0.25,
+        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
+    )
+
+    assert len(calls) == 2
+    assert sum(call.get("return_detail_info", False) for call in calls) == 1
+    assert [item["_score"] for item in results] == [0.8, 0.7]
+
+
+@pytest.mark.asyncio
+async def test_cloud_mixed_rerank_prefetch_keeps_one_origin_score_window():
+    backend = _backend_with_mode("vikingdb")
+
+    async def fake_search(**kwargs):
+        if kwargs.get("advance"):
+            return [
+                {"uri": "viking://user/alice/memories/events/a", "_score": 0.95, "_origin_score": 0.4},
+                {"uri": "viking://user/alice/memories/events/b", "_score": 0.9, "_origin_score": 0.3},
+                {"uri": "viking://user/alice/memories/events/c", "_score": 0.8, "_origin_score": 0.2},
+            ]
+        return [
+            {"uri": "viking://user/alice/memories/preferences/a", "_score": 0.8},
+            {"uri": "viking://user/alice/memories/preferences/b", "_score": 0.7},
+            {"uri": "viking://user/alice/memories/preferences/c", "_score": 0.1},
+        ]
+
+    backend.search = fake_search
+    results = await backend.search_in_tenant(
+        ctx=_ctx(),
+        query_vector=[1.0],
+        context_type="memory",
+        target_directories=["viking://user/alice/memories"],
+        limit=1,
+        events_time_decay_weight=0.25,
+        for_rerank=True,
+        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
+    )
+
+    assert len(results) == 3
+    assert [item["_score"] for item in results] == [0.8, 0.7, 0.4]
+
+
+@pytest.mark.asyncio
+async def test_cloud_default_user_scope_keeps_python_fusion_for_unknown_peers():
+    backend = _backend_with_mode("vikingdb")
+    calls = []
+
+    async def fake_search(**kwargs):
+        calls.append(kwargs)
+        return []
+
+    backend.search = fake_search
+    await backend.search_in_tenant(
+        ctx=_ctx(),
+        query_vector=[1.0],
+        context_type="memory",
+        limit=10,
+        events_time_decay_weight=0.25,
+        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["limit"] == 30
+    assert calls[0]["advance"] is None
+    assert calls[0]["return_detail_info"] is False
+
+
 @pytest.mark.asyncio
 async def test_search_by_random_passes_runtime_acl_state_to_tenant_filter():
     ctx = _ctx()
@@ -467,8 +587,7 @@ async def test_zero_decay_weight_keeps_the_original_single_search_call():
 
 @pytest.mark.asyncio
 async def test_decay_fuses_user_and_peer_events_from_one_candidate_search():
-    backend = object.__new__(VikingVectorIndexBackend)
-    backend.acl_manager = None
+    backend = _backend_with_mode("local")
     calls = []
 
     async def fake_search(**kwargs):
@@ -520,8 +639,7 @@ async def test_decay_fuses_user_and_peer_events_from_one_candidate_search():
 
 @pytest.mark.asyncio
 async def test_decay_rerank_prefetch_keeps_expanded_origin_candidates():
-    backend = object.__new__(VikingVectorIndexBackend)
-    backend.acl_manager = None
+    backend = _backend_with_mode("local")
     calls = []
 
     async def fake_search(**kwargs):
@@ -563,8 +681,7 @@ async def test_decay_rerank_prefetch_keeps_expanded_origin_candidates():
 
 @pytest.mark.asyncio
 async def test_decay_applies_to_a_peer_only_target():
-    backend = object.__new__(VikingVectorIndexBackend)
-    backend.acl_manager = None
+    backend = _backend_with_mode("local")
     calls = []
 
     async def fake_search(**kwargs):
@@ -598,8 +715,7 @@ async def test_decay_applies_to_a_peer_only_target():
 
 @pytest.mark.asyncio
 async def test_decay_applies_under_bare_user_target():
-    backend = object.__new__(VikingVectorIndexBackend)
-    backend.acl_manager = None
+    backend = _backend_with_mode("local")
     calls = []
 
     async def fake_search(**kwargs):
@@ -623,8 +739,7 @@ async def test_decay_applies_under_bare_user_target():
 
 @pytest.mark.asyncio
 async def test_decay_applies_to_children_of_a_peer_event_directory():
-    backend = object.__new__(VikingVectorIndexBackend)
-    backend.acl_manager = None
+    backend = _backend_with_mode("local")
     calls = []
 
     async def fake_search(**kwargs):

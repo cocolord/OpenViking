@@ -91,9 +91,23 @@ def test_search_request_does_not_parse_protection_when_decay_is_disabled():
     assert request.events_time_decay_protection == "not-a-duration"
 
 
-def test_find_request_rejects_time_decay_parameters():
-    with pytest.raises(ValidationError):
-        search_router.FindRequest(query="sample", events_time_decay_weight=0.25)
+def test_find_request_accepts_time_decay_parameters_for_semantic_find():
+    request = search_router.FindRequest(
+        query="sample",
+        events_time_decay_weight=0.25,
+        events_time_decay_protection="2d",
+    )
+
+    assert request.events_time_decay_weight == 0.25
+    assert request.events_time_decay_protection == "2d"
+
+
+def test_filter_only_find_rejects_enabled_time_decay():
+    with pytest.raises(ValidationError, match="semantic query or image"):
+        search_router.FindRequest(
+            filter={"op": "must", "field": "level", "conds": [2]},
+            events_time_decay_weight=0.25,
+        )
 
 
 def test_context_mode_rejects_time_decay_parameters():

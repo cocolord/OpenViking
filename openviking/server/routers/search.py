@@ -139,6 +139,26 @@ class FindRequest(BaseModel):
     level: Optional[Union[int, str, List[int]]] = None
     read_content: bool = False
     telemetry: TelemetryRequest = False
+    events_time_decay_weight: float = Field(default=0.0, ge=0.0, lt=1.0)
+    events_time_decay_protection: str = "0"
+
+    @field_validator("events_time_decay_weight", mode="before")
+    @classmethod
+    def _reject_boolean_time_decay_weight(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("events_time_decay_weight must be a number, not a boolean")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_time_decay(self) -> "FindRequest":
+        if self.events_time_decay_weight > 0.0:
+            parse_duration_ms(
+                self.events_time_decay_protection,
+                parameter_name="events_time_decay_protection",
+            )
+            if not self.query.strip() and not self.image_url:
+                raise ValueError("events_time_decay_weight requires a semantic query or image")
+        return self
 
 
 def _reject_unknown_categories(value: Any, label: str, allowed: Sequence[str]) -> None:
@@ -397,6 +417,8 @@ async def find(
             filter=effective_filter,
             level=_resolve_levels(request.level) or None,
             image_url=resolved_image_url,
+            events_time_decay_weight=request.events_time_decay_weight,
+            events_time_decay_protection=request.events_time_decay_protection,
         ),
     )
     result = execution.result

@@ -263,22 +263,24 @@ type ReindexOptions struct {
 
 // FindOptions controls Find.
 type FindOptions struct {
-	TargetURI         any
-	Image             string
-	Limit             int
-	NodeLimit         *int
-	ScoreThreshold    *float64
-	Filter            map[string]any
-	ContextType       any
-	IncludeProvenance *bool
-	ReadContent       *bool
-	Telemetry         any
-	Since             string
-	Until             string
-	TimeField         string
-	Level             []int
-	Tags              []string
-	Extra             map[string]any
+	EventsTimeDecayWeight     *float64
+	EventsTimeDecayProtection string
+	TargetURI                 any
+	Image                     string
+	Limit                     int
+	NodeLimit                 *int
+	ScoreThreshold            *float64
+	Filter                    map[string]any
+	ContextType               any
+	IncludeProvenance         *bool
+	ReadContent               *bool
+	Telemetry                 any
+	Since                     string
+	Until                     string
+	TimeField                 string
+	Level                     []int
+	Tags                      []string
+	Extra                     map[string]any
 }
 
 // SearchOptions controls Search.

@@ -66,6 +66,8 @@ class ICollection(ABC):
         filters: Optional[Dict[str, Any]] = None,
         sparse_vector: Optional[Dict[str, float]] = None,
         output_fields: Optional[List[str]] = None,
+        advance: Optional[Dict[str, Any]] = None,
+        return_detail_info: bool = False,
     ) -> SearchResult:
         raise NotImplementedError
 
@@ -343,6 +345,8 @@ class Collection:
         filters: Optional[Dict[str, Any]] = None,
         sparse_vector: Optional[Dict[str, float]] = None,
         output_fields: Optional[List[str]] = None,
+        advance: Optional[Dict[str, Any]] = None,
+        return_detail_info: bool = False,
     ):
         """Perform vector similarity search on the specified index.
 
@@ -363,7 +367,15 @@ class Collection:
         if self.__collection is None:
             raise RuntimeError("Collection is closed")
         return self.__collection.search_by_vector(
-            index_name, dense_vector, limit, offset, filters, sparse_vector, output_fields
+            index_name,
+            dense_vector,
+            limit,
+            offset,
+            filters,
+            sparse_vector,
+            output_fields,
+            advance,
+            return_detail_info,
         )
 
     def search_by_keywords(

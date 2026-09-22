@@ -8,6 +8,7 @@ import pytest
 from openviking.utils.time_decay import (
     TimeDecayFusionSpec,
     build_time_decay_fusion_spec,
+    build_time_decay_post_process_ops,
     fuse_time_decay_scores,
     parse_duration_ms,
     time_decay_candidate_limit,
@@ -63,6 +64,29 @@ def test_builder_accepts_zero_protection_duration(protection):
     )
 
     assert spec.offset_ms == 0
+
+
+@pytest.mark.parametrize("protection", ["0", "0m", "0h", "0d"])
+def test_post_process_omits_zero_offset(protection):
+    origin = datetime(2026, 1, 8, tzinfo=timezone.utc)
+
+    ops = build_time_decay_post_process_ops(weight=0.25, protection=protection, origin=origin)
+
+    addition = ops[0]["addition_score"][0]
+    assert "offset" not in addition
+    assert addition == {
+        "factor": 1,
+        "base_value_from": "decay_func",
+        "field": "updated_at",
+        "func": "exp",
+        "origin": "2026-01-08T00:00:00.000Z",
+        "scale": "7d",
+        "decay": 0.5,
+    }
+
+
+def test_zero_weight_does_not_parse_post_process_protection():
+    assert build_time_decay_post_process_ops(weight=0, protection="invalid") == []
 
 
 def test_direct_score_fusion_matches_prd_formula():

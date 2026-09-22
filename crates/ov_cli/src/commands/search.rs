@@ -130,6 +130,8 @@ pub async fn find(
     context_type: Option<Vec<String>>,
     tags: Option<Vec<String>>,
     read_content: bool,
+    events_time_decay_weight: Option<f64>,
+    events_time_decay_protection: Option<String>,
     output_format: OutputFormat,
     compact: bool,
 ) -> Result<()> {
@@ -147,6 +149,8 @@ pub async fn find(
             context_type,
             tags,
             read_content,
+            events_time_decay_weight,
+            events_time_decay_protection,
         )
         .await?;
     output_search_results(

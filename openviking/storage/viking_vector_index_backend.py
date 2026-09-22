@@ -45,6 +45,7 @@ from openviking.storage.vectordb_adapters import create_collection_adapter
 from openviking.utils.tags import merge_search_tags
 from openviking.utils.time_decay import (
     build_time_decay_fusion_spec,
+    build_time_decay_post_process_ops,
     time_decay_candidate_limit,
     validate_time_decay_weight,
 )
@@ -720,6 +721,8 @@ class _SingleAccountBackend:
         output_fields: Optional[List[str]] = None,
         order_by: Optional[str] = None,
         order_desc: bool = False,
+        advance: Optional[Dict[str, Any]] = None,
+        return_detail_info: bool = False,
     ) -> List[Dict[str, Any]]:
         try:
             logger.debug(
@@ -747,6 +750,8 @@ class _SingleAccountBackend:
                 output_fields=output_fields,
                 order_by=order_by,
                 order_desc=order_desc,
+                advance=advance,
+                return_detail_info=return_detail_info,
             )
         except Exception as e:
             logger.error("Error querying collection: %s", e, exc_info=True)
@@ -781,6 +786,8 @@ class _SingleAccountBackend:
         limit: int = 10,
         offset: int = 0,
         output_fields: Optional[List[str]] = None,
+        advance: Optional[Dict[str, Any]] = None,
+        return_detail_info: bool = False,
     ) -> List[Dict[str, Any]]:
         return await self.query(
             query_vector=query_vector,
@@ -789,6 +796,8 @@ class _SingleAccountBackend:
             limit=limit,
             offset=offset,
             output_fields=output_fields,
+            advance=advance,
+            return_detail_info=return_detail_info,
         )
 
     async def filter(
@@ -1374,6 +1383,8 @@ class VikingVectorIndexBackend:
         output_fields: Optional[List[str]] = None,
         order_by: Optional[str] = None,
         order_desc: bool = False,
+        advance: Optional[Dict[str, Any]] = None,
+        return_detail_info: bool = False,
         *,
         ctx: RequestContext,
     ) -> List[Dict[str, Any]]:
@@ -1387,6 +1398,8 @@ class VikingVectorIndexBackend:
             output_fields=output_fields,
             order_by=order_by,
             order_desc=order_desc,
+            advance=advance,
+            return_detail_info=return_detail_info,
         )
 
     async def search_by_random(
@@ -1421,6 +1434,8 @@ class VikingVectorIndexBackend:
         limit: int = 10,
         offset: int = 0,
         output_fields: Optional[List[str]] = None,
+        advance: Optional[Dict[str, Any]] = None,
+        return_detail_info: bool = False,
         *,
         ctx: RequestContext,
     ) -> List[Dict[str, Any]]:
@@ -1431,6 +1446,8 @@ class VikingVectorIndexBackend:
             limit=limit,
             offset=offset,
             output_fields=output_fields,
+            advance=advance,
+            return_detail_info=return_detail_info,
             ctx=ctx,
         )
 
@@ -1702,6 +1719,8 @@ class VikingVectorIndexBackend:
             query_vector=query_vector,
             sparse_query_vector=sparse_query_vector,
             scope_filter=scope_filter,
+            target_directories=resolved_targets,
+            level=level,
             limit=limit,
             offset=offset,
             weight=weight,
@@ -1811,6 +1830,8 @@ class VikingVectorIndexBackend:
             query_vector=query_vector,
             sparse_query_vector=sparse_query_vector,
             scope_filter=merged_filter,
+            target_directories=[parent_uri],
+            level=None,
             limit=limit,
             offset=0,
             weight=weight,
@@ -1826,6 +1847,8 @@ class VikingVectorIndexBackend:
         query_vector: Optional[List[float]],
         sparse_query_vector: Optional[Dict[str, float]],
         scope_filter: Optional[FilterExpr],
+        target_directories: List[str],
+        level: Optional[List[int]],
         limit: int,
         offset: int,
         weight: float,
@@ -1833,6 +1856,28 @@ class VikingVectorIndexBackend:
         request_now: Optional[datetime],
         defer_fusion: bool = False,
     ) -> List[Dict[str, Any]]:
+        event_scope = self._cloud_event_scope(ctx, target_directories, level)
+        if self._uses_cloud_post_process(ctx) and event_scope is not None:
+            event_roots, event_only = event_scope
+            if not event_roots:
+                return await self._search_retrieval_scope(
+                    ctx, query_vector, sparse_query_vector, scope_filter, limit, offset
+                )
+            return await self._search_with_cloud_time_decay(
+                ctx=ctx,
+                query_vector=query_vector,
+                sparse_query_vector=sparse_query_vector,
+                scope_filter=scope_filter,
+                event_roots=event_roots,
+                event_only=event_only,
+                limit=limit,
+                offset=offset,
+                weight=weight,
+                protection=events_time_decay_protection,
+                request_now=request_now,
+                for_rerank=defer_fusion,
+            )
+
         spec = build_time_decay_fusion_spec(
             weight=weight,
             protection=events_time_decay_protection,
@@ -1863,6 +1908,94 @@ class VikingVectorIndexBackend:
         results.sort(key=lambda item: item.get("_score", 0.0), reverse=True)
         return results[offset : offset + limit]
 
+    async def _search_with_cloud_time_decay(
+        self,
+        *,
+        ctx: RequestContext,
+        query_vector: Optional[List[float]],
+        sparse_query_vector: Optional[Dict[str, float]],
+        scope_filter: Optional[FilterExpr],
+        event_roots: List[str],
+        event_only: bool,
+        limit: int,
+        offset: int,
+        weight: float,
+        protection: str,
+        request_now: Optional[datetime],
+        for_rerank: bool,
+    ) -> List[Dict[str, Any]]:
+        final_window = limit + offset
+        candidate_limit = time_decay_candidate_limit(limit, offset)
+        event_filter = self._merge_filters(
+            scope_filter,
+            Or([PathScope("uri", root, depth=-1) for root in event_roots]),
+            Eq("level", 2),
+        )
+        non_event_filter = self._merge_filters(
+            scope_filter,
+            Or(
+                [
+                    In("level", [0, 1]),
+                    And(
+                        [
+                            RawDSL(
+                                {
+                                    "op": "must_not",
+                                    "field": "uri",
+                                    "conds": [root],
+                                    "para": "-d=-1",
+                                }
+                            )
+                            for root in event_roots
+                        ]
+                    ),
+                ]
+            ),
+        )
+        advance = {
+            "post_process_ops": build_time_decay_post_process_ops(
+                weight=weight, protection=protection, origin=request_now
+            ),
+            "post_process_input_limit": candidate_limit,
+        }
+        route_limit = candidate_limit if for_rerank else final_window
+
+        event_search = self._search_retrieval_scope(
+            ctx,
+            query_vector,
+            sparse_query_vector,
+            event_filter,
+            route_limit,
+            advance=advance,
+            return_detail_info=True,
+        )
+        if event_only:
+            event_results = await event_search
+            non_event_results: List[Dict[str, Any]] = []
+        else:
+            non_event_results, event_results = await asyncio.gather(
+                self._search_retrieval_scope(
+                    ctx,
+                    query_vector,
+                    sparse_query_vector,
+                    non_event_filter,
+                    route_limit,
+                ),
+                event_search,
+            )
+
+        if for_rerank:
+            for result in event_results:
+                if "_origin_score" in result:
+                    result["_score"] = result["_origin_score"]
+            candidates = non_event_results + event_results
+            candidates.sort(key=lambda item: item.get("_score", 0.0), reverse=True)
+            return candidates[:candidate_limit]
+
+        merged = non_event_results + event_results
+        merged.sort(key=lambda item: item.get("_score", 0.0), reverse=True)
+        return merged[offset : offset + limit]
+
     async def _search_retrieval_scope(
         self,
         ctx: RequestContext,
@@ -1871,6 +2004,9 @@ class VikingVectorIndexBackend:
         scope_filter: Optional[FilterExpr],
         limit: int,
         offset: int = 0,
+        *,
+        advance: Optional[Dict[str, Any]] = None,
+        return_detail_info: bool = False,
     ) -> List[Dict[str, Any]]:
         return await self.search(
             query_vector=query_vector,
@@ -1879,8 +2015,67 @@ class VikingVectorIndexBackend:
             limit=limit,
             offset=offset,
             output_fields=RETRIEVAL_OUTPUT_FIELDS,
+            advance=advance,
+            return_detail_info=return_detail_info,
             ctx=ctx,
         )
+
+    def _uses_cloud_post_process(self, ctx: RequestContext) -> bool:
+        return self._get_backend_for_context(ctx)._mode in {"vikingdb", "volcengine"}
+
+    @staticmethod
+    def _cloud_event_scope(
+        ctx: RequestContext,
+        target_directories: List[str],
+        level: Optional[List[int]],
+    ) -> Optional[tuple[List[str], bool]]:
+        """Return exact event roots, or None when peer wildcards cannot be expressed."""
+        user_parts = uri_parts(canonical_user_root(ctx))
+        targets = target_directories or [canonical_user_root(ctx)]
+        roots: List[str] = []
+        only_event_paths = True
+
+        for target in targets:
+            parts = uri_parts(target)
+            if parts[: len(user_parts)] != user_parts:
+                only_event_paths = False
+                continue
+            suffix = parts[len(user_parts) :]
+            if not suffix:
+                if not ctx.actor_peer_id:
+                    return None
+                roots.extend(
+                    [
+                        f"{canonical_user_root(ctx)}/memories/events",
+                        f"{canonical_user_root(ctx)}/peers/{ctx.actor_peer_id}/memories/events",
+                    ]
+                )
+                only_event_paths = False
+            elif suffix[0] == "memories":
+                event_root = f"{canonical_user_root(ctx)}/memories/events"
+                roots.append(target if len(suffix) > 1 and suffix[1] == "events" else event_root)
+                only_event_paths &= len(suffix) > 1 and suffix[1] == "events"
+            elif suffix[0] == "peers":
+                if len(suffix) < 2:
+                    if not ctx.actor_peer_id:
+                        return None
+                    roots.append(
+                        f"{canonical_user_root(ctx)}/peers/{ctx.actor_peer_id}/memories/events"
+                    )
+                    only_event_paths = False
+                elif len(suffix) < 3 or suffix[2] == "memories":
+                    event_root = f"{canonical_user_root(ctx)}/peers/{suffix[1]}/memories/events"
+                    roots.append(
+                        target if len(suffix) > 3 and suffix[3] == "events" else event_root
+                    )
+                    only_event_paths &= len(suffix) > 3 and suffix[3] == "events"
+                else:
+                    only_event_paths = False
+            else:
+                only_event_paths = False
+
+        roots = list(dict.fromkeys(roots))
+        return roots, bool(level is not None and set(level) == {2} and only_event_paths)
 
     @staticmethod
     def _is_event_l2(result: Mapping[str, Any]) -> bool:

@@ -151,13 +151,13 @@ export interface FindOptions {
   tags?: string[];
   includeProvenance?: boolean;
   readContent?: boolean;
+  eventsTimeDecayWeight?: number;
+  eventsTimeDecayProtection?: string;
   extra?: JsonObject;
 }
 /** Session-aware semantic retrieval options. */
 export interface SearchOptions extends FindOptions {
   sessionId?: string;
-  eventsTimeDecayWeight?: number;
-  eventsTimeDecayProtection?: string;
 }
 /** Server-side context assembly options. */
 export interface SearchContextOptions {

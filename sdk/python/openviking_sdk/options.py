@@ -27,11 +27,12 @@ class FindOptions(_ExtraOptions, total=False):
     level: Level
     read_content: bool
     telemetry: Any
+    events_time_decay_weight: float
+    events_time_decay_protection: str
 
 
 class SearchOptions(FindOptions, total=False):
-    events_time_decay_weight: float
-    events_time_decay_protection: str
+    pass
 
 
 class SearchContextOptions(_ExtraOptions, total=False):

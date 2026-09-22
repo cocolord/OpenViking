@@ -413,7 +413,7 @@ openviking find "红色海报风格" --image ./poster.png --uri "viking://resour
 
 `search()` 使用和 `find()` 相同的目标解析和显式标签过滤规则，包括由 `X-OpenViking-Actor-Peer` 或 SDK `actor_peer_id` 选择的 peer 集合过滤。提供 `image_url` 时，`search()` 会直接执行图片检索并跳过会话 query planning。
 
-事件时间衰减同时作用于 `viking://user/{user_id}/memories/events/` 和 `viking://user/{user_id}/peers/{peer_id}/memories/events/` 下的 L2 结果，不作用于其他记忆类型、L0/L1，也不接入 `find`、`recall`、`grep` 或 `glob`。启用后按 `score = origin_score * (1 - weight) + time_score * weight` 融合；命中的 event 结果额外返回 `origin_score` 和 `time_score`，CLI 分别展示为 semantic、time 和 final 分。时间取自已有索引的 `updated_at` 字段，无需重新索引或改写时间戳；字段缺失或非法时保持原分，`time_score` 为 `null`。衰减曲线由服务端内部维护，调用方只需按请求传入权重和保护期，无需修改 `ov.conf` 或 `ovcli.conf`。
+事件时间衰减同时作用于语义 `search()` 和 `find()` 中 `viking://user/{user_id}/memories/events/` 与 `viking://user/{user_id}/peers/{peer_id}/memories/events/` 下的 L2 结果，不作用于其他记忆类型、L0/L1、无 query 的纯过滤 `find()`、`recall`、`grep` 或 `glob`。启用后按 `score = origin_score * (1 - weight) + time_score * weight` 融合；命中的 event 结果额外返回 `origin_score` 和 `time_score`，CLI 分别展示为 semantic、time 和 final 分。时间取自已有索引的 `updated_at` 字段，无需重新索引或改写时间戳；字段缺失或非法时保持原分，`time_score` 为 `null`。衰减曲线由服务端内部维护，调用方只需按请求传入权重和保护期，无需修改 `ov.conf` 或 `ovcli.conf`。
 
 #### 3. 使用示例
 
