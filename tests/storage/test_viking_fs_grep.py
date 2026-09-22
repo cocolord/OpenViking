@@ -12,6 +12,7 @@ from openviking.storage.acl import AclEntry, AclLevel, AclMode, DirectAcl, Effec
 from openviking.storage.expr import And, PathScope, RawDSL
 from openviking.storage.viking_fs import _DEFAULT_GREP_FILE_CONCURRENCY, VikingFS
 from openviking.storage.viking_fs import _grep as grep_module
+from openviking_cli.exceptions import PermissionDeniedError
 from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils.config.grep_config import GrepConfig
 
@@ -176,6 +177,52 @@ async def test_collect_grep_files_preserves_dfs_order_across_pages(monkeypatch):
         "viking://resources/dir/nested.md",
         "viking://resources/z.md",
     ]
+
+
+@pytest.mark.asyncio
+async def test_collect_grep_files_skips_acl_denied_subtrees(monkeypatch):
+    viking_fs = VikingFS(agfs=_DummyAgfs())
+    listed = []
+
+    async def fake_ls(uri, node_limit, offset, ctx=None):
+        listed.append(uri)
+        if uri == "viking://resources":
+            return [
+                {"name": "public.md", "isDir": False},
+                {"name": "private", "isDir": True, "access": "denied"},
+                {"name": "revoked", "isDir": True},
+            ]
+        if uri == "viking://resources/revoked":
+            raise PermissionDeniedError("access revoked", resource=uri)
+        raise AssertionError(f"grep must not enter {uri}")
+
+    monkeypatch.setattr(viking_fs, "stat", AsyncMock(return_value={"isDir": True}))
+    monkeypatch.setattr(viking_fs, "ls", fake_ls)
+
+    assert await viking_fs._collect_grep_files(
+        "viking://resources",
+        excluded_prefix=None,
+        level_limit=1,
+    ) == ["viking://resources/public.md"]
+    assert listed == ["viking://resources", "viking://resources/revoked"]
+
+
+@pytest.mark.asyncio
+async def test_collect_grep_files_propagates_root_acl_denial(monkeypatch):
+    viking_fs = VikingFS(agfs=_DummyAgfs())
+    monkeypatch.setattr(viking_fs, "stat", AsyncMock(return_value={"isDir": True}))
+    monkeypatch.setattr(
+        viking_fs,
+        "ls",
+        AsyncMock(side_effect=PermissionDeniedError("access denied")),
+    )
+
+    with pytest.raises(PermissionDeniedError, match="access denied"):
+        await viking_fs._collect_grep_files(
+            "viking://resources",
+            excluded_prefix=None,
+            level_limit=1,
+        )
 
 
 @pytest.mark.asyncio

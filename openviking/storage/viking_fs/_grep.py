@@ -12,6 +12,7 @@ from openviking.pyagfs.exceptions import AGFSNotSupportedError
 from openviking.server.identity import RequestContext
 from openviking.storage.expr import And, PathScope, RawDSL
 from openviking.storage.viking_fs._base import logger
+from openviking_cli.exceptions import PermissionDeniedError
 from openviking_cli.utils.config.grep_config import GrepEngine
 
 _GREP_LS_PAGE_SIZE = 1000
@@ -653,12 +654,20 @@ class _GrepMixin:
 
             offset = 0
             while True:
-                entries = await self.ls(
-                    normalized_current_uri,
-                    node_limit=_GREP_LS_PAGE_SIZE,
-                    offset=offset,
-                    ctx=ctx,
-                )
+                try:
+                    entries = await self.ls(
+                        normalized_current_uri,
+                        node_limit=_GREP_LS_PAGE_SIZE,
+                        offset=offset,
+                        ctx=ctx,
+                    )
+                except PermissionDeniedError:
+                    if current_depth == 0:
+                        raise
+                    logger.debug(
+                        f"Skipping inaccessible directory during grep: {normalized_current_uri}"
+                    )
+                    return
 
                 for entry in entries:
                     entry_uri = f"{normalized_current_uri.rstrip('/')}/{entry['name']}"
@@ -666,6 +675,9 @@ class _GrepMixin:
                         entry_uri == excluded_prefix or entry_uri.startswith(excluded_prefix + "/")
                     ):
                         logger.debug(f"Skipping excluded uri during grep: {entry_uri}")
+                        continue
+                    if entry.get("access") == "denied":
+                        logger.debug(f"Skipping inaccessible uri during grep: {entry_uri}")
                         continue
 
                     if entry.get("isDir"):
