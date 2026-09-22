@@ -258,7 +258,9 @@ class _GrepMixin:
                 # includes files one path segment deeper than native grep.
                 # Preserve that public behavior when selecting the fast path.
                 native_level_limit = (
-                    level_limit + 1 if is_session_uri(uri) else level_limit
+                    level_limit + 1
+                    if is_session_uri(uri) and level_limit is not None
+                    else level_limit
                 )
                 return await self._grep_with_agfs(
                     uri=uri,
