@@ -166,6 +166,8 @@ async def test_primary_only_session_grep_uses_native_agfs(monkeypatch):
         node_limit=7,
         level_limit=4,
         ctx=None,
+        before_context=0,
+        after_context=0,
     )
     fallback_grep.assert_not_awaited()
 
