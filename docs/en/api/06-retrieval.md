@@ -413,6 +413,8 @@ The `search()` method adds session context understanding and intent analysis cap
 
 Event time decay applies to semantic `search()` and `find()` results at L2 under both `viking://user/{user_id}/memories/events/` and `viking://user/{user_id}/peers/{peer_id}/memories/events/`. It does not affect other memory types, L0/L1, query-less filter-only `find()`, `recall`, `grep`, or `glob`. Enabled event results use `score = origin_score * (1 - weight) + time_score * weight` and expose `origin_score` and `time_score`; the CLI labels these as semantic, time, and final scores. Time is read from the existing indexed `updated_at` field; no reindex or timestamp rewrite is required. A missing or invalid value keeps the original score and returns `time_score` as `null`. The curve is owned by the server; callers only provide the per-request weight and protection period. No `ov.conf` or `ovcli.conf` change is required.
 
+New and updated memories automatically receive a `memory_type=<type>` search tag. With decay enabled, both local and cloud backends recall tagged event L2 memories separately and merge them with the remaining results, without requiring a peer ID. Existing data is not backfilled; untagged events retain URI-based classification and decay in the compatibility recall path.
+
 #### 3. Usage Examples
 
 **HTTP API**

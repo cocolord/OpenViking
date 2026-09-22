@@ -47,6 +47,7 @@ from openviking.storage.viking_fs import get_viking_fs
 from openviking.telemetry import tracer
 from openviking.telemetry.request_wait_tracker import get_request_wait_tracker
 from openviking.telemetry.tracer import get_trace_id
+from openviking.utils.tags import merge_search_tags
 from openviking.utils.time_utils import parse_iso_datetime
 from openviking_cli.exceptions import NotFoundError
 from openviking_cli.utils import VikingURI, get_logger
@@ -1511,6 +1512,15 @@ class MemoryUpdater:
                             embedding_msg.context_data["_upsert_options"] = {
                                 "search_tag_mode": "append"
                             }
+                    memory_type = memory_type or self.memory_type_from_uri(uri)
+                    if memory_type:
+                        embedding_msg.context_data["search_tags"] = merge_search_tags(
+                            embedding_msg.context_data.get("search_tags"),
+                            [f"memory_type={memory_type}"],
+                        )
+                        embedding_msg.context_data.setdefault(
+                            "_upsert_options", {"search_tag_mode": "append"}
+                        )
                     if embedding_msg.telemetry_id:
                         request_wait_tracker.register_embedding_root(
                             embedding_msg.telemetry_id, embedding_msg.id

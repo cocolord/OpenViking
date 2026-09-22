@@ -8,7 +8,7 @@ import asyncio
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Awaitable, Callable, Container, Dict, List, Mapping, Optional
 
 from openviking.core.namespace import (
@@ -42,7 +42,7 @@ from openviking.storage.vectordb.collection.collection import Collection
 from openviking.storage.vectordb.collection.result import UpdateResult
 from openviking.storage.vectordb.utils.logging_init import init_cpp_logging
 from openviking.storage.vectordb_adapters import create_collection_adapter
-from openviking.utils.tags import merge_search_tags
+from openviking.utils.tags import merge_search_tags, preserve_memory_type_tag
 from openviking.utils.time_decay import (
     build_time_decay_fusion_spec,
     build_time_decay_post_process_ops,
@@ -1302,6 +1302,10 @@ class VikingVectorIndexBackend:
                     )
                 else:
                     updated_record["search_tags"] = list(tags)
+                if updated_record.get("context_type") == "memory":
+                    updated_record["search_tags"] = preserve_memory_type_tag(
+                        full_records[0].get("search_tags"), updated_record["search_tags"]
+                    )
             except Exception as exc:
                 logger.warning(
                     "update_search_tags failed to merge exact record tags uri=%s "
@@ -1357,6 +1361,10 @@ class VikingVectorIndexBackend:
                     )
                 else:
                     updated_record["search_tags"] = list(tags)
+                if updated_record.get("context_type") == "memory":
+                    updated_record["search_tags"] = preserve_memory_type_tag(
+                        full_record.get("search_tags"), updated_record["search_tags"]
+                    )
             except Exception as exc:
                 logger.warning(
                     "update_search_tags failed to merge leveled record tags uri=%s "
@@ -1856,46 +1864,78 @@ class VikingVectorIndexBackend:
         request_now: Optional[datetime],
         defer_fusion: bool = False,
     ) -> List[Dict[str, Any]]:
-        event_scope = (
-            self._cloud_event_scope(target_directories, level)
-            if self._backend_type in {"vikingdb", "volcengine"}
-            else None
+        request_now = request_now or datetime.now(timezone.utc)
+        candidate_limit = time_decay_candidate_limit(limit, offset)
+        final_window = limit + offset
+        # An explicit event-only L2 scope also covers legacy records without tags.
+        event_only = bool(
+            level is not None
+            and set(level) == {2}
+            and target_directories
+            and all(self._is_event_uri(target) for target in target_directories)
         )
-        if event_scope is not None:
-            event_roots, event_only = event_scope
-            if not event_roots:
-                return await self._search_retrieval_scope(
-                    ctx, query_vector, sparse_query_vector, scope_filter, limit, offset
-                )
-            return await self._search_with_cloud_time_decay(
-                ctx=ctx,
-                query_vector=query_vector,
-                sparse_query_vector=sparse_query_vector,
-                scope_filter=scope_filter,
-                event_roots=event_roots,
-                event_only=event_only,
-                limit=limit,
-                offset=offset,
-                weight=weight,
-                protection=events_time_decay_protection,
-                request_now=request_now,
-                for_rerank=defer_fusion,
-            )
-
+        event_filter = self._merge_filters(
+            scope_filter,
+            Eq("context_type", "memory"),
+            Eq("level", 2),
+            None if event_only else Eq("search_tags", "memory_type=events"),
+        )
+        remaining_filter = self._merge_filters(
+            scope_filter,
+            Or(
+                [
+                    In("context_type", ["resource", "skill"]),
+                    In("level", [0, 1]),
+                    RawDSL(
+                        {"op": "must_not", "field": "search_tags", "conds": ["memory_type=events"]}
+                    ),
+                ]
+            ),
+        )
         spec = build_time_decay_fusion_spec(
             weight=weight,
             protection=events_time_decay_protection,
             origin=request_now,
         )
-        candidate_limit = time_decay_candidate_limit(limit, offset)
-        results = await self._search_retrieval_scope(
+        cloud_decay = self._backend_type in {"vikingdb", "volcengine"}
+        advance = (
+            {
+                "post_process_ops": build_time_decay_post_process_ops(
+                    weight=weight, protection=events_time_decay_protection, origin=request_now
+                ),
+                "post_process_input_limit": candidate_limit,
+            }
+            if cloud_decay
+            else None
+        )
+        event_search = self._search_retrieval_scope(
             ctx,
             query_vector,
             sparse_query_vector,
-            scope_filter,
-            candidate_limit,
+            event_filter,
+            final_window if cloud_decay and not defer_fusion else candidate_limit,
+            advance=advance,
+            return_detail_info=cloud_decay,
         )
-        for result in results:
+        if event_only:
+            event_results = await event_search
+            remaining_results = []
+        else:
+            remaining_results, event_results = await asyncio.gather(
+                self._search_retrieval_scope(
+                    ctx,
+                    query_vector,
+                    sparse_query_vector,
+                    remaining_filter,
+                    candidate_limit,
+                ),
+                event_search,
+            )
+
+        # Untagged legacy events remain eligible in the other route. Classify
+        # those by URI and keep the same bounded local fusion on both backends.
+        local_results = remaining_results + ([] if cloud_decay else event_results)
+        for result in local_results:
             if not self._is_event_l2(result):
                 continue
             origin_score = float(result.get("_score", 0.0))
@@ -1907,95 +1947,14 @@ class VikingVectorIndexBackend:
                 result["_time_score"] = time_score
             result["_score"] = origin_score if defer_fusion else final_score
 
-        if defer_fusion:
-            return results
-        results.sort(key=lambda item: item.get("_score", 0.0), reverse=True)
-        return results[offset : offset + limit]
-
-    async def _search_with_cloud_time_decay(
-        self,
-        *,
-        ctx: RequestContext,
-        query_vector: Optional[List[float]],
-        sparse_query_vector: Optional[Dict[str, float]],
-        scope_filter: Optional[FilterExpr],
-        event_roots: List[str],
-        event_only: bool,
-        limit: int,
-        offset: int,
-        weight: float,
-        protection: str,
-        request_now: Optional[datetime],
-        for_rerank: bool,
-    ) -> List[Dict[str, Any]]:
-        final_window = limit + offset
-        candidate_limit = time_decay_candidate_limit(limit, offset)
-        event_filter = self._merge_filters(
-            scope_filter,
-            Or([PathScope("uri", root, depth=-1) for root in event_roots]),
-            Eq("level", 2),
-        )
-        non_event_filter = self._merge_filters(
-            scope_filter,
-            Or(
-                [
-                    In("level", [0, 1]),
-                    And(
-                        [
-                            RawDSL(
-                                {
-                                    "op": "must_not",
-                                    "field": "uri",
-                                    "conds": [root],
-                                    "para": "-d=-1",
-                                }
-                            )
-                            for root in event_roots
-                        ]
-                    ),
-                ]
-            ),
-        )
-        advance = {
-            "post_process_ops": build_time_decay_post_process_ops(
-                weight=weight, protection=protection, origin=request_now
-            ),
-            "post_process_input_limit": candidate_limit,
-        }
-        route_limit = candidate_limit if for_rerank else final_window
-
-        event_search = self._search_retrieval_scope(
-            ctx,
-            query_vector,
-            sparse_query_vector,
-            event_filter,
-            route_limit,
-            advance=advance,
-            return_detail_info=True,
-        )
-        if event_only:
-            event_results = await event_search
-            results = event_results
-        else:
-            non_event_results, event_results = await asyncio.gather(
-                self._search_retrieval_scope(
-                    ctx,
-                    query_vector,
-                    sparse_query_vector,
-                    non_event_filter,
-                    route_limit,
-                ),
-                event_search,
-            )
-            results = non_event_results + event_results
-
-        if for_rerank:
+        if cloud_decay and defer_fusion:
             for result in event_results:
                 if "_origin_score" in result:
                     result["_score"] = result["_origin_score"]
 
+        results = remaining_results + event_results
         results.sort(key=lambda item: item.get("_score", 0.0), reverse=True)
-        if for_rerank:
+        if defer_fusion:
             return results[:candidate_limit]
         return results[offset : offset + limit]
 
@@ -2024,40 +1983,12 @@ class VikingVectorIndexBackend:
         )
 
     @staticmethod
-    def _cloud_event_scope(
-        target_directories: List[str],
-        level: Optional[List[int]],
-    ) -> Optional[tuple[List[str], bool]]:
-        """Return exact event roots, or None when peer wildcards cannot be expressed."""
-        if not target_directories:
-            return None
-
-        roots: List[str] = []
-        only_event_paths = True
-        for target in target_directories:
-            if not may_include_event_memory(target):
-                only_event_paths = False
-                continue
-
-            classification = classify_uri(target)
-            if classification.is_event_memory:
-                roots.append(target)
-            elif classification.is_memory_root:
-                roots.append(f"{target.rstrip('/')}/events")
-                only_event_paths = False
-            else:
-                # Owner-wide user/peer roots may contain arbitrary peer events,
-                # which cannot be represented by an exact path-scope filter.
-                return None
-
-        return list(dict.fromkeys(roots)), bool(
-            level is not None and set(level) == {2} and only_event_paths
-        )
-
-    @staticmethod
     def _is_event_l2(result: Mapping[str, Any]) -> bool:
-        if result.get("level") != 2:
+        if result.get("level") != 2 or result.get("context_type", "memory") != "memory":
             return False
+        for tag in result.get("search_tags") or []:
+            if tag.startswith("memory_type="):
+                return tag == "memory_type=events"
         return VikingVectorIndexBackend._is_event_uri(str(result.get("uri", "")))
 
     @staticmethod

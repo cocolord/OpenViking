@@ -96,3 +96,15 @@ def merge_search_tags(existing: Iterable[str] | None, incoming: Iterable[str] | 
         ordered[key] = value
 
     return [f"{key}={value}" for key, value in ordered.items()]
+
+
+def preserve_memory_type_tag(
+    existing: Iterable[str] | None, incoming: Iterable[str] | None
+) -> list[str]:
+    """Retain the indexed memory type when replacing unrelated search tags."""
+    memory_type = [
+        tag
+        for tag in normalize_search_tags(existing, discard_invalid=True)
+        if tag.startswith("memory_type=")
+    ]
+    return merge_search_tags(memory_type, incoming)
