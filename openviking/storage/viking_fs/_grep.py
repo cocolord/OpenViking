@@ -279,6 +279,9 @@ class _GrepMixin:
 
         real_ctx = self._ctx_or_default(ctx)
         if self._is_session_root_uri(uri):
+            primary_path = self._uri_to_path(uri, ctx=ctx)
+            if not await self._agfs_path_exists(primary_path):
+                return False
             legacy_path = self._legacy_session_path(legacy_uri, ctx=ctx)
             owner_user_id = self._safe_uri_parts(uri)[1]
             legacy_items = await self._legacy_session_root_items(

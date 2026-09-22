@@ -188,6 +188,22 @@ async def test_session_grep_with_visible_legacy_data_uses_merge_fallback(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_virtual_empty_session_root_uses_merge_fallback(monkeypatch):
+    viking_fs = VikingFS(agfs=_DummyAgfs())
+    primary_path = "/local/default/user/alice/sessions"
+    path_exists = AsyncMock(return_value=False)
+    legacy_items = AsyncMock(return_value=[])
+    monkeypatch.setattr(viking_fs, "_agfs_path_exists", path_exists)
+    monkeypatch.setattr(viking_fs, "_legacy_session_root_items", legacy_items)
+
+    assert not await viking_fs._session_native_grep_safe(
+        "viking://user/alice/sessions", None
+    )
+    path_exists.assert_awaited_once_with(primary_path)
+    legacy_items.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("node_limit", "expected_remote_limit"),
     [
