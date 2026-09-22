@@ -243,13 +243,20 @@ class _GrepMixin:
         )
         if native_safe:
             try:
+                # Session grep historically used the Python fallback, where
+                # level_limit counts directory expansions and therefore
+                # includes files one path segment deeper than native grep.
+                # Preserve that public behavior when selecting the fast path.
+                native_level_limit = (
+                    level_limit + 1 if is_session_uri(uri) else level_limit
+                )
                 return await self._grep_with_agfs(
                     uri=uri,
                     pattern=pattern,
                     exclude_uri=exclude_uri,
                     case_insensitive=case_insensitive,
                     node_limit=node_limit,
-                    level_limit=level_limit,
+                    level_limit=native_level_limit,
                     ctx=ctx,
                 )
             except (AttributeError, AGFSNotSupportedError, NotImplementedError) as e:

@@ -163,7 +163,7 @@ async def test_primary_only_session_grep_uses_native_agfs(monkeypatch):
         exclude_uri="viking://user/alice/sessions/session-1/tools",
         case_insensitive=True,
         node_limit=7,
-        level_limit=3,
+        level_limit=4,
         ctx=None,
     )
     fallback_grep.assert_not_awaited()
@@ -192,6 +192,51 @@ async def test_session_grep_with_visible_legacy_data_uses_merge_fallback(monkeyp
     assert result == fallback_result
     native_grep.assert_not_awaited()
     fallback_grep.assert_awaited_once()
+    assert fallback_grep.await_args.kwargs["level_limit"] == 10
+
+
+@pytest.mark.asyncio
+async def test_session_native_and_legacy_fallback_keep_level_limit_results_equal(monkeypatch):
+    viking_fs = VikingFS(agfs=_DummyAgfs())
+    match = {
+        "uri": "viking://user/alice/sessions/s1/messages.jsonl",
+        "line": 1,
+        "content": "payment failed",
+    }
+
+    async def fake_native_grep(**kwargs):
+        matches = [match] if kwargs["level_limit"] >= 2 else []
+        return {
+            "matches": matches,
+            "count": len(matches),
+            "match_count": len(matches),
+            "files_scanned": len(matches),
+        }
+
+    async def fake_fallback_grep(**kwargs):
+        matches = [match] if kwargs["level_limit"] >= 1 else []
+        return {
+            "matches": matches,
+            "count": len(matches),
+            "match_count": len(matches),
+            "files_scanned": len(matches),
+        }
+
+    monkeypatch.setattr(viking_fs, "_grep_with_agfs", fake_native_grep)
+    monkeypatch.setattr(viking_fs, "_grep_encrypted", fake_fallback_grep)
+    native_safe = AsyncMock(side_effect=[True, False])
+    monkeypatch.setattr(viking_fs, "_session_native_grep_safe", native_safe)
+    kwargs = {
+        "uri": "viking://user/alice/sessions",
+        "pattern": "payment failed",
+        "exclude_uri": None,
+        "case_insensitive": False,
+        "node_limit": None,
+        "level_limit": 1,
+        "ctx": None,
+    }
+
+    assert await viking_fs._grep_fs(**kwargs) == await viking_fs._grep_fs(**kwargs)
 
 
 @pytest.mark.asyncio
