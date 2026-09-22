@@ -16,6 +16,7 @@ from openviking.core.namespace import (
     context_type_for_uri,
     is_session_uri,
     uri_leaf_name,
+    uri_parts,
 )
 from openviking.privacy import (
     UserPrivacyConfigService,
@@ -35,6 +36,7 @@ from openviking.storage.abstract_overview import (
 from openviking.storage.acl import AclAction, AclMode, CreatorAclGrant
 from openviking.storage.content_write import ContentWriteCoordinator
 from openviking.storage.expr import And, Eq, In, Or
+from openviking.storage.internal_names import is_storage_internal_name
 from openviking.storage.queuefs import SemanticMsg, get_queue_manager
 from openviking.storage.queuefs.semantic_msg import build_semantic_coalesce_key
 from openviking.storage.queuefs.semantic_ops.freshness_policy import FreshnessAction
@@ -46,7 +48,11 @@ from openviking.telemetry.request_wait_tracker import get_request_wait_tracker
 from openviking.telemetry.resource_summary import build_queue_status_payload
 from openviking.utils.embedding_utils import vectorize_directory_meta
 from openviking.utils.tags import normalize_search_tags
-from openviking_cli.exceptions import DeadlineExceededError, NotInitializedError
+from openviking_cli.exceptions import (
+    DeadlineExceededError,
+    InvalidArgumentError,
+    NotInitializedError,
+)
 from openviking_cli.utils import VikingURI, get_logger
 from openviking_cli.utils.config import get_openviking_config
 
@@ -323,6 +329,12 @@ class FSService:
             )
         return entries
 
+    @staticmethod
+    def _reject_storage_internal_target(uri: str) -> None:
+        """Reject reserved names in targets and implicitly created parent directories."""
+        if any(is_storage_internal_name(part) for part in uri_parts(uri)):
+            raise InvalidArgumentError(f"cannot create storage internal name: {uri}")
+
     async def mkdir(
         self,
         uri: str,
@@ -331,6 +343,7 @@ class FSService:
     ) -> None:
         """Create directory."""
         viking_fs = self._ensure_initialized()
+        self._reject_storage_internal_target(uri)
         directory_uri, abstract_uri = self._resolve_directory_uris(uri)
         directory_preexisting = await viking_fs.exists(directory_uri, ctx=ctx)
         await viking_fs.mkdir(uri, ctx=ctx)
@@ -678,6 +691,7 @@ class FSService:
         """Copy a resource without exposing a cancellable partial transaction."""
         from_uri = VikingFS._normalize_transfer_uri(from_uri)
         to_uri = VikingFS._normalize_transfer_uri(to_uri)
+        self._reject_storage_internal_target(to_uri)
         return await self._finish_transfer_after_caller_cancel(
             self._cp_and_refresh(from_uri, to_uri, recursive=recursive, ctx=ctx),
             operation="copy",
@@ -736,6 +750,7 @@ class FSService:
         """Move a resource without exposing a cancellable partial transaction."""
         from_uri = VikingFS._normalize_transfer_uri(from_uri)
         to_uri = VikingFS._normalize_transfer_uri(to_uri)
+        self._reject_storage_internal_target(to_uri)
         await self._finish_transfer_after_caller_cancel(
             self._mv_and_refresh(from_uri, to_uri, ctx=ctx),
             operation="move",
@@ -1044,6 +1059,8 @@ class FSService:
         level_limit: int = 10,
         tags: Optional[List[str]] = None,
         include_tags: bool = False,
+        before_context: int = 0,
+        after_context: int = 0,
     ) -> Dict:
         """Content search."""
         viking_fs = self._ensure_initialized()
@@ -1061,6 +1078,8 @@ class FSService:
             "ctx": ctx,
             "tag_filter": tag_filter,
             "include_tags": include_tags or bool(normalized_tags),
+            "before_context": before_context,
+            "after_context": after_context,
         }
         if _may_include_memory_content(uri):
             kwargs["content_transform"] = _visible_grep_content
