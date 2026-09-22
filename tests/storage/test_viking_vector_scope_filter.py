@@ -77,16 +77,16 @@ class _RecordingAsyncAdapter:
         return []
 
 
-def _backend_with_mode(mode: str) -> VikingVectorIndexBackend:
+def _backend_with_type(backend_type: str) -> VikingVectorIndexBackend:
     backend = object.__new__(VikingVectorIndexBackend)
     backend.acl_manager = None
-    backend._get_backend_for_context = lambda _ctx: SimpleNamespace(_mode=mode)
+    backend._backend_type = backend_type
     return backend
 
 
 @pytest.mark.asyncio
 async def test_cloud_event_scope_uses_one_post_process_query():
-    backend = _backend_with_mode("vikingdb")
+    backend = _backend_with_type("vikingdb")
     calls = []
 
     async def fake_search(**kwargs):
@@ -95,10 +95,10 @@ async def test_cloud_event_scope_uses_one_post_process_query():
 
     backend.search = fake_search
     await backend.search_in_tenant(
-        ctx=_ctx(),
+        ctx=_ctx(actor_peer_id="assistant"),
         query_vector=[1.0],
         context_type="memory",
-        target_directories=["viking://user/alice/memories/events"],
+        target_directories=["viking://user/alice/peers/assistant/memories/events"],
         level=[2],
         limit=10,
         events_time_decay_weight=0.25,
@@ -114,7 +114,7 @@ async def test_cloud_event_scope_uses_one_post_process_query():
 
 @pytest.mark.asyncio
 async def test_cloud_mixed_scope_splits_event_and_non_event_queries():
-    backend = _backend_with_mode("vikingdb")
+    backend = _backend_with_type("vikingdb")
     calls = []
 
     async def fake_search(**kwargs):
@@ -141,14 +141,26 @@ async def test_cloud_mixed_scope_splits_event_and_non_event_queries():
 
 @pytest.mark.asyncio
 async def test_cloud_mixed_rerank_prefetch_keeps_one_origin_score_window():
-    backend = _backend_with_mode("vikingdb")
+    backend = _backend_with_type("vikingdb")
 
     async def fake_search(**kwargs):
         if kwargs.get("advance"):
             return [
-                {"uri": "viking://user/alice/memories/events/a", "_score": 0.95, "_origin_score": 0.4},
-                {"uri": "viking://user/alice/memories/events/b", "_score": 0.9, "_origin_score": 0.3},
-                {"uri": "viking://user/alice/memories/events/c", "_score": 0.8, "_origin_score": 0.2},
+                {
+                    "uri": "viking://user/alice/memories/events/a",
+                    "_score": 0.95,
+                    "_origin_score": 0.4,
+                },
+                {
+                    "uri": "viking://user/alice/memories/events/b",
+                    "_score": 0.9,
+                    "_origin_score": 0.3,
+                },
+                {
+                    "uri": "viking://user/alice/memories/events/c",
+                    "_score": 0.8,
+                    "_origin_score": 0.2,
+                },
             ]
         return [
             {"uri": "viking://user/alice/memories/preferences/a", "_score": 0.8},
@@ -174,7 +186,7 @@ async def test_cloud_mixed_rerank_prefetch_keeps_one_origin_score_window():
 
 @pytest.mark.asyncio
 async def test_cloud_default_user_scope_keeps_python_fusion_for_unknown_peers():
-    backend = _backend_with_mode("vikingdb")
+    backend = _backend_with_type("vikingdb")
     calls = []
 
     async def fake_search(**kwargs):
@@ -587,7 +599,7 @@ async def test_zero_decay_weight_keeps_the_original_single_search_call():
 
 @pytest.mark.asyncio
 async def test_decay_fuses_user_and_peer_events_from_one_candidate_search():
-    backend = _backend_with_mode("local")
+    backend = _backend_with_type("local")
     calls = []
 
     async def fake_search(**kwargs):
@@ -639,7 +651,7 @@ async def test_decay_fuses_user_and_peer_events_from_one_candidate_search():
 
 @pytest.mark.asyncio
 async def test_decay_rerank_prefetch_keeps_expanded_origin_candidates():
-    backend = _backend_with_mode("local")
+    backend = _backend_with_type("local")
     calls = []
 
     async def fake_search(**kwargs):
@@ -681,7 +693,7 @@ async def test_decay_rerank_prefetch_keeps_expanded_origin_candidates():
 
 @pytest.mark.asyncio
 async def test_decay_applies_to_a_peer_only_target():
-    backend = _backend_with_mode("local")
+    backend = _backend_with_type("local")
     calls = []
 
     async def fake_search(**kwargs):
@@ -715,7 +727,7 @@ async def test_decay_applies_to_a_peer_only_target():
 
 @pytest.mark.asyncio
 async def test_decay_applies_under_bare_user_target():
-    backend = _backend_with_mode("local")
+    backend = _backend_with_type("local")
     calls = []
 
     async def fake_search(**kwargs):
@@ -739,7 +751,7 @@ async def test_decay_applies_under_bare_user_target():
 
 @pytest.mark.asyncio
 async def test_decay_applies_to_children_of_a_peer_event_directory():
-    backend = _backend_with_mode("local")
+    backend = _backend_with_type("local")
     calls = []
 
     async def fake_search(**kwargs):

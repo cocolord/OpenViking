@@ -1085,6 +1085,47 @@ def test_http_collection_update_data_posts_to_update_endpoint(monkeypatch):
     }
 
 
+def test_http_adapter_vector_search_keeps_original_request_shape(monkeypatch):
+    captured = {}
+
+    class _Response:
+        status_code = 200
+        text = '{"data": {"data": [{"id": "doc-1", "score": 0.8}]}}'
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        captured.update(url=url, json=json)
+        return _Response()
+
+    monkeypatch.setattr(
+        "openviking.storage.vectordb.collection.http_collection.requests.post",
+        _fake_post,
+    )
+
+    from openviking.storage.vectordb.collection.collection import Collection
+    from openviking.storage.vectordb.collection.http_collection import HttpCollection
+    from openviking.storage.vectordb_adapters.http_adapter import HttpCollectionAdapter
+
+    adapter = HttpCollectionAdapter(
+        host="127.0.0.1",
+        port=1933,
+        project_name="default",
+        collection_name="context",
+        index_name="default",
+    )
+    adapter._collection = Collection(
+        HttpCollection(
+            ip="127.0.0.1",
+            port=1933,
+            meta_data={"ProjectName": "default", "CollectionName": "context"},
+        )
+    )
+
+    assert adapter.query(query_vector=[1.0]) == [{"id": "doc-1", "_score": 0.8}]
+    assert captured["url"].endswith("/api/vikingdb/data/search/vector")
+    assert "advance" not in captured["json"]
+    assert "return_detail_info" not in captured["json"]
+
+
 def test_http_adapter_strict_count_propagates_http_failure(monkeypatch):
     from openviking.storage.vectordb.collection.collection import Collection
     from openviking.storage.vectordb.collection.http_collection import HttpCollection

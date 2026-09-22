@@ -66,8 +66,6 @@ class ICollection(ABC):
         filters: Optional[Dict[str, Any]] = None,
         sparse_vector: Optional[Dict[str, float]] = None,
         output_fields: Optional[List[str]] = None,
-        advance: Optional[Dict[str, Any]] = None,
-        return_detail_info: bool = False,
     ) -> SearchResult:
         raise NotImplementedError
 
@@ -366,6 +364,11 @@ class Collection:
         """
         if self.__collection is None:
             raise RuntimeError("Collection is closed")
+        detail_options: Dict[str, Any] = {}
+        if advance is not None:
+            detail_options["advance"] = advance
+        if return_detail_info:
+            detail_options["return_detail_info"] = True
         return self.__collection.search_by_vector(
             index_name,
             dense_vector,
@@ -374,8 +377,7 @@ class Collection:
             filters,
             sparse_vector,
             output_fields,
-            advance,
-            return_detail_info,
+            **detail_options,
         )
 
     def search_by_keywords(
