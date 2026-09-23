@@ -1597,10 +1597,9 @@ class ResourceService:
         return {"uri": uri, "policy": policy}
 
     async def get_resource_ttl(self, uri: str, ctx: RequestContext) -> dict:
-        from openviking.storage.resource_ttl import resource_ttl_fields
+        from openviking.storage.document_ttl import get_document_ttl
 
-        await self._viking_fs.stat(uri, ctx=ctx)
-        return {"uri": uri, **await resource_ttl_fields(self._viking_fs, uri, ctx=ctx)}
+        return await get_document_ttl(self._viking_fs, uri, ctx=ctx)
 
     async def update_resource_ttl(self, uri: str, expires_at: str, ctx: RequestContext) -> dict:
         from openviking.storage.resource_ttl import update_resource_expiry

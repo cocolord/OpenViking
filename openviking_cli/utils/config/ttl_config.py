@@ -35,7 +35,7 @@ def _is_supported_directory_uri(uri: str) -> bool:
         return False
     path = uri[len("viking://") :].rstrip("/")
     parts = path.split("/")
-    if any(not part for part in parts):
+    if any(not part or part in {".", ".."} or "\\" in part for part in parts):
         return False
     if parts[0] == "resources":
         return True
@@ -49,7 +49,7 @@ def _is_supported_directory_uri(uri: str) -> bool:
         # A session ID is an object root, not a configurable directory.
         return len(parts) == 3
     if len(parts) >= 4 and parts[2:4] == ["memories", "events"]:
-        event_path = parts[4:]
+        return True
     elif (
         len(parts) >= 6
         and parts[2] == "peers"
@@ -59,12 +59,9 @@ def _is_supported_directory_uri(uri: str) -> bool:
             "events",
         ]
     ):
-        event_path = parts[6:]
+        return True
     else:
         return False
-    # Event objects are Markdown files; accepting one as a policy key would
-    # silently reintroduce the per-object TTL excluded by the product review.
-    return not any(part.endswith(".md") for part in event_path)
 
 
 class TTLPolicy(BaseModel):
@@ -80,7 +77,7 @@ class TTLPolicy(BaseModel):
 
     mode: Literal["inherit", "disabled", "days", "absolute"] = RuntimeField(default="inherit")
     ttl_absolute: Optional[StrictInt] = RuntimeField(default=None, ge=1, le=253402300799)
-    ttl_days: Optional[int] = RuntimeField(default=None, ge=1)
+    ttl_days: Optional[StrictInt] = RuntimeField(default=None, ge=1, le=365000)
 
     @model_validator(mode="after")
     def _check_ttl_days(self) -> "TTLPolicy":
@@ -162,8 +159,10 @@ class TTLConfig(BaseModel):
             if uri in normalized:
                 raise ValueError(f"duplicate ttl directory after normalization: {uri}")
             parts = uri.removeprefix("viking://").split("/")
-            resource = parts[0] == "resources" or parts[2] == "resources" or (
-                len(parts) >= 5 and parts[2] == "peers" and parts[4] == "resources"
+            resource = (
+                parts[0] == "resources"
+                or (len(parts) >= 3 and parts[2] == "resources")
+                or (len(parts) >= 5 and parts[2] == "peers" and parts[4] == "resources")
             )
             if policy.mode == "absolute" and not resource:
                 raise ValueError("absolute TTL policies are supported only for resources")
@@ -202,7 +201,8 @@ class TTLConfig(BaseModel):
         matches = (
             (directory, policy)
             for directory, policy in self.directories.items()
-            if normalized_uri == directory or normalized_uri.startswith(directory + "/")
+            if normalized_uri.startswith(directory + "/")
+            or (scope == "resources" and normalized_uri == directory)
         )
         for _, policy in sorted(matches, key=lambda item: len(item[0]), reverse=True):
             if policy.mode != "inherit":

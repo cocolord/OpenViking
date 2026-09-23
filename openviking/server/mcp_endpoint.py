@@ -1153,6 +1153,27 @@ async def _maybe_sitemap_hint(path: str) -> str:
 
 
 @mcp.tool()
+async def get_ttl(uri: str) -> str:
+    """Read a live event/resource document's frozen cleanup time and TTL owner."""
+    ctx = _get_ctx()
+    uri = validate_request_viking_uri(uri, ctx)
+    return str(await get_service().fs.get_ttl(uri, ctx))
+
+
+@mcp.tool()
+async def update_ttl(uri: str, expires_at: str) -> str:
+    """Set a live event/resource document's cleanup time (ISO 8601 with timezone).
+
+    Requires an existing TTL and a future timestamp. A parsed resource's files
+    share its root lifecycle; get_ttl identifies that owner. Does not revive
+    expired data or change policy for future documents.
+    """
+    ctx = _get_ctx()
+    uri = validate_request_viking_uri(uri, ctx)
+    return str(await get_service().fs.update_ttl(uri, expires_at, ctx))
+
+
+@mcp.tool()
 async def update_resource_config(
     uri: str, ttl_relative: Optional[int] = None, ttl_absolute: Optional[int] = None
 ) -> str:

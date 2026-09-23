@@ -15,7 +15,6 @@ from openviking.core.ttl import OBJECT_TYPE_EVENT, OBJECT_TYPE_SESSION
 from openviking.pyagfs.exceptions import AGFSNetworkError, AGFSTimeoutError
 from openviking.service import ttl_cleanup
 from openviking.service.task_tracker import TaskStatus, TaskTracker, set_task_tracker
-from openviking.service.task_work_index import bind_task_context, get_task_context
 from openviking.storage.queuefs.process_result import ProcessOutcome
 from openviking.storage.ttl_registry import TTLRecord
 from openviking_cli.exceptions import NotFoundError
@@ -183,16 +182,11 @@ async def test_expired_object_is_deleted_strictly_and_registry_removed(
         ctx=viking_fs.rm.await_args.kwargs["ctx"],
         lease_ref=viking_fs.rm.await_args.kwargs["lease_ref"],
         strict=True,
+        preserve_summaries=True,
     )
-    if record.object_type == OBJECT_TYPE_EVENT:
-        parent_uri = EVENT_URI.rsplit("/", 1)[0]
-        assert viking_fs.rm.await_count == 3
-        viking_fs._delete_from_vector_store.assert_awaited_once_with(
-            [parent_uri], ctx=viking_fs.rm.await_args_list[0].kwargs["ctx"]
-        )
-        viking_fs._confirm_vector_uris_cleared.assert_awaited_once_with(
-            [parent_uri], ctx=viking_fs.rm.await_args_list[0].kwargs["ctx"]
-        )
+    assert viking_fs.rm.await_count == 1
+    viking_fs._delete_from_vector_store.assert_not_awaited()
+    viking_fs._confirm_vector_uris_cleared.assert_not_awaited()
     registry.remove_if_generation.assert_awaited_once_with(
         record.account_id, record.object_uri, record.generation
     )
@@ -216,7 +210,7 @@ async def test_missing_source_still_runs_strict_delete_for_orphan_vectors(tracke
     result = await cleanup._process(_message(record))
 
     assert result.outcome is ProcessOutcome.SUCCESS
-    assert viking_fs.rm.await_count == 3
+    assert viking_fs.rm.await_count == 1
     assert viking_fs.rm.await_args_list[0].kwargs["strict"] is True
     registry.remove_if_generation.assert_awaited_once()
     task = await tracker.get(
@@ -401,70 +395,16 @@ async def test_retry_persistence_failure_leaves_delivery_unacknowledged(tracker)
 
 
 @pytest.mark.asyncio
-async def test_event_parent_invalidation_failure_keeps_registry_and_requeues(tracker):
+async def test_event_cleanup_preserves_summaries_and_does_not_schedule_rebuild(tracker):
     record = _record(OBJECT_TYPE_EVENT, object_uri=EVENT_URI)
-    cleanup, viking_fs, registry, queue_manager = _make_service(
-        record=record, live_content=_event_body()
-    )
-    viking_fs._confirm_vector_uris_cleared.side_effect = RuntimeError("parent vector residue")
-
+    cleanup, fs, registry, queues = _make_service(record=record, live_content=_event_body())
     result = await cleanup._process(_message(record))
-
-    assert result.outcome is ProcessOutcome.REQUEUED
-    registry.remove_if_generation.assert_not_awaited()
-    queue_manager.enqueue.assert_not_awaited()
-    registry.defer_retry.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_event_cleanup_invalidates_only_parent_sidecars_and_exact_vectors(tracker):
-    record = _record(OBJECT_TYPE_EVENT, object_uri=EVENT_URI)
-    cleanup, viking_fs, registry, queue_manager = _make_service(
-        record=record, live_content=_event_body()
-    )
-
-    result = await cleanup._process(_message(record))
-
     assert result.outcome is ProcessOutcome.SUCCESS
-    parent_uri = EVENT_URI.rsplit("/", 1)[0]
-    deleted_uris = [call.args[0] for call in viking_fs.rm.await_args_list]
-    assert deleted_uris == [
-        EVENT_URI,
-        f"{parent_uri}/.abstract.md",
-        f"{parent_uri}/.overview.md",
-    ]
-    viking_fs._delete_from_vector_store.assert_awaited_once_with(
-        [parent_uri], ctx=viking_fs.rm.await_args_list[0].kwargs["ctx"]
-    )
-    semantic_msg = queue_manager.get_queue(queue_manager.SEMANTIC).enqueue.await_args.args[0]
-    assert semantic_msg.uri == parent_uri
-    assert semantic_msg.changes == {"deleted": [EVENT_URI]}
-    assert semantic_msg.generation_trigger == "ttl_cleanup"
+    assert [call.args[0] for call in fs.rm.await_args_list] == [EVENT_URI]
+    assert fs.rm.await_args.kwargs["preserve_summaries"] is True
+    fs._delete_from_vector_store.assert_not_awaited()
+    queues.get_queue(queues.SEMANTIC).enqueue.assert_not_awaited()
     registry.remove_if_generation.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_event_rebuild_is_detached_from_cleanup_task_context(tracker):
-    record = _record(OBJECT_TYPE_EVENT, object_uri=EVENT_URI)
-    cleanup, _, _, queue_manager = _make_service(record=record, live_content=_event_body())
-    observed_contexts = []
-
-    async def capture_enqueue(message):
-        observed_contexts.append(get_task_context())
-        return message.id
-
-    semantic_queue = queue_manager.get_queue(queue_manager.SEMANTIC)
-    semantic_queue.enqueue.side_effect = capture_enqueue
-
-    with bind_task_context(
-        "task-1",
-        ttl_cleanup.SYSTEM_TASK_ACCOUNT_ID,
-        ttl_cleanup.SYSTEM_TASK_USER_ID,
-    ):
-        result = await cleanup._process(_message(record))
-
-    assert result.outcome is ProcessOutcome.SUCCESS
-    assert observed_contexts == [None]
 
 
 @pytest.mark.asyncio

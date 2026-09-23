@@ -1394,20 +1394,13 @@ class VikingVectorIndexBackend:
             uri = str(record.get("uri") or "")
             if not uri:
                 raise ValueError("Vector candidate has no URI for TTL validation")
-            # L0/L1 directory rows use the directory URI. Their source sidecars
-            # carry the earliest expiry of the events summarized into them.
-            if record.get("level") in (0, 1) and not uri.endswith(
-                ("/.abstract.md", "/.overview.md")
-            ):
-                name = ".abstract.md" if record["level"] == 0 else ".overview.md"
-                uri = uri.rstrip("/") + "/" + name
+            if record.get("level") in (0, 1):
+                return True
             if ttl_scope_for_uri(uri) is None and not uri.endswith(
                 ("/.abstract.md", "/.overview.md")
             ):
                 return True
-            return await fs._ttl_uri_visible(
-                uri, ctx, require_source=True, vector_abstract=str(record.get("abstract") or "")
-            )
+            return await fs._ttl_uri_visible(uri, ctx, require_source=True)
 
         result = []
         for start in range(0, len(records), 16):
@@ -2277,17 +2270,23 @@ class VikingVectorIndexBackend:
             And([Eq("account_id", account_id), Eq("owner_user_id", user_id)])
         )
 
-    async def delete_uris(self, ctx: RequestContext, uris: List[str]) -> None:
+    async def delete_uris(
+        self, ctx: RequestContext, uris: List[str], *, level: Optional[int] = None
+    ) -> None:
         for uri in uris:
             conds: List[FilterExpr] = [
                 Eq("account_id", ctx.account_id),
                 Or([Eq("uri", uri), In("uri", [f"{uri}/"])]),
             ]
+            if level is not None:
+                conds.append(Eq("level", level))
 
             backend = self._get_backend_for_context(ctx)
             await backend.delete_by_filter(And(conds))
 
-    async def delete_uri_scope(self, ctx: RequestContext, uri: str) -> None:
+    async def delete_uri_scope(
+        self, ctx: RequestContext, uri: str, *, level: Optional[int] = None
+    ) -> None:
         """Strictly delete one URI and every descendant in its tenant."""
         backend = self._get_backend_for_context(ctx)
         await backend.delete_by_filter(
@@ -2295,6 +2294,7 @@ class VikingVectorIndexBackend:
                 [
                     Eq("account_id", ctx.account_id),
                     Or([Eq("uri", uri), PathScope("uri", uri, depth=-1)]),
+                    *([Eq("level", level)] if level is not None else []),
                 ]
             )
         )

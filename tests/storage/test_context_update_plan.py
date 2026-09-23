@@ -16,9 +16,6 @@ from openviking.storage.index_action import FieldPatch
 def unmanaged_resources(monkeypatch):
     # These plan-only filesystem doubles contain no lifecycle metadata.
     monkeypatch.setattr(
-        "openviking.storage.resource_ttl.resource_ttl_snapshot", AsyncMock(return_value=None)
-    )
-    monkeypatch.setattr(
         "openviking.storage.resource_ttl.prepare_resource_ttl", AsyncMock(return_value={})
     )
 

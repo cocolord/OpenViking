@@ -189,13 +189,13 @@ async def test_registry_outage_is_not_treated_as_absence(operation):
         if operation == "record":
             await registry.get("acct", _record().object_uri)
         elif operation == "summary":
-            await registry.summary_requires_snapshot("acct", "viking://user/u1/memories/events")
+            await registry.has_ttl_descendants("acct", "viking://user/u1/memories/events")
         else:
             _ = [item async for item in registry.claim_due(now=datetime.now(timezone.utc))]
 
 
 @pytest.mark.asyncio
-async def test_summary_marker_is_specific_to_event_parent_and_survives_cleanup():
+async def test_descendant_marker_survives_cleanup_and_is_shared_across_workers():
     class CachedAGFS(_MemoryAGFS):
         async def stat(self, path, *, bypass_cache=False):
             if not bypass_cache:
@@ -205,16 +205,16 @@ async def test_summary_marker_is_specific_to_event_parent_and_survives_cleanup()
     agfs = CachedAGFS()
     registry = TTLRegistry(agfs)
     reader = TTLRegistry(agfs)
-    directory = "viking://user/u1/memories/events/day"
+    directory = "viking://resources/day"
     await registry.upsert(_record())  # Session TTL does not affect event summaries.
-    assert not await reader.summary_requires_snapshot("acct", directory)
-    event = replace(_record(uri=directory + "/e.md"), object_type="event")
+    assert not await reader.has_ttl_descendants("acct", directory)
+    event = replace(_record(uri=directory + "/doc"), object_type="resource")
     await registry.upsert(event)
     await registry.remove_if_generation("acct", event.object_uri, event.generation)
-    assert await reader.summary_requires_snapshot("acct", directory)
+    assert await reader.has_ttl_descendants("acct", directory)
     restarted = TTLRegistry(agfs)
-    assert await restarted.summary_requires_snapshot("acct", directory)
-    assert not await restarted.summary_requires_snapshot("acct", directory + "-sibling")
+    assert await restarted.has_ttl_descendants("acct", directory)
+    assert not await restarted.has_ttl_descendants("acct", directory + "-sibling")
 
 
 @pytest.mark.asyncio

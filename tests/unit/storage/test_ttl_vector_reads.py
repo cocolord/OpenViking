@@ -11,7 +11,6 @@ import pytest
 from openviking.core.ttl import TTL_FIELD_NAMES
 from openviking.pyagfs.exceptions import AGFSNetworkError
 from openviking.server.identity import RequestContext, Role
-from openviking.storage.abstract_overview import render_abstract_overview
 from openviking.storage.collection_schemas import CollectionSchemas
 from openviking.storage.expr import Eq
 from openviking.storage.ovpack.index import EXPORT_VECTOR_FIELDS
@@ -66,7 +65,7 @@ def setup(monkeypatch):
     fs = VikingFS(agfs=SimpleNamespace())
     files = {}
 
-    async def stat(path):
+    async def stat(path, **kwargs):
         if path not in files:
             raise FileNotFoundError(path)
         return {"isDir": False}
@@ -75,7 +74,6 @@ def setup(monkeypatch):
     fs._async_agfs.read = AsyncMock(side_effect=lambda path: files[path])
     fs.ttl_registry.account_may_have_records = AsyncMock(return_value=True)
     fs.ttl_registry.get = AsyncMock(return_value=None)
-    fs.ttl_registry.summary_requires_snapshot = AsyncMock(return_value=True)
     monkeypatch.setattr("openviking.storage.viking_fs.get_viking_fs", lambda: fs)
     monkeypatch.setattr("openviking.storage.viking_vector_index_backend.ttl_enabled", lambda: False)
 
@@ -165,37 +163,13 @@ async def test_offset_counts_live_rows_and_preserves_legacy_records(setup):
 
 
 @pytest.mark.asyncio
-async def test_summary_expiry_does_not_exclude_live_level_or_prefix_sibling(setup):
+@pytest.mark.parametrize(
+    "root", [ROOT, "viking://resources/doc", "viking://user/alice/sessions/s1"]
+)
+async def test_all_summary_levels_remain_visible_after_l2_expires(setup, root):
     s = setup
-    directory = ROOT + "/report.md"
-    for level, name, expiry in [(0, ".abstract.md", PAST), (1, ".overview.md", FUTURE)]:
-        path = s.fs._uri_to_path(directory + "/" + name, ctx=s.ctx)
-        s.files[path] = render_abstract_overview(
-            level, directory, "summary", {"expires_at": expiry}
-        ).encode()
-        s.rows.append({"uri": directory, "level": level, "abstract": "summary"})
-    sibling = directory + "/live.md"
-    s.source(sibling, FUTURE)
-    s.rows.append({"uri": sibling, "level": 2})
-    result = await s.backend.filter(Eq("level", 0), ctx=s.ctx, include_expired=False)
-    assert result == []
-    result = await s.backend.query(limit=2, ctx=s.ctx, include_expired=False)
-    assert result == [
-        {"uri": directory, "level": 1, "abstract": "summary"},
-        {"uri": sibling, "level": 2},
-    ]
-
-
-@pytest.mark.asyncio
-async def test_regenerated_summary_cannot_make_its_stale_vector_visible(setup):
-    s = setup
-    path = s.fs._uri_to_path(ROOT + "/.abstract.md", ctx=s.ctx)
-    s.files[path] = render_abstract_overview(
-        0, ROOT, "new live summary", {"expires_at": FUTURE}
-    ).encode()
-    s.rows.append({"uri": ROOT, "level": 0, "abstract": "old expired secret"})
-    assert await s.backend.query(ctx=s.ctx, include_expired=False) == []
-    s.rows[0]["abstract"] = "new live summary"
+    for level in (0, 1):
+        s.rows.append({"uri": root, "level": level, "abstract": "retained summary"})
     assert await s.backend.query(ctx=s.ctx, include_expired=False) == s.rows
 
 

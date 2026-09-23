@@ -70,7 +70,7 @@ async def test_read_stat_exists_hide_expired_event_but_internal_read_can_include
 
 
 @pytest.mark.asyncio
-async def test_read_hides_entire_expired_session_subtree(monkeypatch, fs):
+async def test_read_hides_expired_session_content(monkeypatch, fs):
     ctx = _default_ctx()
     session_uri = "viking://user/default/sessions/session-1"
     child_uri = f"{session_uri}/messages.jsonl"
@@ -83,7 +83,7 @@ async def test_read_hides_entire_expired_session_subtree(monkeypatch, fs):
     }
     monkeypatch.setattr(fs.ttl_registry, "account_may_have_records", AsyncMock(return_value=True))
 
-    async def stat(path):
+    async def stat(path, **kwargs):
         if path not in files:
             raise FileNotFoundError(path)
         return {"name": path.rsplit("/", 1)[-1], "isDir": False}
@@ -105,7 +105,7 @@ async def test_read_hides_partial_cleanup_session_when_metadata_is_already_gone(
     child = b'{"role":"user"}\n'
     monkeypatch.setattr(fs.ttl_registry, "account_may_have_records", AsyncMock(return_value=True))
 
-    async def stat(path):
+    async def stat(path, **kwargs):
         if path == child_path:
             return {"name": "messages.jsonl", "isDir": False}
         raise FileNotFoundError(path)
@@ -158,7 +158,7 @@ async def test_ls_and_tree_apply_node_limit_after_ttl_filter(monkeypatch, fs):
     }
     monkeypatch.setattr(fs.ttl_registry, "account_may_have_records", AsyncMock(return_value=True))
 
-    async def stat(path):
+    async def stat(path, **kwargs):
         if path == root_path:
             return {"name": "events", "isDir": True}
         if path in contents:

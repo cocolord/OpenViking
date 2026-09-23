@@ -402,6 +402,8 @@ This catalog follows the routes actually mounted by the server. Each group headi
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/v1/content/read` | Read full content (L2) |
+| GET | `/api/v1/content/ttl` | Read event/resource frozen expiry |
+| PATCH | `/api/v1/content/ttl` | Update a live event/resource deadline |
 | GET | `/api/v1/content/abstract` | Read an abstract (L0) |
 | GET | `/api/v1/content/overview` | Read an overview (L1) |
 | GET | `/api/v1/content/download` | Download original file bytes |

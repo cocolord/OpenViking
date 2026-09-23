@@ -158,7 +158,7 @@ def test_inherit_preserves_nearest_explicit_ancestor(parent_policy, expected):
 
 
 @pytest.mark.asyncio
-async def test_expired_event_is_not_exposed_through_parent_abstract(monkeypatch):
+async def test_expired_event_keeps_its_parent_abstract(monkeypatch):
     fs = VikingFS(agfs=_DummyAgfs())
     ctx = _default_ctx()
     parent = "viking://user/default/memories/events/2026"
@@ -183,22 +183,21 @@ async def test_expired_event_is_not_exposed_through_parent_abstract(monkeypatch)
     monkeypatch.setattr(fs._async_agfs, "stat", stat)
     monkeypatch.setattr(fs._async_agfs, "read", AsyncMock(side_effect=lambda path: files[path]))
     monkeypatch.setattr(fs.ttl_registry, "account_may_have_records", AsyncMock(return_value=True))
-    monkeypatch.setattr(fs.ttl_registry, "summary_requires_snapshot", AsyncMock(return_value=True))
     with pytest.raises(NotFoundError):
         await fs.read_file(event, ctx=ctx)
     summary = await fs.abstract(parent, ctx=ctx)
-    assert secret not in summary, f"event read is hidden but parent abstract returns: {summary}"
+    assert secret in summary  # L0 is intentionally retained after the L2 event expires.
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "expiry,visible",
     [
-        ("2000-01-01T00:00:00.000Z", False),
+        ("2000-01-01T00:00:00.000Z", True),
         ("2999-01-01T00:00:00.000Z", True),
     ],
 )
-async def test_summary_deadline_applies_to_all_public_read_forms(monkeypatch, expiry, visible):
+async def test_summary_is_retained_in_all_public_read_forms(monkeypatch, expiry, visible):
     from openviking.storage.abstract_overview import render_abstract_overview
 
     fs = VikingFS(agfs=_DummyAgfs())
@@ -207,14 +206,14 @@ async def test_summary_deadline_applies_to_all_public_read_forms(monkeypatch, ex
     path = fs._uri_to_path(parent, ctx=ctx)
     files = {
         path + "/.abstract.md": render_abstract_overview(
-            0, parent, "secret", {"expires_at": expiry}
-        ).encode(),
+            0, parent, "secret"
+        ).replace("---\n", f"---\nexpires_at: {expiry}\n", 1).encode(),
         path + "/.overview.md": render_abstract_overview(
-            1, parent, "secret", {"expires_at": expiry}
-        ).encode(),
+            1, parent, "secret"
+        ).replace("---\n", f"---\nexpires_at: {expiry}\n", 1).encode(),
     }
 
-    async def stat(candidate):
+    async def stat(candidate, **kwargs):
         if candidate == path:
             return {"name": "2026", "isDir": True}
         if candidate in files:
@@ -226,7 +225,6 @@ async def test_summary_deadline_applies_to_all_public_read_forms(monkeypatch, ex
         fs._async_agfs, "read", AsyncMock(side_effect=lambda candidate: files[candidate])
     )
     monkeypatch.setattr(fs.ttl_registry, "account_may_have_records", AsyncMock(return_value=True))
-    monkeypatch.setattr(fs.ttl_registry, "summary_requires_snapshot", AsyncMock(return_value=True))
     assert ("secret" in await fs.abstract(parent, ctx=ctx)) is visible
     assert ("secret" in await fs.overview(parent, ctx=ctx)) is visible
     for filename in (".abstract.md", ".overview.md"):
@@ -382,7 +380,7 @@ async def test_create_does_not_report_success_for_invisible_expired_session(monk
         + "/.meta.json": b'{"session_id":"s1","expires_at":"2000-01-01T00:00:00.000Z","ttl_generation":"old"}'
     }
 
-    async def stat(candidate):
+    async def stat(candidate, **kwargs):
         if candidate == path:
             return {"name": "s1", "isDir": True}
         if candidate in files:
@@ -394,7 +392,6 @@ async def test_create_does_not_report_success_for_invisible_expired_session(monk
         fs._async_agfs, "read", AsyncMock(side_effect=lambda candidate: files[candidate])
     )
     monkeypatch.setattr(fs.ttl_registry, "account_may_have_records", AsyncMock(return_value=True))
-    monkeypatch.setattr(fs.ttl_registry, "summary_requires_snapshot", AsyncMock(return_value=True))
     service = SessionService.__new__(SessionService)
     service._record_lifecycle_metric = lambda *args: None
     service._new_session_auto_commit_policy = lambda: None

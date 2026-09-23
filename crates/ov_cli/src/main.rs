@@ -334,6 +334,11 @@ enum AclCommands {
 #[derive(Subcommand)]
 enum Commands {
     // --- Data Operations ---
+    /// [Data] Inspect or change an existing event/resource document's cleanup time
+    Ttl {
+        #[command(subcommand)]
+        action: TtlCommands,
+    },
     /// [Data] Set the TTL policy for future imports at a resource path; omit both values to disable
     UpdateResourceConfig {
         uri: String,
@@ -1957,7 +1962,31 @@ enum PrivacyCommands {
 }
 
 #[derive(Subcommand)]
+enum TtlCommands {
+    /// Read a live document's received time, cleanup time and resource owner
+    Get { uri: String },
+    /// Change a live document's cleanup time; requires a future ISO 8601 timestamp
+    Set {
+        uri: String,
+        #[arg(long)]
+        expires_at: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum AdminCommands {
+    /// Read runtime configuration overrides (omit --account-id for cluster settings)
+    GetConfiguration {
+        #[arg(long)]
+        account_id: Option<String>,
+    },
+    /// Patch runtime settings; JSON null removes an override and restores inheritance
+    PatchConfiguration {
+        #[arg(long)]
+        account_id: Option<String>,
+        #[arg(long, value_parser = |s: &str| serde_json::from_str::<serde_json::Value>(s))]
+        settings: serde_json::Value,
+    },
     /// Create a new account with its first admin user
     CreateAccount {
         /// Account ID to create
@@ -2723,6 +2752,8 @@ fn is_admin_subcommand(token: &str) -> bool {
             | "set-role"
             | "regenerate-key"
             | "set-account-settings"
+            | "get-configuration"
+            | "patch-configuration"
     )
 }
 
@@ -3343,6 +3374,26 @@ async fn main() {
                     "a path/URL or --manifest is required".to_string(),
                 ))
             }
+        }
+        Commands::Ttl { action } => {
+            let client = ctx.get_client();
+            let result: Result<serde_json::Value> = match action {
+                TtlCommands::Get { uri } => {
+                    client
+                        .get("/api/v1/content/ttl", &[("uri".into(), uri)])
+                        .await
+                }
+                TtlCommands::Set { uri, expires_at } => {
+                    client
+                        .patch(
+                            "/api/v1/content/ttl",
+                            &serde_json::json!({"uri": uri, "expires_at": expires_at}),
+                            &[],
+                        )
+                        .await
+                }
+            };
+            result.map(|value| output::output_success(&value, ctx.output_format, ctx.compact))
         }
         Commands::UpdateResourceConfig {
             uri,

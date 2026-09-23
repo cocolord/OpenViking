@@ -105,6 +105,30 @@ class ReindexRequest(BaseModel):
 router = APIRouter(prefix="/api/v1/content", tags=["content"])
 
 
+class UpdateTTLRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    uri: str
+    expires_at: str
+
+
+@router.get("/ttl")
+async def get_ttl(uri: str = Query(...), _ctx: RequestContext = Depends(get_request_context)):
+    """Read a live event/resource's frozen expiry and owning document URI."""
+    uri = validate_request_viking_uri(resolve_path_variables(uri), _ctx)
+    return Response(status="ok", result=await get_service().fs.get_ttl(uri, _ctx))
+
+
+@router.patch("/ttl")
+async def update_ttl(
+    request: UpdateTTLRequest, _ctx: RequestContext = Depends(get_request_context)
+):
+    """Change an existing event/resource's cleanup time; expired objects cannot be revived."""
+    uri = validate_request_viking_uri(resolve_path_variables(request.uri), _ctx)
+    return Response(
+        status="ok", result=await get_service().fs.update_ttl(uri, request.expires_at, _ctx)
+    )
+
+
 def _authorize_reindex_uri(uri: str, ctx: RequestContext) -> str:
     """Allow users to reindex only their own private namespace."""
     if ctx.role != Role.USER:

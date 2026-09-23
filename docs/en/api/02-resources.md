@@ -734,7 +734,7 @@ Possible shared response:
 
 TTL is disabled by default. Public, user and peer resources use the same lifecycle. At creation, an explicit `ttl_relative` or `ttl_absolute` takes precedence over the nearest directory policy, the resource scope policy, and the library default. Omitting both import parameters inherits that policy.
 
-TTL belongs to the actual import root: a parsed document or imported directory owns its complete subtree; a flat `no_split` file owns only itself. The deadline is frozen when the resource is created, independent of directory modification times. Re-imports, content updates and Watch refreshes preserve that deadline. Policy changes affect future resources only, including when TTL is disabled later.
+TTL belongs to the actual import root: a parsed document or imported directory owns the L2 content and attachments in its subtree; a flat `no_split` file owns only itself. The deadline is frozen when the resource is created, independent of directory modification times. Re-imports, content updates and Watch refreshes preserve that deadline. Policy changes affect future resources only, including when TTL is disabled later.
 
 ```python
 client.add_resource("./guide.md", ttl_relative=7)
@@ -752,7 +752,7 @@ HTTP uses `POST /api/v1/resources` for imports and `PATCH /api/v1/resources/conf
 
 `GET /api/v1/resources/ttl?uri=...` returns the effective frozen metadata. `PATCH /api/v1/resources/ttl` accepts `uri` and an ISO 8601 `expires_at` to revise a live resource's existing deadline. It preserves the resource generation and does not change sibling resources or directory policy. It cannot restore expired data or add TTL to unmanaged historical resources. An enclosing resource's earlier expiry still limits its children.
 
-Expired files, descendants, summaries and search candidates become invisible before asynchronous physical cleanup finishes. Cleanup reuses the persistent task queue and strict file/vector deletion; failure keeps the cleanup record for retry. Copy, move and OVPack preserve frozen deadlines. TTL state stays in OpenViking metadata and does not add cloud vector fields. A Watch must target an import root whose descendants share its lifetime. Refreshing an enclosing directory containing independently expiring resources is rejected, including after their cleanup, to prevent recreating them; watch those resources separately.
+Expired L2 content, attachments and their search candidates become invisible before asynchronous physical cleanup finishes. All L0/L1 files and vectors remain, including summaries inside expired resources and directories whose content is fully removed. TTL neither hides nor rebuilds these summaries; they can still contain information from expired content. Cleanup reuses the persistent task queue and strict deletion, confirming only L2 files and vectors are cleared; failure keeps the cleanup record for retry. Owner metadata remains as a fence against delayed content writes. Copy, move and OVPack preserve frozen deadlines. TTL state stays in OpenViking metadata and does not add cloud vector fields. A Watch must target an import root whose descendants share its lifetime. Refreshing an enclosing directory containing independently expiring resources is rejected, including after their cleanup, to prevent recreating them; watch those resources separately.
 
 ## Related Documentation
 
@@ -761,3 +761,5 @@ Expired files, descendants, summaries and search candidates become invisible bef
 - [Retrieval](06-retrieval.md) - Search and context acquisition
 - [ovpack Guide](../guides/09-ovpack.md) - Detailed ovpack import/export documentation
 - [OpenViking Assets](../guides/18-openviking-assets.md) - Declarative resource-set protocol and usage guide
+
+Events and resources share the [document TTL API](12-content.md#document-expiry) and `ov ttl get/set`.

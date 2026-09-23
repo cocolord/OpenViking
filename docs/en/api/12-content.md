@@ -826,3 +826,22 @@ Task records are persisted under `/local/{account_id}/_system/tasks/{user_id}/{t
 - [File System](03-filesystem.md) - directory and file operations
 - [Retrieval](06-retrieval.md) - semantic and pattern search
 - [Background Tasks](17-tasks.md) - track asynchronous reindex tasks
+
+## Document expiry
+
+`GET /api/v1/content/ttl?uri=...` returns an event or resource's frozen deadline; unmanaged objects return only `uri`. `PATCH /api/v1/content/ttl` revises the deadline of a live, managed document:
+
+```json
+{"uri": "viking://user/alice/memories/events/example.txt", "expires_at": "2027-01-01T00:00:00Z"}
+```
+
+The new deadline must be an ISO 8601 timestamp in the future. Under the object lock, the server rechecks permissions, identity and current expiry, then updates only `expires_at` and the persistent cleanup registration. Content, `received_at`, `ttl_days` and `ttl_generation` remain unchanged. Old cleanup deliveries recheck the source deadline and skip extended objects; no memory extraction or re-embedding is triggered.
+
+For a resource file inheriting its import root's lifetime, `owner_uri` identifies the root whose document tree will be updated. If an independently managed child is limited by its parent's earlier deadline, the response includes effective `expires_at` and its own `owner_expires_at`. Extend the parent first before extending a child beyond that deadline. This endpoint cannot restore expired objects, change directory defaults or add TTL to unmanaged historical documents.
+
+```bash
+ov ttl get viking://user/alice/memories/events/example.txt
+ov ttl set viking://user/alice/memories/events/example.txt --expires-at 2027-01-01T00:00:00Z
+```
+
+Python HTTP SDK methods and MCP tools are `get_ttl` and `update_ttl`. See [TTL configuration](../configuration/01-server.md#ttl) for global, scope and directory defaults. TTL clears L2 only; all L0/L1 files, vectors and their directory scaffolding remain.

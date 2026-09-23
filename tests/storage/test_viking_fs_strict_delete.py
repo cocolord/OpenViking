@@ -64,7 +64,7 @@ async def test_strict_recursive_delete_clears_orphan_vector_subtree_when_source_
 
     await fs.rm(session_uri, recursive=True, ctx=_ctx(), strict=True)
 
-    vector_store.delete_uris.assert_awaited_once()
+    vector_store.delete_uris.assert_not_awaited()
     vector_store.delete_uri_scope.assert_awaited_once_with(
         _ctx(),
         session_uri,

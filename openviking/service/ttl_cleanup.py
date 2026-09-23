@@ -5,8 +5,8 @@
 Visibility is enforced synchronously by the read barriers.  This service only
 does the slower physical half: it walks the small TTL registry, schedules due
 records on QueueFS, and removes one exact object incarnation under its path
-lock.  A task completes only after filesystem data, vector records, and its
-registry record are all gone.
+lock. A task completes only after L2 content, its vectors, and its registry
+record are gone. L0/L1 summaries and their directory scaffolding are retained.
 """
 
 from __future__ import annotations
@@ -33,16 +33,13 @@ from openviking.service.periodic_task import PeriodicTask
 from openviking.service.task_store import SYSTEM_TASK_ACCOUNT_ID, SYSTEM_TASK_USER_ID
 from openviking.service.task_tracker import TaskStatus, get_task_tracker
 from openviking.service.task_tracker_concurrency import OwnerLoopDispatcher, run_to_completion
-from openviking.service.task_work_index import detach_task_context
 from openviking.session.memory.utils.messages import parse_memory_file_with_fields
 from openviking.session.ttl_fence import reconcile_session_ttl
 from openviking.storage.queuefs.named_queue import DequeueHandlerBase
 from openviking.storage.queuefs.process_result import ProcessResult
-from openviking.storage.queuefs.semantic_msg import SemanticMsg, build_semantic_coalesce_key
 from openviking.storage.ttl_registry import TTLRecord
 from openviking.utils.time_utils import format_iso8601
 from openviking_cli.session.user_id import UserIdentifier
-from openviking_cli.utils import VikingURI
 from openviking_cli.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -192,7 +189,6 @@ class TTLCleanupService:
         if scheduled.object_type == OBJECT_TYPE_SESSION:
             lease = await viking_fs._async_agfs.pathlock_acquire_tree(object_path)
         else:
-            parent_uri = VikingURI(scheduled.object_uri).parent.uri
             lease = await viking_fs._async_agfs.pathlock_acquire_batch(
                 [
                     {
@@ -214,14 +210,6 @@ class TTLCleanupService:
                         if scheduled.object_type == OBJECT_TYPE_RESOURCE_FILE
                         else []
                     ),
-                    {
-                        "path": viking_fs._uri_to_path(f"{parent_uri}/.abstract.md", ctx=ctx),
-                        "kind": "exact",
-                    },
-                    {
-                        "path": viking_fs._uri_to_path(f"{parent_uri}/.overview.md", ctx=ctx),
-                        "kind": "exact",
-                    },
                 ]
             )
         try:
@@ -269,13 +257,8 @@ class TTLCleanupService:
                 ctx=ctx,
                 lease_ref=lease,
                 strict=True,
+                preserve_summaries=True,
             )
-            if scheduled.object_type != OBJECT_TYPE_SESSION:
-                await self._invalidate_event_parent(
-                    event_uri=scheduled.object_uri,
-                    ctx=ctx,
-                    lease=lease,
-                )
             removed = await registry.remove_if_generation(
                 scheduled.account_id, scheduled.object_uri, scheduled.generation
             )
@@ -290,61 +273,6 @@ class TTLCleanupService:
             return {"deleted": True, "source_missing": live is None}
         finally:
             await viking_fs._async_agfs.pathlock_release(lease)
-
-    async def _invalidate_event_parent(
-        self,
-        *,
-        event_uri: str,
-        ctx: RequestContext,
-        lease: Any,
-    ) -> None:
-        """Remove shared event summaries/vectors and queue a fresh rebuild.
-
-        The caller holds one batch lease over the event and both sidecars. A
-        newer coalesced semantic message invalidates any older in-flight
-        summary before the files and exact parent L0/L1 vectors are removed.
-        Rebuild is asynchronous; invalidation itself is part of strict cleanup.
-        """
-        from openviking.core.namespace import context_type_for_uri
-
-        context_type = context_type_for_uri(event_uri)
-        parent_uri = VikingURI(event_uri).parent.uri
-        queue_manager = self._service._queue_manager
-        semantic_queue = queue_manager.get_queue(queue_manager.SEMANTIC, allow_create=True)
-        semantic_msg = SemanticMsg(
-            uri=parent_uri,
-            context_type=context_type,
-            recursive=False,
-            account_id=ctx.account_id,
-            user_id=ctx.user.user_id,
-            group_ids=ctx.group_ids,
-            role=str(ctx.role),
-            changes={"deleted": [event_uri]},
-            generation_trigger="ttl_cleanup",
-            coalesce_key=build_semantic_coalesce_key(
-                context_type=context_type,
-                uri=parent_uri,
-                account_id=ctx.account_id,
-                user_id=ctx.user.user_id,
-            ),
-        )
-        sidecars = [f"{parent_uri}/.abstract.md", f"{parent_uri}/.overview.md"]
-        for sidecar_uri in sidecars:
-            await self._service.viking_fs.rm(
-                sidecar_uri,
-                recursive=False,
-                ctx=ctx,
-                lease_ref=lease,
-                strict=True,
-            )
-        await self._service.viking_fs._delete_from_vector_store([parent_uri], ctx=ctx)
-        await self._service.viking_fs._confirm_vector_uris_cleared([parent_uri], ctx=ctx)
-        # Rebuilding the still-live siblings is maintenance after invalidation,
-        # not part of proving this object's physical deletion.  Keep it outside
-        # the cleanup task so a later LLM failure cannot turn a completed strict
-        # cleanup into FAILED or delay its completion.
-        with detach_task_context():
-            await semantic_queue.enqueue(semantic_msg)
 
     async def _read_live_record(
         self, scheduled: TTLRecord, ctx: RequestContext

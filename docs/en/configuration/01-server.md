@@ -465,3 +465,37 @@ Provider-, parser-, storage-, and encryption-specific fields are documented in [
   }
 }
 ```
+
+## TTL
+
+TTL is disabled by default. `ttl` in `ov.conf` supplies the startup baseline; cluster/account runtime overrides reuse the existing configuration manager, without adding cloud vector fields. A library's global policy is its account's `ttl.global`. The scopes are user events, peer events, sessions, and public/user/peer resources. User and peer IDs are matched by URI scope; there is no separate per-user configuration layer.
+
+New objects resolve “explicit resource import parameters (resources only) → nearest explicit directory policy → scope default → library global default → disabled”. `inherit` continues upward; `disabled` stops inheritance. `days` requires positive whole days; `absolute` is limited to resource imports and resource scope/directory policies. Directory matching respects path boundaries: `events/2026` overrides `events`, without matching `events/20260`.
+
+```json
+{
+  "ttl": {
+    "global": {"mode": "disabled"},
+    "user_events": {"mode": "days", "ttl_days": 60},
+    "peer_events": {"mode": "inherit"},
+    "sessions": {"mode": "days", "ttl_days": 30},
+    "resources": {"mode": "days", "ttl_days": 90},
+    "directories": {
+      "viking://user/alice/memories/events/2026": {"mode": "days", "ttl_days": 7}
+    }
+  }
+}
+```
+
+Runtime endpoints: `GET/PATCH /api/v1/admin/configuration` for cluster overrides (ROOT), and `GET/PATCH /api/v1/admin/accounts/{account_id}/configuration` for library overrides (that account's ADMIN or ROOT). PATCH bodies use `{"settings": {"ttl": ...}}`. Omitted fields stay unchanged; `null` removes the current layer's override and restores fallback. Updating one directory preserves other policies. GET returns explicit overrides for that layer, not frozen object deadlines.
+
+```bash
+ov admin get-configuration --account-id default
+ov admin patch-configuration --account-id default --settings '{"ttl":{"global":{"mode":"days","ttl_days":90}}}'
+```
+
+Omitting `--account-id` selects the cluster layer. Python HTTP SDK methods are `admin_get_configuration(account_id)` and `admin_patch_configuration(settings, account_id)`. Public event writes, memory extraction, session creation and resource imports share the merged runtime policy. Changes affect new objects only; existing deadlines stay frozen, and successful session commits renew using that session's saved `ttl_days`. Use [document expiry](../api/12-content.md#document-expiry) to revise an existing event/resource deadline.
+
+Expiry filtering and cleanup apply only to L2. All L0/L1 files and vectors remain readable and searchable, including those inside expired objects after every content file is removed.
+
+These are native OV routes. A hosted console or gateway must forward the matching configuration and requests; adding OV routes does not automatically expose them through an existing cloud proxy. This PR does not change public-cloud services or billing.

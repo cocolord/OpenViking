@@ -799,6 +799,38 @@ class AsyncHTTPClient:
         )
         return self._handle_response_data(response).get("result", {})
 
+    async def get_ttl(self, uri: str) -> Dict[str, Any]:
+        """Read a live event/resource document's frozen expiry."""
+        response = await self._request(
+            "GET", "/api/v1/content/ttl", params={"uri": VikingURI.normalize(uri)}
+        )
+        return self._handle_response_data(response).get("result", {})
+
+    async def update_ttl(self, uri: str, expires_at: str) -> Dict[str, Any]:
+        """Change a live document's expiry; policy changes remain incremental."""
+        response = await self._request(
+            "PATCH",
+            "/api/v1/content/ttl",
+            json={"uri": VikingURI.normalize(uri), "expires_at": expires_at},
+        )
+        return self._handle_response_data(response).get("result", {})
+
+    async def admin_get_configuration(self, account_id: Optional[str] = None) -> Dict[str, Any]:
+        """Read explicit runtime settings; omit account_id for the cluster layer."""
+        prefix = f"accounts/{self._path_segment(account_id)}/" if account_id else ""
+        response = await self._request("GET", f"/api/v1/admin/{prefix}configuration")
+        return self._handle_response_data(response).get("result", {})
+
+    async def admin_patch_configuration(
+        self, settings: Dict[str, Any], account_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Apply the existing three-state PATCH: null restores inheritance."""
+        prefix = f"accounts/{self._path_segment(account_id)}/" if account_id else ""
+        response = await self._request(
+            "PATCH", f"/api/v1/admin/{prefix}configuration", json={"settings": settings}
+        )
+        return self._handle_response_data(response).get("result", {})
+
     async def update_resource_ttl(self, uri: str, expires_at: str) -> Dict[str, Any]:
         response = await self._request(
             "PATCH",
@@ -2326,6 +2358,20 @@ class SyncHTTPClient:
 
     def get_resource_ttl(self, uri: str) -> Dict[str, Any]:
         return run_async(self._async_client.get_resource_ttl(uri))
+
+    def get_ttl(self, uri: str) -> Dict[str, Any]:
+        return run_async(self._async_client.get_ttl(uri))
+
+    def update_ttl(self, uri: str, expires_at: str) -> Dict[str, Any]:
+        return run_async(self._async_client.update_ttl(uri, expires_at))
+
+    def admin_get_configuration(self, account_id: Optional[str] = None) -> Dict[str, Any]:
+        return run_async(self._async_client.admin_get_configuration(account_id))
+
+    def admin_patch_configuration(
+        self, settings: Dict[str, Any], account_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        return run_async(self._async_client.admin_patch_configuration(settings, account_id))
 
     def update_resource_ttl(self, uri: str, expires_at: str) -> Dict[str, Any]:
         return run_async(self._async_client.update_resource_ttl(uri, expires_at))

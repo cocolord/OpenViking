@@ -397,6 +397,8 @@ JSON 输出 - 错误：
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/v1/content/read` | 读取完整内容（L2） |
+| GET | `/api/v1/content/ttl` | 读取 event/resource 的冻结期限 |
+| PATCH | `/api/v1/content/ttl` | 修改存活 event/resource 的到期时间 |
 | GET | `/api/v1/content/abstract` | 读取摘要（L0） |
 | GET | `/api/v1/content/overview` | 读取概览（L1） |
 | GET | `/api/v1/content/download` | 下载原始文件字节 |

@@ -63,7 +63,6 @@ class DirNode:
     file_summaries: List[Optional[Dict[str, str]]]
     children_abstracts: List[Optional[Dict[str, str]]]
     pending: int
-    ttl_snapshot: Optional[dict] = None
     pending_snapshot: int = 0
     sampled_children_dirs: Optional[Set[str]] = None
     sampled_file_paths: Optional[Set[str]] = None
@@ -552,14 +551,8 @@ class SemanticTreeExecutor:
 
         try:
             children_dirs, file_paths = await self._list_dir(dir_uri, "_dispatch_dir")
-            from openviking.storage.resource_ttl import resource_ttl_snapshot
-
-            ttl_snapshot = await resource_ttl_snapshot(
-                self._viking_fs, [dir_uri, *file_paths, *children_dirs], ctx=self._ctx
-            )
             if self._generation_trigger == "content_copy":
                 node = await self._prepare_transfer_node(dir_uri, children_dirs, file_paths)
-                node.ttl_snapshot = ttl_snapshot
                 self._nodes[dir_uri] = node
                 self._schedule_overview(dir_uri)
                 return False
@@ -640,7 +633,6 @@ class SemanticTreeExecutor:
                     sampled_file_paths=sampled_file_paths,
                     dispatched=True,
                 )
-                node.ttl_snapshot = ttl_snapshot
                 self._nodes[dir_uri] = node
                 for file_path in sorted(required_file_paths):
                     self._schedule_file(dir_uri, file_path)
@@ -684,7 +676,6 @@ class SemanticTreeExecutor:
                 sampled_file_paths=sampled_file_paths,
                 dispatched=True,
             )
-            node.ttl_snapshot = ttl_snapshot
             self._nodes[dir_uri] = node
 
             if pending == 0:
@@ -1322,7 +1313,6 @@ class SemanticTreeExecutor:
         sampled_entries: int,
         consume_pending: int,
         missing_summary_entries: Optional[int] = None,
-        expires_at: Optional[str] = None,
     ) -> AbstractOverviewWriteResult:
         metadata: Dict[str, Any] = {
             "generated_by": {
@@ -1335,20 +1325,6 @@ class SemanticTreeExecutor:
                 missing_summary_entries=missing_summary_entries,
             ),
         }
-        from openviking.storage.resource_ttl import resource_ttl_snapshot
-
-        node = self._nodes[dir_uri]
-
-        async def ttl_sources_changed():
-            current = await resource_ttl_snapshot(
-                self._viking_fs, [dir_uri, *node.file_paths, *node.children_dirs], ctx=self._ctx
-            )
-            return current != node.ttl_snapshot or bool(
-                current and any(not value[0] for value in current.values())
-            )
-
-        if expires_at is not None:
-            metadata["expires_at"] = expires_at
         source_root = self._semantic_resource_root or self._root_uri
         if dir_uri == source_root and self._source:
             metadata["source"] = self._source
@@ -1360,7 +1336,6 @@ class SemanticTreeExecutor:
                 abstract=abstract,
                 ctx=self._ctx,
                 is_stale=self._is_stale,
-                is_stale_locked=ttl_sources_changed,
                 metadata=metadata,
                 consume_pending=consume_pending,
                 lock=self._lock,
@@ -1430,36 +1405,6 @@ class SemanticTreeExecutor:
                     # Rebuilt sidecars must also replace their stale vectors.
                     need_vectorize = should_write
                     children_changed = should_write
-            expires_at = None
-            if node.ttl_snapshot is not None:
-                from openviking.storage.abstract_overview import (
-                    SUMMARY_NO_EXPIRY,
-                    parse_abstract_overview,
-                )
-
-                deadlines = [value[2] for value in node.ttl_snapshot.values() if value[2]]
-                # Child summaries carry the earliest deadline of their own inputs.
-                for child_uri in node.children_dirs:
-                    try:
-                        raw = await self._viking_fs.read_file(
-                            f"{child_uri}/.abstract.md", ctx=self._ctx
-                        )
-                    except Exception as exc:
-                        from openviking.server.error_mapping import is_storage_not_found
-
-                        if not is_storage_not_found(exc):
-                            raise
-                        # Drop an already cached child abstract if its TTL has
-                        # expired or cleanup removed it while this task waited.
-                        child = {"name": child_uri.rsplit("/", 1)[-1], "abstract": ""}
-                    else:
-                        document = parse_abstract_overview(raw)
-                        deadline = document.metadata.get("expires_at")
-                        if deadline:
-                            deadlines.append(deadline)
-                        child = {"name": child_uri.rsplit("/", 1)[-1], "abstract": document.body}
-                    node.children_abstracts[node.child_index[child_uri]] = child
-                expires_at = min(deadlines) if deadlines else SUMMARY_NO_EXPIRY
             if should_write and (overview is None or abstract is None):
                 async with node.lock:
                     file_summaries = self._finalize_file_summaries(node)
@@ -1504,7 +1449,6 @@ class SemanticTreeExecutor:
                         sampled_entries=sampled_entries,
                         consume_pending=node.pending_snapshot,
                         missing_summary_entries=node.missing_summary_entries,
-                        expires_at=expires_at,
                     )
                     if dir_uri == self._root_uri:
                         self._root_write_result = write_result

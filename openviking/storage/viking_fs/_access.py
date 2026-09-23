@@ -25,6 +25,7 @@ from openviking.core.ttl import (
 from openviking.resource.watch_storage import is_watch_task_control_uri
 from openviking.server.error_mapping import is_not_found_error, is_storage_not_found
 from openviking.server.identity import RequestContext, Role
+from openviking.storage.abstract_overview import is_abstract_overview_uri
 from openviking.storage.acl import (
     AclAction,
     AclEntry,
@@ -777,44 +778,6 @@ class _AccessMixin:
             )
         return await self._ttl_uri_visible(visible_uri, ctx, path=path)
 
-    async def _ttl_summary_visible(
-        self,
-        uri: str,
-        raw: bytes | str,
-        ctx: RequestContext,
-        *,
-        vector_abstract: Optional[str] = None,
-    ) -> bool:
-        from openviking.storage.abstract_overview import body_for_preview, parse_abstract_overview
-
-        try:
-            document = parse_abstract_overview(raw)
-        except ValueError:
-            return False
-        expires_at = document.metadata.get("expires_at")
-        if expires_at:
-            if vector_abstract is not None:
-                from openviking.utils.embedding_utils import _truncate_abstract_bytes
-
-                # A regenerated sidecar can have a later deadline while its
-                # asynchronous vector still contains the old expired summary.
-                if (
-                    vector_abstract.strip()
-                    != _truncate_abstract_bytes(body_for_preview(raw)).strip()
-                ):
-                    return False
-            return not hidden_by_ttl(expires_at)
-        if ttl_scope_for_uri(uri) in {"user_events", "peer_events", "resources"}:
-            # Legacy summaries have no trustworthy dependency deadline. Once
-            # TTL is in use they must be regenerated before serving their body.
-            directory_uri = (
-                uri.rsplit("/", 1)[0] if uri.endswith(("/.abstract.md", "/.overview.md")) else uri
-            )
-            return not await self.ttl_registry.summary_requires_snapshot(
-                ctx.account_id, directory_uri
-            )
-        return True
-
     async def _ttl_uri_visible(
         self,
         uri: str,
@@ -822,17 +785,38 @@ class _AccessMixin:
         *,
         path: Optional[str] = None,
         require_source: bool = False,
-        vector_abstract: Optional[str] = None,
     ) -> bool:
         """Return object-level TTL visibility without recursing through VikingFS.
 
         Event expiry is stored in the event text file itself. Session expiry
-        is stored at the session root and hides the complete session subtree.
+        is stored at the session root and hides its L2 content.
         Directory policy nodes are never visibility objects by themselves.
         Vector candidates require a readable source: stale index rows must not
         become visible when cleanup has already removed their source metadata.
         """
+        # TTL controls L2 content only; summaries and their containers survive.
+        if is_abstract_overview_uri(uri):
+            return True
         scope = ttl_scope_for_uri(uri)
+        if scope is None:
+            return True
+        if not ttl_enabled() and not await self.ttl_registry.account_may_have_records(
+            ctx.account_id
+        ):
+            # Never cache a miss: another worker can import the first frozen TTL
+            # object while policy is disabled. Default-off reads skip metadata.
+            return True
+        if scope in {"resources", "sessions"} and not require_source:
+            for candidate in [path] if path is not None else self._read_paths(uri, ctx=ctx):
+                try:
+                    info = await self._async_agfs.stat(candidate, bypass_cache=True)
+                except Exception as exc:
+                    if is_storage_not_found(exc):
+                        continue
+                    raise
+                if info.get("isDir", False):
+                    return True
+                break
         if scope == "resources":
             from openviking.storage.internal_names import is_ttl_metadata_name
             from openviking.storage.resource_ttl import resource_ttl_visible
@@ -842,37 +826,7 @@ class _AccessMixin:
                 return target is not None and await resource_ttl_visible(
                     self, target[1], ctx=ctx, require_source=True
                 )
-            if ttl_enabled() or await self.ttl_registry.account_may_have_records(ctx.account_id):
-                if not await resource_ttl_visible(
-                    self, uri, ctx=ctx, require_source=require_source
-                ):
-                    return False
-        if scope != "sessions" and uri.rsplit("/", 1)[-1] in {".abstract.md", ".overview.md"}:
-            candidates = [path] if path is not None else self._read_paths(uri, ctx=ctx)
-            for candidate in candidates:
-                try:
-                    await self._async_agfs.stat(candidate)
-                    raw = self._handle_agfs_read(await self._async_agfs.read(candidate))
-                except Exception as exc:
-                    if is_storage_not_found(exc):
-                        continue
-                    if require_source:
-                        raise
-                    return False
-                return await self._ttl_summary_visible(
-                    uri, raw, ctx, vector_abstract=vector_abstract
-                )
-            return False
-        if scope is None or scope == "resources":
-            return True
-        if not ttl_enabled() and not await self.ttl_registry.account_may_have_records(
-            ctx.account_id
-        ):
-            # Default-off accounts have no marker. Avoid parsing event/session
-            # metadata on their hot read paths. Marker misses are never cached:
-            # another process may import the first frozen TTL object even while
-            # policy is disabled.
-            return True
+            return await resource_ttl_visible(self, uri, ctx=ctx, require_source=require_source)
 
         parts = self._safe_uri_parts(uri)
         if scope == "sessions":

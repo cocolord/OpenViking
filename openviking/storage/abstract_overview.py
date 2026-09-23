@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
-    Awaitable,
     Callable,
     Dict,
     Mapping,
@@ -38,10 +37,7 @@ logger = get_logger(__name__)
 
 ABSTRACT_OVERVIEW_FILENAMES = frozenset({".abstract.md", ".overview.md"})
 EMBEDDING_METADATA_FIELDS = ("directory",)
-_METADATA_ORDER = ("directory", "source", "generated_by", "freshness", "expires_at")
-# A checked dependency set without expiring members has an explicit deadline;
-# absence remains distinguishable from a legacy summary with unknown provenance.
-SUMMARY_NO_EXPIRY = "9999-12-31T23:59:59.999Z"
+_METADATA_ORDER = ("directory", "source", "generated_by", "freshness")
 _MAX_SOURCE_URI_CHARS = 4096
 _MAX_LABEL_CHARS = 128
 _T = TypeVar("_T")
@@ -184,13 +180,6 @@ def _normalize_metadata(metadata: Mapping[str, Any]) -> Dict[str, Any]:
             )
         normalized["freshness"] = counters
 
-    if "expires_at" in metadata:
-        from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
-
-        try:
-            normalized["expires_at"] = format_iso8601(parse_iso_datetime(metadata["expires_at"]))
-        except (TypeError, ValueError) as exc:
-            raise AbstractOverviewFormatError("invalid summary expires_at") from exc
     return {field: normalized[field] for field in _METADATA_ORDER if field in normalized}
 
 
@@ -460,7 +449,6 @@ async def write_abstract_overview(
     abstract: str,
     ctx: Optional[RequestContext],
     is_stale: Callable[[], bool],
-    is_stale_locked: Optional[Callable[[], Awaitable[bool]]] = None,
     metadata: Optional[Mapping[str, Any]] = None,
     consume_pending: Optional[int] = None,
     lock: Optional[Dict[str, Any]] = None,
@@ -490,10 +478,6 @@ async def write_abstract_overview(
         if is_stale():
             logger.info("%s Skipping stale semantic write for %s", log_prefix, dir_uri)
             return AbstractOverviewWriteResult(wrote=False)
-        if is_stale_locked is not None and await is_stale_locked():
-            logger.info("%s Skipping changed semantic write for %s", log_prefix, dir_uri)
-            return AbstractOverviewWriteResult(wrote=False)
-
         existing_overview = await _read_existing_document(viking_fs, overview_uri, ctx)
         existing_abstract = await _read_existing_document(viking_fs, abstract_uri, ctx)
         merged_metadata = dict(metadata or {})

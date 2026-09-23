@@ -953,9 +953,9 @@ class ResourceProcessor:
                     if expected_ttl_generation is not None:
                         # A Watch owns one import root. Replaying a parent that
                         # has independently expiring descendants could recreate
-                        # them after cleanup; the persistent summary marker also
+                        # them after cleanup; the persistent descendant marker also
                         # covers descendants already physically removed.
-                        if await viking_fs.ttl_registry.summary_requires_snapshot(
+                        if await viking_fs.ttl_registry.has_ttl_descendants(
                             ctx.account_id, root_uri
                         ):
                             raise InvalidArgumentError(

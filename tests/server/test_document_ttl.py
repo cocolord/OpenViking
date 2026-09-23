@@ -1,0 +1,330 @@
+# Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
+# SPDX-License-Identifier: AGPL-3.0
+"""TTL configuration and live-document changes through the public HTTP surface."""
+
+import asyncio
+import json
+import os
+import socket
+from datetime import timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import httpx
+import pytest
+import uvicorn
+
+from openviking.core import ttl
+from openviking.service.ttl_cleanup import TTLCleanupService
+from openviking.session.memory.utils.memory_file_utils import MemoryFileUtils
+from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
+from openviking_cli.utils.config import get_openviking_config, set_openviking_config
+from tests.storage.test_transfer_merge_binding import root_ctx
+
+ROOT = "viking://user/default"
+CONFIG = "/api/v1/admin/accounts/default/configuration"
+
+
+@pytest.fixture(autouse=True)
+def restore_config():
+    original = get_openviking_config()
+    yield
+    set_openviking_config(original)
+
+
+@pytest.fixture
+async def ttl_admin_app(app):
+    # ASGI test apps intentionally omit the auth lifespan. Match the existing
+    # settings tests' admin gate while exercising the real config/storage stack.
+    app.state.api_key_manager = SimpleNamespace(
+        refresh_accounts_from_store=AsyncMock(),
+        refresh_account_users_from_store=AsyncMock(),
+        ensure_account_active=lambda account: None,
+        get_accounts=lambda: [{"account_id": "default"}],
+    )
+    return app
+
+
+@pytest.fixture
+async def client(ttl_admin_app):
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=ttl_admin_app), base_url="http://testserver"
+    ) as client:
+        yield client
+
+
+async def request(client, method, path, **kwargs):
+    response = await getattr(client, method)(path, **kwargs)
+    assert response.status_code == 200, response.text
+    return response.json()["result"]
+
+
+async def write(client, uri):
+    await request(
+        client,
+        "post",
+        "/api/v1/content/write",
+        json={
+            "uri": uri,
+            "content": "Keep this document.",
+            "mode": "create",
+            "processing_mode": "vectors_only",
+            "wait": True,
+        },
+    )
+    return await request(client, "get", "/api/v1/content/ttl", params={"uri": uri})
+
+
+@pytest.mark.asyncio
+async def test_account_configuration_reaches_all_creation_paths_and_is_incremental(client, service):
+    await request(
+        client,
+        "patch",
+        "/api/v1/admin/configuration",
+        json={
+            "settings": {"ttl": {"global": {"mode": "days", "ttl_days": 30}}},
+        },
+    )
+    await request(
+        client,
+        "patch",
+        CONFIG,
+        json={
+            "settings": {
+                "ttl": {
+                    "global": {"mode": "days", "ttl_days": 20},
+                    "directories": {
+                        ROOT + "/memories/events": {"mode": "days", "ttl_days": 7},
+                        ROOT + "/memories/events/2026": {"mode": "days", "ttl_days": 5},
+                    },
+                }
+            }
+        },
+    )
+    snapshots = {}
+    for suffix, days in [
+        ("memories/events/a.MD", 7),
+        ("memories/events/2026/a.txt", 5),
+        ("peers/p1/memories/events/.note.txt", 20),
+        ("resources/a.txt", 20),
+    ]:
+        uri = ROOT + "/" + suffix
+        fields = await write(client, uri)
+        assert fields["ttl_days"] == days
+        assert parse_iso_datetime(fields["expires_at"]) - parse_iso_datetime(
+            fields["received_at"]
+        ) == timedelta(days=days)
+        snapshots[uri] = fields
+    await request(client, "post", "/api/v1/sessions", json={"session_id": "ttl-config"})
+    meta = json.loads(
+        await service.viking_fs.read_file(ROOT + "/sessions/ttl-config/.meta.json", ctx=root_ctx())
+    )
+    assert meta["ttl_days"] == 20
+    assert (await write(client, "viking://resources/library.txt"))["ttl_days"] == 20
+    # Removing this account's override restores the existing cluster baseline.
+    await request(client, "patch", CONFIG, json={"settings": {"ttl": None}})
+    assert (await write(client, ROOT + "/memories/events/new.txt"))["ttl_days"] == 30
+    for uri, frozen in snapshots.items():
+        assert await request(client, "get", "/api/v1/content/ttl", params={"uri": uri}) == frozen
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "memories/events/a.txt",
+        "memories/events/a.MD",
+        "memories/events/.note.txt",
+        "peers/p1/memories/events/a.txt",
+        "resources/a.txt",
+    ],
+)
+async def test_expiry_change_supersedes_cleanup_and_preserves_content(
+    client, service, monkeypatch, suffix
+):
+    await request(
+        client,
+        "patch",
+        CONFIG,
+        json={
+            "settings": {"ttl": {"global": {"mode": "days", "ttl_days": 7}}},
+        },
+    )
+    uri = ROOT + "/" + suffix
+    original = await write(client, uri)
+    fs, ctx = service.viking_fs, root_ctx()
+    raw = await fs.read_file(uri, ctx=ctx)
+    record = await fs.ttl_registry.get(ctx.account_id, uri)
+    old_expiry = parse_iso_datetime(original["expires_at"])
+    new_expiry = format_iso8601(old_expiry + timedelta(days=7))
+    changed = await request(
+        client,
+        "patch",
+        "/api/v1/content/ttl",
+        json={
+            "uri": uri,
+            "expires_at": new_expiry,
+        },
+    )
+    assert changed == {**original, "expires_at": new_expiry}
+    assert (await fs.ttl_registry.get(ctx.account_id, uri)).expires_at == new_expiry
+    if "/events/" in uri:
+        before, after = (
+            MemoryFileUtils.read(raw),
+            MemoryFileUtils.read(await fs.read_file(uri, ctx=ctx)),
+        )
+        assert before.content == after.content
+        assert after.extra_fields == {**before.extra_fields, "expires_at": new_expiry}
+    else:
+        assert await fs.read_file(uri, ctx=ctx) == raw
+    real_expired = ttl.is_expired
+    monkeypatch.setattr(
+        ttl,
+        "is_expired",
+        lambda value, **_: real_expired(value, now=old_expiry + timedelta(seconds=1)),
+    )
+    cleanup = TTLCleanupService(service=service, service_loop=asyncio.get_running_loop())
+    assert (await cleanup._cleanup_record(record))["skipped"] == "renewed"
+    assert await fs.exists(uri, ctx=ctx)
+    monkeypatch.setattr(
+        ttl,
+        "is_expired",
+        lambda value, **_: real_expired(value, now=old_expiry + timedelta(days=8)),
+    )
+    response = await client.patch(
+        "/api/v1/content/ttl",
+        json={
+            "uri": uri,
+            "expires_at": format_iso8601(old_expiry + timedelta(days=20)),
+        },
+    )
+    assert response.status_code == 404
+    assert (await cleanup._cleanup_record(await fs.ttl_registry.get(ctx.account_id, uri)))[
+        "deleted"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cli_sdk_configuration_and_document_expiry_chain(ttl_admin_app, service, tmp_path):
+    from openviking_cli.client.http import AsyncHTTPClient
+
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    server = uvicorn.Server(
+        uvicorn.Config(
+            ttl_admin_app, host="127.0.0.1", port=port, lifespan="off", log_level="error"
+        )
+    )
+    serving = asyncio.create_task(server.serve())
+    for _ in range(100):
+        if server.started:
+            break
+        await asyncio.sleep(0.01)
+    assert server.started
+    url = f"http://127.0.0.1:{port}"
+    account = "default"
+    api_key = "test-cli-key"
+    uri = ROOT + "/memories/events/cli.txt"
+    sdk = AsyncHTTPClient(
+        url=url,
+        api_key=api_key,
+        account=account,
+        user="default",
+        actor_peer_id="",
+        extra_headers={},
+    )
+    await sdk.initialize()
+    try:
+        policy = {"ttl": {"global": {"mode": "days", "ttl_days": 7}}}
+        binary = os.getenv("OV_TTL_TEST_CLI")
+        if binary:
+            config = tmp_path / "ovcli.conf"
+            config.write_text(
+                json.dumps(
+                    {
+                        "url": url,
+                        "api_key": api_key,
+                        "account": account,
+                        "user": "default",
+                        "language": "en",
+                    }
+                )
+            )
+
+            async def cli(*args):
+                process = await asyncio.create_subprocess_exec(
+                    binary,
+                    "--output",
+                    "json",
+                    *args,
+                    env={**os.environ, "OPENVIKING_CLI_CONFIG_FILE": str(config)},
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await asyncio.wait_for(process.communicate(), 30)
+                assert process.returncode == 0, stderr.decode()
+                return json.loads(stdout)["result"]
+
+            await cli(
+                "admin",
+                "patch-configuration",
+                "--account-id",
+                account,
+                "--settings",
+                json.dumps(policy),
+            )
+        else:
+            await sdk.admin_patch_configuration(policy, account)
+        assert (await sdk.admin_get_configuration(account))["settings"]["ttl"] == policy["ttl"]
+        await sdk.write(
+            uri,
+            "CLI to HTTP to storage",
+            mode="create",
+            options={"processing_mode": "vectors_only"},
+            wait=True,
+        )
+        original = await sdk.get_ttl(uri)
+        assert original["ttl_days"] == 7
+        expiry = format_iso8601(parse_iso_datetime(original["expires_at"]) + timedelta(days=2))
+        if binary:
+            await cli("ttl", "set", uri, "--expires-at", expiry)
+            assert (await cli("ttl", "get", uri))["expires_at"] == expiry
+        else:
+            await sdk.update_ttl(uri, expiry)
+        assert (await sdk.get_ttl(uri))["expires_at"] == expiry
+        record = await service.viking_fs.ttl_registry.get(account, uri)
+        assert record.expires_at == expiry
+    finally:
+        await sdk.close()
+        server.should_exit = True
+        await asyncio.wait_for(serving, 5)
+
+
+@pytest.mark.asyncio
+async def test_mcp_expiry_edit_uses_request_identity_and_shared_registry(client, service):
+    import ast
+
+    from openviking.server import mcp_endpoint
+
+    await request(
+        client,
+        "patch",
+        CONFIG,
+        json={"settings": {"ttl": {"user_events": {"mode": "days", "ttl_days": 7}}}},
+    )
+    uri = ROOT + "/memories/events/mcp.txt"
+    original = await write(client, uri)
+    expiry = format_iso8601(parse_iso_datetime(original["expires_at"]) + timedelta(days=1))
+    token = mcp_endpoint._mcp_ctx.set(root_ctx())
+    try:
+        alias = "viking://~/memories/events/mcp.txt"
+        before = ast.literal_eval(await mcp_endpoint.get_ttl(alias))
+        assert before["uri"] == uri
+        updated = ast.literal_eval(await mcp_endpoint.update_ttl(alias, expiry))
+        assert updated["expires_at"] == expiry
+        assert updated["ttl_generation"] == original["ttl_generation"]
+        record = await service.viking_fs.ttl_registry.get("default", uri)
+        assert record.expires_at == expiry
+    finally:
+        mcp_endpoint._mcp_ctx.reset(token)

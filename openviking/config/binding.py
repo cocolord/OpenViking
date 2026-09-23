@@ -18,7 +18,7 @@ from openviking.config.manager import RuntimeConfigManager
 from openviking.config.merge import apply_three_state_patch
 from openviking.config.source.base import ConfigSource
 from openviking.config.source.file_source import FileConfigSource
-from openviking.config.validate import validate_patch
+from openviking.config.validate import normalize_config_keys, validate_patch
 from openviking.pyagfs import AsyncAGFSClient
 from openviking_cli.utils.config import get_openviking_config, set_openviking_config
 from openviking_cli.utils.config.config_utils import warn_unknown_config_fields
@@ -47,7 +47,7 @@ def _build_cluster(old: OpenVikingConfig, override: dict) -> OpenVikingConfig:
     """
     merged = apply_three_state_patch(
         old.model_dump(by_alias=True, exclude_unset=True),
-        override or {},
+        normalize_config_keys(OpenVikingConfig, override or {}),
     )
     return OpenVikingConfig.from_dict(merged)
 
@@ -112,4 +112,7 @@ def manager_over_source(
         build_config=_build_cluster,
         build_account=_build_account,
         validate_request=_validate_request,
+        normalize_request=lambda patch, account: normalize_config_keys(
+            AccountConfig if account else OpenVikingConfig, patch
+        ),
     )

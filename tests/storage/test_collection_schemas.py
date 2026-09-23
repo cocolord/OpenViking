@@ -1258,34 +1258,21 @@ async def test_directory_embedding_skips_when_sidecar_body_changed(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_directory_embedding_carries_the_persisted_summary_deadline(monkeypatch):
-    from openviking.core.ttl import hidden_by_ttl
-    from openviking.storage.abstract_overview import render_abstract_overview, semantic_body_digest
+async def test_directory_embedding_ignores_legacy_summary_deadline(monkeypatch):
+    from openviking.storage.abstract_overview import semantic_body_digest
 
     uri = "viking://user/default/memories/events"
-    expiry = "2026-09-23T00:00:00.000Z"
-    raw = render_abstract_overview(0, uri, "summary", {"expires_at": expiry})
+    raw = f"---\ndirectory: {uri}\nexpires_at: 2000-01-01T00:00:00.000Z\n---\nsummary"
     _install_ttl_event_fs(monkeypatch, content=raw)
     handler = _ttl_embedding_handler(monkeypatch)
     ctx = RequestContext(user=UserIdentifier("default", "default"), role=Role.ROOT)
-    data = {"uri": uri, "level": 0}
-    written = []
+    write = AsyncMock(return_value="id")
 
-    async def write():
-        written.append(dict(data))
-        return "id"
-
-    await handler._write_directory_vector_if_current(
-        uri + "/.abstract.md",
-        semantic_body_digest("summary"),
-        ctx,
-        write,
-        context_data=data,
+    result = await handler._write_directory_vector_if_current(
+        uri + "/.abstract.md", semantic_body_digest("summary"), ctx, write
     )
-    assert written[0]["expires_at"] == expiry
-    from openviking.utils.time_utils import parse_iso_datetime
-
-    assert hidden_by_ttl(data["expires_at"], now=parse_iso_datetime(expiry))
+    assert result == "id"
+    write.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

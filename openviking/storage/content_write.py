@@ -1223,7 +1223,13 @@ class ContentWriteCoordinator:
                 mf.content = mf.content + content
             else:
                 mf = MemoryFileUtils.read(content, uri=uri)
-                mf.extra_fields = apply_ttl_fields(uri, mf.extra_fields)
+                from openviking.config.ttl import resolve_ttl_config
+
+                mf.extra_fields = apply_ttl_fields(
+                    uri,
+                    mf.extra_fields,
+                    config=await resolve_ttl_config(self._viking_fs, ctx.account_id),
+                )
             sync_memory_resource_refs(mf, source=RESOURCE_REF_SOURCE_CONTENT_WRITE)
             rendered = MemoryFileUtils.write(mf)
             await self._viking_fs.write_file(

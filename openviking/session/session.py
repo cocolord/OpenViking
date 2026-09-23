@@ -855,7 +855,11 @@ class Session:
         # scope resolves against the current config; the frozen ttl_days then
         # drives renewal on later commits, so a config change never moves an
         # existing session's expiry. No-op when TTL is off for sessions.
-        self._freeze_ttl_snapshot()
+        from openviking.config.ttl import resolve_ttl_config
+
+        self._freeze_ttl_snapshot(
+            config=await resolve_ttl_config(self._viking_fs, self.ctx.account_id)
+        )
         await self._viking_fs.mkdir(self._session_uri, exist_ok=True, ctx=self.ctx)
         await self._viking_fs.write_file(
             f"{self._session_uri}/messages.jsonl",
@@ -864,11 +868,11 @@ class Session:
         )
         await self._save_meta()
 
-    def _freeze_ttl_snapshot(self) -> None:
+    def _freeze_ttl_snapshot(self, *, config=None) -> None:
         """Populate the session's frozen TTL fields from the current policy."""
         from openviking.core.ttl import freeze_ttl_fields
 
-        snapshot = freeze_ttl_fields(self._session_uri)
+        snapshot = freeze_ttl_fields(self._session_uri, config=config)
         if not snapshot:
             return
         self._meta.ttl_days = snapshot["ttl_days"]
@@ -897,7 +901,6 @@ class Session:
             except (TypeError, ValueError):
                 pass
         self._meta.expires_at = format_iso8601(renewed_expiry)
-
 
     async def _save_meta(self, lease_ref: Optional[Any] = None) -> None:
         """Persist .meta.json to storage using an optional held PathLock lease."""

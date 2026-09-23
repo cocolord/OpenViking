@@ -55,7 +55,7 @@ class TTLRegistry:
         self._agfs = agfs
         self._tasks = PersistentTaskStore(agfs)
         self._known_accounts: set[str] = set()
-        self._known_summary_dirs: set[tuple[str, str]] = set()
+        self._known_resource_scopes: set[tuple[str, str]] = set()
 
     @staticmethod
     def _key(account_id: str, uri: str) -> str:
@@ -70,25 +70,25 @@ class TTLRegistry:
         return f"{_ROOT}/{account_id}/{_MARKER}"
 
     @staticmethod
-    def _summary_marker(account_id: str, directory_uri: str) -> str:
+    def _descendant_marker(account_id: str, directory_uri: str) -> str:
         digest = hashlib.sha256(directory_uri.rstrip("/").encode()).hexdigest()
-        return f"{_ROOT}/{account_id}/_system/ttl/summaries/{digest}.enabled"
+        return f"{_ROOT}/{account_id}/_system/ttl/descendants/{digest}.enabled"
 
-    async def summary_requires_snapshot(self, account_id: str, directory_uri: str) -> bool:
-        """Whether this directory can have summaries derived from TTL events.
+    async def has_ttl_descendants(self, account_id: str, directory_uri: str) -> bool:
+        """Guard Watch replay over independently expiring resources.
 
-        Session-only TTL must not hide unrelated legacy event summaries. This
-        monotonic marker survives physical deletion of the last expiring event.
+        The marker survives cleanup so replaying an ancestor cannot resurrect
+        an expired child whose source and registration have been removed.
         """
         key = (account_id, directory_uri.rstrip("/"))
-        if key not in self._known_summary_dirs:
+        if key not in self._known_resource_scopes:
             try:
-                await self._agfs.stat(self._summary_marker(*key), bypass_cache=True)
+                await self._agfs.stat(self._descendant_marker(*key), bypass_cache=True)
             except Exception as exc:
                 if is_storage_not_found(exc):
                     return False
                 raise
-            self._known_summary_dirs.add(key)
+            self._known_resource_scopes.add(key)
         return True
 
     async def account_may_have_records(self, account_id: str) -> bool:
@@ -115,15 +115,15 @@ class TTLRegistry:
         from openviking.core.ttl import ttl_scope_for_uri
 
         directory_uri = record.object_uri.rsplit("/", 1)[0]
-        while record.object_type != "session":
+        while record.object_type in {"resource", "resource_file"}:
             key = (record.account_id, directory_uri)
-            if key not in self._known_summary_dirs:
-                summary_marker = self._summary_marker(*key)
-                await self._agfs.ensure_parent_dirs(summary_marker)
-                await self._agfs.write(summary_marker, b"1")
-                self._known_summary_dirs.add(key)
+            if key not in self._known_resource_scopes:
+                descendant_marker = self._descendant_marker(*key)
+                await self._agfs.ensure_parent_dirs(descendant_marker)
+                await self._agfs.write(descendant_marker, b"1")
+                self._known_resource_scopes.add(key)
             directory_uri = directory_uri.rsplit("/", 1)[0]
-            if record.object_type == "event" or ttl_scope_for_uri(directory_uri) != "resources":
+            if ttl_scope_for_uri(directory_uri) != "resources":
                 break
         fields = asdict(record)
         await self._tasks.schedule(

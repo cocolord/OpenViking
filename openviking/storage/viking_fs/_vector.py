@@ -6,7 +6,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, List, Optional
 
 from openviking.server.identity import RequestContext
-from openviking.storage.expr import Eq, In, Or, PathScope
+from openviking.storage.expr import And, Eq, In, Or, PathScope
 from openviking.storage.viking_fs._base import logger
 
 if TYPE_CHECKING:
@@ -22,6 +22,7 @@ class _VectorMixin:
         ctx: Optional[RequestContext] = None,
         *,
         recursive_uri: Optional[str] = None,
+        level: Optional[int] = None,
     ) -> None:
         """Delete records with specified URIs from vector store.
 
@@ -33,9 +34,11 @@ class _VectorMixin:
         real_ctx = self._ctx_or_default(ctx)
 
         try:
-            await vector_store.delete_uris(real_ctx, uris)
+            options = {"level": level} if level is not None else {}
             if recursive_uri is not None:
-                await vector_store.delete_uri_scope(real_ctx, recursive_uri)
+                await vector_store.delete_uri_scope(real_ctx, recursive_uri, **options)
+            else:
+                await vector_store.delete_uris(real_ctx, uris, **options)
             for uri in uris:
                 logger.debug(f"[VikingFS] Deleted from vector store: {uri}")
         except Exception as e:
@@ -43,7 +46,7 @@ class _VectorMixin:
             raise
 
     async def _confirm_vector_scope_cleared(
-        self, target_uri: str, ctx: Optional[RequestContext] = None
+        self, target_uri: str, ctx: Optional[RequestContext] = None, *, level: Optional[int] = None
     ) -> None:
         """Strict-mode check: raise unless the vector scope is fully cleared.
 
@@ -57,13 +60,14 @@ class _VectorMixin:
         vector_store = self._get_vector_store()
         if not vector_store:
             return
+        scope = Or(
+            [
+                Eq("uri", target_uri),
+                PathScope("uri", target_uri, depth=-1),
+            ]
+        )
         residue = await vector_store.count(
-            filter=Or(
-                [
-                    Eq("uri", target_uri),
-                    PathScope("uri", target_uri, depth=-1),
-                ]
-            ),
+            filter=And([scope, Eq("level", level)]) if level is not None else scope,
             ctx=self._ctx_or_default(ctx),
         )
         if residue:

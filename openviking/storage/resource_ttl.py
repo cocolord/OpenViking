@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 
+from openviking.config.ttl import resolve_ttl_config
 from openviking.core.namespace import classify_uri
 from openviking.core.ttl import (
     OBJECT_TYPE_RESOURCE,
@@ -131,24 +132,7 @@ async def prepare_resource_ttl(
     if parent_fields and not resource_ttl:
         # A document's children share its lifecycle; do not register each chunk.
         return parent_fields
-    manager = getattr(fs, "runtime_config_manager", None)
-    config = None
-    if manager is not None:
-        from openviking.config.merge import apply_three_state_patch
-        from openviking_cli.utils.config.ttl_config import TTLConfig
-
-        # Reuse sparse runtime overrides: changing one directory must not reset
-        # other directories or stop inheriting the library's global policy.
-        def resolve(view):
-            override = view.account.ttl
-            return TTLConfig.model_validate(
-                apply_three_state_patch(
-                    view.cluster.ttl.model_dump(by_alias=True),
-                    override.model_dump(by_alias=True, exclude_unset=True) if override else {},
-                )
-            )
-
-        config = await manager.resolve_account(ctx.account_id, resolve)
+    config = await resolve_ttl_config(fs, ctx.account_id) if not existing else None
     fields = None if existing else freeze_ttl_fields(uri, resource_ttl=resource_ttl, config=config)
     if fields is None:
         return {}
@@ -167,50 +151,8 @@ async def write_resource_fields(fs, object_type, uri, fields, *, ctx, lease_ref)
 
 
 async def update_resource_expiry(fs, uri: str, expires_at: str, *, ctx) -> dict:
-    """Explicitly revise a live resource's expiry under its existing object lock."""
-    from openviking.storage.acl import AclAction
+    from openviking.storage.document_ttl import update_document_expiry
 
     if ttl_scope_for_uri(uri) != "resources":
         raise InvalidArgumentError("uri must identify a resource")
-    try:
-        expiry = format_iso8601(parse_iso_datetime(expires_at))
-    except (ValueError, TypeError) as exc:
-        raise InvalidArgumentError("expires_at must be an ISO 8601 timestamp") from exc
-    if hidden_by_ttl(expiry):
-        raise InvalidArgumentError("expires_at must be in the future")
-    await fs._ensure_access(uri, ctx, action=AclAction.WRITE)
-    stat = await fs.stat(uri, ctx=ctx)
-    is_dir = bool(stat.get("isDir"))
-    object_type = OBJECT_TYPE_RESOURCE if is_dir else OBJECT_TYPE_RESOURCE_FILE
-    path = fs._uri_to_path(uri, ctx=ctx)
-    lock = fs._async_agfs.pathlock_acquire_tree if is_dir else fs._async_agfs.pathlock_acquire_exact
-    lease = await lock(path)
-    try:
-        await fs.stat(uri, ctx=ctx)
-        fields = await read_resource_fields(fs, object_type, uri, ctx=ctx)
-        if not fields or not fields.get("expires_at"):
-            raise InvalidArgumentError("resource has no frozen TTL to update")
-        if hidden_by_ttl(fields["expires_at"]):
-            raise NotFoundError(uri, "resource")
-        fields["expires_at"] = expiry
-        await write_resource_fields(fs, object_type, uri, fields, ctx=ctx, lease_ref=lease)
-        return {"uri": uri, **fields}
-    finally:
-        await fs._async_agfs.pathlock_release(lease)
-
-
-async def resource_ttl_snapshot(fs, uris, *, ctx):
-    """Use the same source snapshots for semantic generation and its final fence."""
-    if not uris or ttl_scope_for_uri(uris[0]) != "resources":
-        return None
-    if not ttl_enabled() and not await fs.ttl_registry.account_may_have_records(ctx.account_id):
-        return None
-    snapshot = {}
-    for uri in uris:
-        fields = await resource_ttl_fields(fs, uri, ctx=ctx)
-        snapshot[uri] = (
-            await resource_ttl_visible(fs, uri, ctx=ctx, require_source=True),
-            fields.get("ttl_generation"),
-            fields.get("expires_at"),
-        )
-    return snapshot
+    return await update_document_expiry(fs, uri, expires_at, ctx=ctx)

@@ -147,6 +147,7 @@ class RuntimeConfigManager(Generic[C, A]):
         build_config: Callable[[C, dict], C],
         build_account: Callable[[Optional[dict]], A],
         validate_request: Optional[Callable[[dict, bool, bool], None]] = None,
+        normalize_request: Optional[Callable[[dict, bool], dict]] = None,
     ) -> None:
         self._source = source
         self._dispatcher = OwnerLoopDispatcher()
@@ -165,6 +166,7 @@ class RuntimeConfigManager(Generic[C, A]):
         self._build_account = build_account
         # validate_request(patch, is_account_scope, creating) -> None (structural gate).
         self._validate_request = validate_request
+        self._normalize_request = normalize_request or (lambda patch, _: patch)
         # Per-account cache; only touched on the owner loop.
         self._accounts: dict[str, _AccountEntry[A]] = {}
         self._overrides: dict[ConfigScope, Optional[dict]] = {}
@@ -290,6 +292,7 @@ class RuntimeConfigManager(Generic[C, A]):
     def validate_initial_settings(self, account_id: str, settings: dict) -> None:
         """Validate creation-time settings without persisting them."""
         ConfigScope.account(account_id)
+        settings = self._normalize_request(settings, True)
         if self._validate_request is not None:
             self._validate_request(settings, True, True)
         # Construct-to-validate: section-internal and cross-section validators run.
@@ -340,11 +343,13 @@ class RuntimeConfigManager(Generic[C, A]):
         self, scope: ConfigScope, patch: dict, *, creating: bool = False
     ) -> ConfigChangeEvent:
         is_account = scope.kind is ScopeKind.ACCOUNT
+        patch = self._normalize_request(patch, is_account)
         if self._validate_request is not None:
             self._validate_request(patch, is_account, creating)
         async with self._lock_for(scope):
 
             def mutate(current: Optional[dict]) -> dict:
+                current = self._normalize_request(current or {}, is_account)
                 override = apply_three_state_patch(current, patch)
                 if self._validate_request is not None and not creating:
                     self._validate_resets(current or {}, patch, is_account)

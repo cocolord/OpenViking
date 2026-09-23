@@ -1008,7 +1008,6 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                             source_sidecar_digest,
                             ctx,
                             _write_vector,
-                            context_data=inserted_data,
                         )
                         if result is None:
                             self._merge_request_stats(embedding_msg.telemetry_id, processed=1)
@@ -1193,13 +1192,10 @@ class TextEmbeddingHandler(DequeueHandlerBase):
         expected_digest: str,
         ctx: RequestContext,
         write_vector,
-        *,
-        context_data: Optional[Dict[str, Any]] = None,
     ) -> Any:
         """Fence delayed directory embeddings with their source sidecar."""
         from openviking.storage.abstract_overview import (
             body_for_preview,
-            parse_abstract_overview,
             semantic_body_digest,
         )
         from openviking.storage.viking_fs import get_viking_fs
@@ -1216,10 +1212,6 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                 raise
             if semantic_body_digest(body_for_preview(raw)) != expected_digest:
                 return None
-            if context_data is not None:
-                expiry = parse_abstract_overview(raw).metadata.get("expires_at")
-                if expiry:
-                    context_data["expires_at"] = expiry
             return await write_vector()
         finally:
             await viking_fs._async_agfs.pathlock_release(lease)

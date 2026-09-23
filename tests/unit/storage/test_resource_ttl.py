@@ -12,7 +12,6 @@ from openviking.server.identity import RequestContext, Role
 from openviking.storage.resource_ttl import (
     prepare_resource_ttl,
     read_resource_fields,
-    resource_ttl_snapshot,
     resource_ttl_visible,
     update_resource_expiry,
 )
@@ -180,19 +179,6 @@ async def test_disabled_and_legacy_resources_do_not_gain_metadata(fs_ctx):
 
 
 @pytest.mark.asyncio
-async def test_snapshot_detects_delete_recreate_and_parent_expiry(fs_ctx):
-    fs, ctx = fs_ctx
-    uri = ROOT + "/doc"
-    await fs.write_file(uri + "/child", "text", ctx=ctx)
-    await install(fs, ctx, uri, is_dir=True)
-    snapshot = await resource_ttl_snapshot(fs, [uri, uri + "/child"], ctx=ctx)
-    await install(fs, ctx, uri, is_dir=True, expires_at=PAST)
-    current = await resource_ttl_snapshot(fs, [uri, uri + "/child"], ctx=ctx)
-    assert current != snapshot
-    assert not current[uri][0] and not current[uri + "/child"][0]
-
-
-@pytest.mark.asyncio
 async def test_expiry_edit_keeps_incarnation_and_updates_due_record(fs_ctx):
     fs, ctx = fs_ctx
     uri = ROOT + "/doc"
@@ -208,13 +194,13 @@ async def test_expiry_edit_keeps_incarnation_and_updates_due_record(fs_ctx):
 
 
 @pytest.mark.asyncio
-async def test_resource_summary_markers_cover_ancestors_not_siblings(fs_ctx):
+async def test_resource_descendant_markers_cover_ancestors_not_siblings(fs_ctx):
     fs, ctx = fs_ctx
     await install(fs, ctx, ROOT + "/a/sub/doc", is_dir=True)
-    assert await fs.ttl_registry.summary_requires_snapshot("acct", ROOT + "/a/sub")
-    assert await fs.ttl_registry.summary_requires_snapshot("acct", ROOT + "/a")
-    assert await fs.ttl_registry.summary_requires_snapshot("acct", ROOT)
-    assert not await fs.ttl_registry.summary_requires_snapshot("acct", ROOT + "/b")
+    assert await fs.ttl_registry.has_ttl_descendants("acct", ROOT + "/a/sub")
+    assert await fs.ttl_registry.has_ttl_descendants("acct", ROOT + "/a")
+    assert await fs.ttl_registry.has_ttl_descendants("acct", ROOT)
+    assert not await fs.ttl_registry.has_ttl_descendants("acct", ROOT + "/b")
 
 
 @pytest.mark.asyncio
@@ -225,7 +211,6 @@ async def test_cleanup_uses_common_strict_delete_and_persistent_retry(tracker, k
         record=record, live_content=_session_meta(), rm_error=RuntimeError("vector delete failed")
     )
     cleanup._service.fs = SimpleNamespace(rm=fs.rm)
-    cleanup._invalidate_event_parent = AsyncMock()
     await cleanup._process(_message(record))
     registry.remove_if_generation.assert_not_awaited()
     registry.defer_retry.assert_awaited_once()

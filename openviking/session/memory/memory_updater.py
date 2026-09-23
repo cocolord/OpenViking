@@ -1162,12 +1162,16 @@ class MemoryUpdater:
             # TTL is system-owned. The same helper is used by public content
             # writes: creation freezes the current policy while updates retain
             # the object's original snapshot and ignore LLM-supplied TTL fields.
+            from openviking.config.ttl import resolve_ttl_config
             from openviking.core.ttl import apply_ttl_fields
 
             metadata = apply_ttl_fields(
                 uri,
                 metadata,
                 existing_fields=old_content.extra_fields if old_content is not None else None,
+                config=await resolve_ttl_config(viking_fs, ctx.account_id)
+                if old_content is None
+                else None,
             )
 
             # Handle links/backlinks fields: merge with existing

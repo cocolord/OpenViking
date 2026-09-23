@@ -122,9 +122,16 @@ def test_directory_key_must_be_concrete_user_uri():
         "viking://user/u1/preferences",
         "viking://user/u1/memories/entities",
         "viking://user/u1/sessions/s1",
-        "viking://user/u1/memories/events/2026/e.md",
-        "viking://user/u1/peers/p1/memories/events/e.md",
+        "viking://user/u1/memories/events/../entities",
+        "viking://user/u1/memories/events//bad",
     ]
     for uri in invalid_uris:
         with pytest.raises(ValidationError):
             TTLConfig(directories={uri: {"mode": "disabled"}})
+
+
+def test_directory_names_do_not_determine_object_type():
+    directory = "viking://user/u1/memories/events/notes.md"
+    config = TTLConfig(directories={directory: {"mode": "days", "ttl_days": 3}})
+    assert config.resolve_uri(directory + "/child.txt", "user_events") == 3
+    assert config.resolve_uri(directory, "user_events") is None

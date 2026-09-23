@@ -260,6 +260,7 @@ class _OpsMixin:
         auto_pathlock: bool = True,
         *,
         strict: bool = False,
+        preserve_summaries: bool = False,
     ) -> Dict[str, Any]:
         """Delete file/directory + recursively update vector index.
 
@@ -284,6 +285,9 @@ class _OpsMixin:
         both removed. The default (False) keeps the historical
         best-effort semantics for the interactive delete path.
 
+        TTL uses ``preserve_summaries`` to delete only L2 vectors and content.
+        Summary files, directories, ACLs and lifecycle fences are retained.
+
         Returns:
             Dict with 'estimated_deleted_count' indicating the estimated number
             of nodes deleted from vector index.
@@ -295,6 +299,8 @@ class _OpsMixin:
         await self._ensure_access(uri, ctx, action=AclAction.WRITE)
         path = self._uri_to_path(uri, ctx=ctx)
         target_uri = self._path_to_uri(path, ctx=ctx)
+        vector_options = {"level": ContextLevel.DETAIL} if preserve_summaries else {}
+        fs_options = {"preserve_summaries": True} if preserve_summaries else {}
 
         async def _estimate_deleted_count(target_path: str, real_ctx: RequestContext) -> int:
             """Estimate number of nodes to be deleted using vector index."""
@@ -330,10 +336,15 @@ class _OpsMixin:
                 uris_to_delete,
                 ctx=ctx,
                 recursive_uri=target_uri if strict and recursive else None,
+                **vector_options,
             )
             if strict:
-                await self._confirm_vector_scope_cleared(target_uri, ctx=ctx)
-                await self._confirm_fs_scope_cleared(path, target_uri)
+                await self._confirm_vector_scope_cleared(
+                    target_uri,
+                    ctx=ctx,
+                    **vector_options,
+                )
+                await self._confirm_fs_scope_cleared(path, target_uri, **fs_options)
             await self._remove_resource_file_metadata(target_uri, ctx=ctx, lease_ref=lease_ref)
             logger.info(f"[VikingFS] rm target not found, cleaned orphan index: {uri}")
             return {"estimated_deleted_count": estimated_count}
@@ -381,14 +392,25 @@ class _OpsMixin:
                 uris_to_delete,
                 ctx=ctx,
                 recursive_uri=target_uri if strict and recursive else None,
+                **vector_options,
             )
             try:
-                result = await self._async_agfs.rm(
-                    path,
-                    recursive=recursive,
-                    fs_ctx=self._pathlock_fs_ctx(ctx, lease),
-                    auto_pathlock=auto_pathlock,
-                )
+                if preserve_summaries and is_dir:
+                    for content_path in await self._ttl_content_paths(path, target_uri):
+                        await self._async_agfs.rm(
+                            content_path,
+                            recursive=False,
+                            fs_ctx=self._pathlock_fs_ctx(ctx, lease),
+                            auto_pathlock=auto_pathlock,
+                        )
+                    result = {}
+                else:
+                    result = await self._async_agfs.rm(
+                        path,
+                        recursive=recursive,
+                        fs_ctx=self._pathlock_fs_ctx(ctx, lease),
+                        auto_pathlock=auto_pathlock,
+                    )
             except AGFSDirectoryNotEmptyError:
                 raise InvalidArgumentError(
                     f"Directory not empty: {uri}. Use recursive=True to delete non-empty directories."
@@ -406,8 +428,12 @@ class _OpsMixin:
             else:
                 result = {"estimated_deleted_count": estimated_count}
             if strict:
-                await self._confirm_vector_scope_cleared(target_uri, ctx=ctx)
-                await self._confirm_fs_scope_cleared(path, target_uri)
+                await self._confirm_vector_scope_cleared(
+                    target_uri,
+                    ctx=ctx,
+                    **vector_options,
+                )
+                await self._confirm_fs_scope_cleared(path, target_uri, **fs_options)
             await self._remove_resource_file_metadata(target_uri, ctx=ctx, lease_ref=lease_ref)
             return result
         finally:
@@ -2572,8 +2598,43 @@ class _OpsMixin:
             ctx=self._ctx_or_default(ctx),
         )
 
-    async def _confirm_fs_scope_cleared(self, path: str, uri: str) -> None:
-        """Strict-mode check: the physical filesystem target is absent."""
+    async def _ttl_content_paths(self, path: str, uri: str) -> List[str]:
+        """Raw L2 files under an owner, retaining summaries and its expiry fence."""
+        metadata = ".meta.json" if ttl_scope_for_uri(uri) == "sessions" else ".ttl.json"
+        retained = f"{path}/{metadata}"
+        paths = []
+
+        async def collect(current):
+            try:
+                stat = await self._async_agfs.stat(current, bypass_cache=True)
+            except Exception as exc:
+                if is_storage_not_found(exc):
+                    return
+                raise
+            if not stat.get("isDir", False):
+                paths.append(current)
+                return
+            for entry in await self._ls_entries(current):
+                name = entry.get("name", "")
+                child = f"{current}/{name}"
+                if name in {".", ".."} or is_storage_internal_name(name):
+                    continue
+                if entry.get("isDir"):
+                    await collect(child)
+                elif name not in ABSTRACT_OVERVIEW_FILENAMES and child != retained:
+                    paths.append(child)
+
+        await collect(path)
+        return paths
+
+    async def _confirm_fs_scope_cleared(
+        self, path: str, uri: str, *, preserve_summaries: bool = False
+    ) -> None:
+        """Strict-mode check: no content covered by this deletion remains."""
+        if preserve_summaries:
+            if await self._ttl_content_paths(path, uri):
+                raise RuntimeError(f"Filesystem content still present after delete: {uri}")
+            return
         try:
             await self._async_agfs.stat(path, bypass_cache=True)
         except Exception as exc:

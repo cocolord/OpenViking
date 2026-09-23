@@ -86,7 +86,6 @@ async def test_partial_cleanup_blocks_recreation_and_retry_removes_only_owner(
         service=SimpleNamespace(viking_fs=fs, fs=SimpleNamespace(rm=fs.rm)),
         service_loop=asyncio.get_running_loop(),
     )
-    monkeypatch.setattr(cleanup, "_invalidate_event_parent", AsyncMock())
     original = fs._confirm_fs_scope_cleared
     monkeypatch.setattr(
         fs,

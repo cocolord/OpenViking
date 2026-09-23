@@ -459,3 +459,37 @@ Parser 或 Understanding API 后端自身的限制和上传行为。
   }
 }
 ```
+
+## TTL
+
+TTL 默认关闭。`ov.conf` 的 `ttl` 是服务启动基线；运行时复用集群／account 配置覆盖，不需要修改云端向量 schema。一个库的全局策略是其 account 的 `ttl.global`。本期包含 user events、peer events、sessions、公共／用户／peer resources，用户和 peer ID 由 URI 范围匹配，没有独立的用户级配置层。
+
+新对象按“资源单次导入显式参数（仅 resource）→ 最近目录显式策略 → 对应范围默认 → 库全局默认 → 关闭”解析。`inherit` 继续向上查找，`disabled` 阻断继承；`days` 使用正整数天，`absolute` 仅适用于 resources 范围／目录及资源导入。目录匹配采用路径边界；`events/2026` 比 `events` 更近，不会匹配 `events/20260`。
+
+```json
+{
+  "ttl": {
+    "global": {"mode": "disabled"},
+    "user_events": {"mode": "days", "ttl_days": 60},
+    "peer_events": {"mode": "inherit"},
+    "sessions": {"mode": "days", "ttl_days": 30},
+    "resources": {"mode": "days", "ttl_days": 90},
+    "directories": {
+      "viking://user/alice/memories/events/2026": {"mode": "days", "ttl_days": 7}
+    }
+  }
+}
+```
+
+运行时 HTTP 接口：`GET/PATCH /api/v1/admin/configuration` 修改集群覆盖（ROOT）；`GET/PATCH /api/v1/admin/accounts/{account_id}/configuration` 修改库覆盖（本库 ADMIN 或 ROOT）。PATCH 请求体为 `{"settings": {"ttl": ...}}`；省略字段保持原值，`null` 删除该层覆盖并回退至基线，修改单个目录不会清空其他目录。GET 返回该层显式覆盖，不是对象的冻结期限。
+
+```bash
+ov admin get-configuration --account-id default
+ov admin patch-configuration --account-id default --settings '{"ttl":{"global":{"mode":"days","ttl_days":90}}}'
+```
+
+CLI 省略 `--account-id` 时操作集群层。Python HTTP SDK 对应 `admin_get_configuration(account_id)`、`admin_patch_configuration(settings, account_id)`。event 公开写入、记忆抽取、session 创建和 resource 导入共同读取合并后的运行时配置。变更只影响新对象；已有对象保留创建时的期限，session 成功 commit 按自身冻结 `ttl_days` 续期。调整已有 event/resource 的清理时间使用 [文档到期时间接口](../api/12-content.md#文档到期时间)。
+
+到期隐藏与清理只针对 L2，所有 L0/L1 均保留，包括过期对象内部摘要。即使正文全部清除，摘要及其向量仍可读取／召回。
+
+以上为 OV 原生链路。托管控制台或网关还需将对应配置和请求路由转发至 OV；增加 OV 路由不代表既有云端代理会自动开放。该 PR 不修改公有云服务或计费链路。

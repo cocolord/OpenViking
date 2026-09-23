@@ -338,6 +338,18 @@ class FSService:
         ):
             raise InvalidArgumentError(f"cannot create storage internal name: {uri}")
 
+    async def get_ttl(self, uri: str, ctx: RequestContext) -> dict:
+        from openviking.storage.document_ttl import get_document_ttl
+
+        self._reject_storage_internal_target(uri)
+        return await get_document_ttl(self._ensure_initialized(), uri, ctx=ctx)
+
+    async def update_ttl(self, uri: str, expires_at: str, ctx: RequestContext) -> dict:
+        from openviking.storage.document_ttl import update_document_expiry
+
+        self._reject_storage_internal_target(uri)
+        return await update_document_expiry(self._ensure_initialized(), uri, expires_at, ctx=ctx)
+
     async def mkdir(
         self,
         uri: str,
@@ -421,6 +433,7 @@ class FSService:
         *,
         strict: bool = False,
         lease_ref: Optional[Dict[str, Any]] = None,
+        preserve_summaries: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Remove resource."""
         if is_ttl_metadata_name(uri.rsplit("/", 1)[-1]):
@@ -437,6 +450,7 @@ class FSService:
             recursive=recursive,
             ctx=ctx,
             strict=strict,
+            **({"preserve_summaries": True} if preserve_summaries else {}),
             **({"lease_ref": lease_ref} if lease_ref is not None else {}),
         )
         await self._sync_watch_after_rm(uri, account_id=ctx.account_id, context_type=context_type)
@@ -467,14 +481,14 @@ class FSService:
                     resource_uri=uri,
                     recursive=recursive,
                 )
-            if memory_overview_uri:
+            if memory_overview_uri and not preserve_summaries:
                 await MemoryUpdater.refresh_schema_overview(
                     viking_fs=viking_fs,
                     directory_uri=memory_overview_uri,
                     ctx=ctx,
                 )
             for cleanup_overview_uri in self._memory_overview_parent_uris_from_cleanup(
-                cleanup_result
+                cleanup_result if not preserve_summaries else None
             ):
                 await MemoryUpdater.refresh_schema_overview(
                     viking_fs=viking_fs,

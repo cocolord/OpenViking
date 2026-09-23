@@ -826,3 +826,22 @@ GET /api/v1/tasks?task_type=admin_reindex&resource_id=viking://resources
 - [文件系统](03-filesystem.md) - 目录与文件操作
 - [检索](06-retrieval.md) - 语义搜索与模式搜索
 - [后台任务](17-tasks.md) - 跟踪异步 reindex 任务
+
+## 文档到期时间
+
+`GET /api/v1/content/ttl?uri=...` 返回 event 或 resource 的冻结期限，未纳管对象仅返回 `uri`。`PATCH /api/v1/content/ttl` 调整一个未过期、已纳管文档的清理时间：
+
+```json
+{"uri": "viking://user/alice/memories/events/example.txt", "expires_at": "2027-01-01T00:00:00Z"}
+```
+
+新期限必须为未来的 ISO 8601 时间。服务端在同一对象锁内重新校验权限、对象身份和当前期限，只修改 `expires_at` 及持久化清理登记；保留正文、`received_at`、`ttl_days`、`ttl_generation`。旧清理任务重新检查源期限后跳过已延长的对象，不重新提取记忆或生成向量。
+
+资源子文件继承导入根时，返回 `owner_uri`，修改影响该导入根拥有的文档树。若独立子资源受父资源更早期限约束，返回有效 `expires_at` 和自身 `owner_expires_at`；需先延长父资源，才能将子资源延长到其期限之后。此接口不恢复已过期对象、不改变目录默认、不为历史未纳管文档新增 TTL。
+
+```bash
+ov ttl get viking://user/alice/memories/events/example.txt
+ov ttl set viking://user/alice/memories/events/example.txt --expires-at 2027-01-01T00:00:00Z
+```
+
+Python HTTP SDK 对应 `get_ttl(uri)`、`update_ttl(uri, expires_at)`；MCP 使用同名工具。全局、范围和目录默认策略见 [TTL 配置](../configuration/01-server.md#ttl)。TTL 只清理 L2；所有 L0/L1 文件、向量和容纳它们的目录保留。
