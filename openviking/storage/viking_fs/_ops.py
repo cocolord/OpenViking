@@ -277,8 +277,8 @@ class _OpsMixin:
         record is gone: the vector delete already re-raises on backend error,
         and after the FS delete we re-count the URI scope and raise if any
         vector record remains. Physical cleanup (the TTL sweep) uses this so it
-        only marks an object cleaned — and stops billing for it — once files and
-        vectors are both removed. The default (False) keeps the historical
+        only marks an object physically cleaned once files and vectors are
+        both removed. The default (False) keeps the historical
         best-effort semantics for the interactive delete path.
 
         Returns:

@@ -150,7 +150,7 @@ class TTLCleanupService:
         except Exception as exc:
             # QueueFS ACKs every returned result, including FAILED. Persist a
             # delayed retry first and return REQUEUED so partial deletion or
-            # eventual vector consistency can never strand a billed object.
+            # eventual vector consistency cannot strand an uncleared object.
             error = f"TTL cleanup retry: {exc}"
             await tracker.update_stage(
                 task_id,
@@ -326,7 +326,7 @@ class TTLCleanupService:
         # Rebuilding the still-live siblings is maintenance after invalidation,
         # not part of proving this object's physical deletion.  Keep it outside
         # the cleanup task so a later LLM failure cannot turn a completed strict
-        # cleanup into FAILED or delay the billing boundary.
+        # cleanup into FAILED or delay its completion.
         with detach_task_context():
             await semantic_queue.enqueue(semantic_msg)
 
