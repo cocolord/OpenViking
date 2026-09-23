@@ -125,6 +125,7 @@ func (c *Client) SearchContext(ctx context.Context, query string, opts *SearchCo
 	setString(payload, "since", opts.Since)
 	setString(payload, "until", opts.Until)
 	setString(payload, "time_field", opts.TimeField)
+	setString(payload, "events_time_decay_protection", opts.EventsTimeDecayProtection)
 	setString(payload, "query_expansion", opts.QueryExpansion)
 	setAny(payload, "max_tokens", opts.MaxTokens)
 	if opts.Quotas != nil {

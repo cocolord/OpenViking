@@ -306,31 +306,32 @@ type SearchOptions struct {
 
 // SearchContextOptions controls server-side context assembly.
 type SearchContextOptions struct {
-	Image             string
-	SessionID         string
-	Limit             *int
-	NodeLimit         *int
-	ScoreThreshold    *float64
-	Filter            map[string]any
-	ContextType       any
-	IncludeProvenance *bool
-	Tags              []string
-	Since             string
-	Until             string
-	TimeField         string
-	QueryExpansion    string
-	MaxTokens         *int
-	Quotas            map[string]int
-	Purpose           string
-	Detail            any
-	DedupTurns        *int
-	ExcludeURIs       []string
-	PeerScope         string
-	OtherPeerPenalty  any
-	Rewrite           any
-	RewriteMaxBullets *int
-	Telemetry         any
-	Extra             map[string]any
+	Image                     string
+	SessionID                 string
+	Limit                     *int
+	NodeLimit                 *int
+	ScoreThreshold            *float64
+	Filter                    map[string]any
+	ContextType               any
+	IncludeProvenance         *bool
+	Tags                      []string
+	Since                     string
+	Until                     string
+	TimeField                 string
+	EventsTimeDecayProtection string
+	QueryExpansion            string
+	MaxTokens                 *int
+	Quotas                    map[string]int
+	Purpose                   string
+	Detail                    any
+	DedupTurns                *int
+	ExcludeURIs               []string
+	PeerScope                 string
+	OtherPeerPenalty          any
+	Rewrite                   any
+	RewriteMaxBullets         *int
+	Telemetry                 any
+	Extra                     map[string]any
 }
 
 // GrepOptions controls Grep.

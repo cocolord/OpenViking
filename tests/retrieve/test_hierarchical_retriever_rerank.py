@@ -16,6 +16,7 @@ from openviking.server.identity import RequestContext, Role
 from openviking.storage.abstract_overview import render_abstract_overview
 from openviking.utils.time_decay import fuse_time_decay_scores
 from openviking.utils.token_estimation import estimate_text_tokens
+from openviking_cli.exceptions import InvalidArgumentError
 from openviking_cli.retrieve.types import ContextType, TypedQuery
 from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils.config import RerankConfig, RetrievalConfig
@@ -797,6 +798,20 @@ async def test_quick_mode_returns_time_decay_scores():
     assert result.matched_contexts[0].score == pytest.approx(0.4)
     assert result.matched_contexts[0].origin_score == pytest.approx(0.4)
     assert result.matched_contexts[0].time_score == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_time_decay_rejects_a_negative_score_threshold():
+    retriever = HierarchicalRetriever(storage=QuickSearchStorage([]), embedder=DummyEmbedder())
+
+    with pytest.raises(InvalidArgumentError, match="score_threshold must be non-negative"):
+        await retriever.retrieve(
+            _memory_query(),
+            ctx=_ctx(),
+            mode=RetrieverMode.QUICK,
+            score_threshold=-0.1,
+            events_time_decay_protection="0",
+        )
 
 
 @pytest.mark.asyncio

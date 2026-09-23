@@ -43,7 +43,7 @@ from openviking.utils.search_filters import (
     merge_search_filter,
 )
 from openviking.utils.tags import build_search_tags_filter
-from openviking.utils.time_decay import parse_duration_ms
+from openviking.utils.time_decay import validate_event_time_decay_request
 from openviking_cli.exceptions import InvalidArgumentError, NotFoundError
 
 
@@ -143,11 +143,11 @@ class FindRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_time_decay(self) -> "FindRequest":
+        validate_event_time_decay_request(
+            self.events_time_decay_protection,
+            score_threshold=self.score_threshold,
+        )
         if self.events_time_decay_protection is not None:
-            parse_duration_ms(
-                self.events_time_decay_protection,
-                parameter_name="events_time_decay_protection",
-            )
             if not self.query.strip() and not self.image_url:
                 raise ValueError("events_time_decay_protection requires a semantic query or image")
         return self
@@ -254,21 +254,18 @@ class SearchRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_mode(self) -> "SearchRequest":
+        validate_event_time_decay_request(
+            self.events_time_decay_protection,
+            score_threshold=self.score_threshold,
+        )
         if self.mode == "list":
             error = context_only_fields_error(self.model_fields_set)
             if error:
                 raise ValueError(error)
-            if self.events_time_decay_protection is not None:
-                parse_duration_ms(
-                    self.events_time_decay_protection,
-                    parameter_name="events_time_decay_protection",
-                )
             return self
 
         if self.read_content:
             raise ValueError("read_content is only supported in mode='list'")
-        if self.events_time_decay_protection is not None:
-            raise ValueError("events_time_decay_protection is only supported in mode='list'")
         if self.target_uri:
             raise ValueError("target_uri is not supported in mode='context'")
         _reject_unknown_quota_and_detail(self.quotas, self.detail)
@@ -439,6 +436,7 @@ async def _search_context(
         limit=actual_limit,
         score_threshold=request.score_threshold,
         filter=effective_filter,
+        events_time_decay_protection=request.events_time_decay_protection,
         session_id=request.session_id,
         query_expansion=request.query_expansion,
         max_tokens=request.max_tokens,

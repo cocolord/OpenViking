@@ -45,6 +45,7 @@ class SearchContextOptions(_ExtraOptions, total=False):
     since: str
     until: str
     time_field: TimeField
+    events_time_decay_protection: Optional[str]
     query_expansion: Literal["off", "auto"]
     max_tokens: int
     quotas: Dict[str, int]

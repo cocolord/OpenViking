@@ -109,6 +109,7 @@ describe("OpenVikingClient", () => {
         purpose: "coding",
         maxTokens: 3000,
         dedupTurns: 5,
+        eventsTimeDecayProtection: "2d",
       }),
     ).resolves.toMatchObject({ rendered: "<memory />" });
 
@@ -119,6 +120,7 @@ describe("OpenVikingClient", () => {
       purpose: "coding",
       max_tokens: 3000,
       dedup_turns: 5,
+      events_time_decay_protection: "2d",
     });
     await expect(
       client.searchContext("query", { extra: { mode: "list" } }),

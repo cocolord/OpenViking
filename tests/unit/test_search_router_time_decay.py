@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
+from openviking.retrieve.context_assembler import AssembleResult
 from openviking.server.identity import RequestContext, Role
 from openviking.server.routers import search as search_router
 from openviking_cli.session.user_id import UserIdentifier
@@ -65,11 +66,12 @@ def test_filter_only_find_rejects_enabled_time_decay():
         )
 
 
-def test_context_mode_rejects_time_decay_parameter():
-    with pytest.raises(ValidationError, match="only supported in mode='list'"):
-        search_router.SearchRequest(
-            query="sample", mode="context", events_time_decay_protection="0"
-        )
+@pytest.mark.parametrize("protection", ["0", "2d"])
+def test_context_mode_accepts_time_decay_parameter(protection):
+    request = search_router.SearchRequest(
+        query="sample", mode="context", events_time_decay_protection=protection
+    )
+    assert request.events_time_decay_protection == protection
 
 
 def test_context_mode_accepts_explicit_null_decay_protection():
@@ -77,3 +79,46 @@ def test_context_mode_accepts_explicit_null_decay_protection():
         query="sample", mode="context", events_time_decay_protection=None
     )
     assert request.events_time_decay_protection is None
+
+
+@pytest.mark.parametrize(
+    "model, extra",
+    [
+        (search_router.FindRequest, {}),
+        (search_router.SearchRequest, {"mode": "list"}),
+        (search_router.SearchRequest, {"mode": "context"}),
+    ],
+)
+def test_decay_rejects_negative_threshold_at_request_boundary(model, extra):
+    with pytest.raises(ValidationError, match="score_threshold must be non-negative"):
+        model(
+            query="sample",
+            score_threshold=-0.1,
+            events_time_decay_protection="0",
+            **extra,
+        )
+
+
+async def test_context_router_forwards_time_decay_protection(monkeypatch):
+    captured = {}
+
+    async def fake_assemble_context(*, service, ctx, params):
+        del service, ctx
+        captured["params"] = params
+        return AssembleResult()
+
+    monkeypatch.setattr(search_router, "assemble_context", fake_assemble_context)
+    response = await search_router._search_context(
+        service=SimpleNamespace(),
+        ctx=_request_context(),
+        request=search_router.SearchRequest(
+            query="sample",
+            mode="context",
+            events_time_decay_protection="2d",
+        ),
+        effective_filter=None,
+        actual_limit=10,
+    )
+
+    assert response["status"] == "ok"
+    assert captured["params"].events_time_decay_protection == "2d"

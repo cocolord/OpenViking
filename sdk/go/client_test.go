@@ -625,6 +625,9 @@ func TestSearchContextSendsContextOptionsAndRejectsModeOverride(t *testing.T) {
 		if body["max_tokens"] != float64(3000) || body["dedup_turns"] != float64(5) {
 			t.Fatalf("budget fields = %#v", body)
 		}
+		if body["events_time_decay_protection"] != "2d" {
+			t.Fatalf("events_time_decay_protection = %#v", body["events_time_decay_protection"])
+		}
 		writeOK(t, w, map[string]any{
 			"rendered": "<memory />",
 			"entries":  []any{},
@@ -634,10 +637,11 @@ func TestSearchContextSendsContextOptionsAndRejectsModeOverride(t *testing.T) {
 	defer closeServer()
 
 	result, err := client.SearchContext(context.Background(), "continue refactor", &SearchContextOptions{
-		SessionID:  "session-1",
-		Purpose:    "coding",
-		MaxTokens:  Int(3000),
-		DedupTurns: Int(5),
+		SessionID:                 "session-1",
+		Purpose:                   "coding",
+		MaxTokens:                 Int(3000),
+		DedupTurns:                Int(5),
+		EventsTimeDecayProtection: "2d",
 	})
 	if err != nil {
 		t.Fatal(err)

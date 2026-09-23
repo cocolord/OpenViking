@@ -172,6 +172,7 @@ export interface SearchContextOptions {
   since?: string;
   until?: string;
   timeField?: string;
+  eventsTimeDecayProtection?: string | null;
   queryExpansion?: "off" | "auto";
   maxTokens?: number;
   quotas?: Record<string, number>;

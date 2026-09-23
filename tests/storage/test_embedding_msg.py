@@ -321,10 +321,22 @@ def test_scalar_tag_edits_preserve_the_system_memory_type(mode, tags):
         assert "team=old" not in result["search_tags"]
 
 
-def test_memory_write_can_correct_a_preexisting_type_tag():
+def test_memory_write_cannot_override_a_preexisting_type_tag():
     patch = FieldPatch(values={"search_tags": ["memory_type=events"]})
     result = patch.resolve({"context_type": "memory", "search_tags": ["memory_type=preferences"]})
-    assert result["search_tags"] == ["memory_type=events"]
+    assert result["search_tags"] == ["memory_type=preferences"]
+
+
+def test_memory_write_repairs_type_tag_from_uri():
+    patch = FieldPatch(values={"search_tags": ["memory_type=events", "team=new"]})
+    result = patch.resolve(
+        {
+            "uri": "viking://user/alice/memories/preferences/p.md",
+            "context_type": "memory",
+            "search_tags": ["memory_type=events"],
+        }
+    )
+    assert result["search_tags"] == ["memory_type=preferences", "team=new"]
 
 
 def test_resource_tags_keep_existing_replace_semantics():

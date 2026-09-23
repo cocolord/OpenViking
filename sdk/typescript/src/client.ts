@@ -420,6 +420,7 @@ export class OpenVikingClient {
       since: options.since,
       until: options.until,
       time_field: options.timeField,
+      events_time_decay_protection: options.eventsTimeDecayProtection,
       query_expansion: options.queryExpansion,
       max_tokens: options.maxTokens,
       quotas: options.quotas,

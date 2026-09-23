@@ -4,6 +4,8 @@
 import re
 from types import SimpleNamespace
 
+import pytest
+
 from openviking.retrieve.context_assembler import pipeline as pipeline_module
 from openviking.retrieve.context_assembler import rewrite as rewrite_module
 from openviking.retrieve.context_assembler.budget import (
@@ -186,6 +188,57 @@ async def test_query_expansion_fans_out_planned_queries(monkeypatch):
 
     assert queries_seen == ["short", "expanded query"]
     assert result.stats["query_expansion"] == "used"
+
+
+async def test_time_decay_protection_is_forwarded_to_context_retrieval():
+    protections_seen = []
+
+    async def fake_find(**kwargs):
+        protections_seen.append(kwargs["events_time_decay_protection"])
+        return _FakeFindResult()
+
+    service = SimpleNamespace(
+        search=SimpleNamespace(find=fake_find),
+        fs=SimpleNamespace(read=None),
+        sessions=SimpleNamespace(),
+        viking_fs=None,
+    )
+
+    await assemble_context(
+        service=service,
+        ctx=_ctx(),
+        params=AssembleParams(
+            query="recent decisions",
+            peer_scope="actor",
+            events_time_decay_protection="2d",
+        ),
+    )
+
+    assert protections_seen == ["2d"]
+
+
+async def test_time_decay_rejects_negative_threshold_before_skill_only_fanout():
+    async def fail_find_skills(**kwargs):
+        raise AssertionError(f"negative threshold reached skill retrieval: {kwargs}")
+
+    service = SimpleNamespace(
+        search=SimpleNamespace(find_skills=fail_find_skills),
+        fs=SimpleNamespace(read=None),
+        sessions=SimpleNamespace(),
+        viking_fs=None,
+    )
+
+    with pytest.raises(ValueError, match="score_threshold must be non-negative"):
+        await assemble_context(
+            service=service,
+            ctx=_ctx(),
+            params=AssembleParams(
+                query="skill",
+                quotas={"skills": 1},
+                score_threshold=-0.1,
+                events_time_decay_protection="0",
+            ),
+        )
 
 
 async def test_disabled_intent_does_not_load_session_or_expand_query():

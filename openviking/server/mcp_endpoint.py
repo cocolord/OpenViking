@@ -79,6 +79,7 @@ from openviking.utils.search_filters import (
     resolve_context_types,
 )
 from openviking.utils.skill_processor import SkillProcessor
+from openviking.utils.time_decay import validate_event_time_decay_request
 from openviking_cli.exceptions import (
     InvalidArgumentError,
     NotFoundError,
@@ -270,6 +271,10 @@ async def find(
     events_time_decay_protection: Optional[str] = None,
 ) -> str:
     """Fast semantic retrieval without session context. Returns ranked memories, resources, and skills with URI, abstract, and score. context_type="skill" returns one hit per skill package, pointing at its SKILL.md, and without target_uri searches both the user's own and the account-shared skills."""
+    try:
+        validate_event_time_decay_request(events_time_decay_protection, score_threshold=min_score)
+    except ValueError as exc:
+        raise InvalidArgumentError(str(exc)) from exc
     service = get_service()
     ctx = _get_ctx()
     context_filter = _resolve_context_type_filter(context_type)
@@ -347,12 +352,14 @@ async def search(
     detail tiers, cross-turn deduplication, peer scoping, and optional rewriting.
     ``target_uri`` is only supported in list mode.
     """
+    try:
+        validate_event_time_decay_request(events_time_decay_protection, score_threshold=min_score)
+    except ValueError as exc:
+        raise InvalidArgumentError(str(exc)) from exc
     service = get_service()
     ctx = _get_ctx()
     context_filter = _resolve_context_type_filter(context_type)
     if mode == "context":
-        if events_time_decay_protection is not None:
-            raise InvalidArgumentError("Event time decay is only supported in mode='list'")
         if read_content:
             raise InvalidArgumentError("read_content is only supported in mode='list'")
         if target_uri:
@@ -378,6 +385,7 @@ async def search(
                 limit=limit,
                 score_threshold=min_score,
                 filter=context_filter,
+                events_time_decay_protection=events_time_decay_protection,
                 session_id=session_id,
                 query_expansion=query_expansion,
                 max_tokens=max_tokens,

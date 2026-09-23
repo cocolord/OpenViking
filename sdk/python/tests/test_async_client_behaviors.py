@@ -814,7 +814,7 @@ async def test_search_forwards_level_zero_and_omits_unset_time_filters():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("method_name", ["find", "search"])
+@pytest.mark.parametrize("method_name", ["find", "search", "search_context"])
 async def test_semantic_retrieval_forwards_event_time_decay_options(method_name):
     client = AsyncHTTPClient(url="http://localhost:1933")
     client._request = AsyncMock(return_value=object())

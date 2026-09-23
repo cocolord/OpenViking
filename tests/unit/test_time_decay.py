@@ -52,6 +52,18 @@ def test_enabled_decay_uses_the_server_owned_curve():
     assert protected_time == pytest.approx(1.0)
 
 
+def test_future_source_time_does_not_decay():
+    spec = build_time_decay_fusion_spec(
+        protection="0",
+        origin=datetime(2026, 1, 8, tzinfo=timezone.utc),
+    )
+
+    fused, time_score = spec.fuse(0.8, "2026-01-09T00:00:00.000Z")
+
+    assert fused == pytest.approx(0.8)
+    assert time_score == pytest.approx(1.0)
+
+
 @pytest.mark.parametrize("protection", ["0", "0m", "0h", "0d"])
 def test_builder_accepts_zero_protection_duration(protection):
     spec = build_time_decay_fusion_spec(

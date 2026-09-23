@@ -62,7 +62,7 @@ OpenViking 提供多种检索方法，包括简单的向量相似度搜索、带
 | tags | List[str] | 否 | None | 显式检索标签，必须是严格的 `k=v` 格式。多个 tags 之间是 AND 关系，结果必须同时包含所有请求的标签 |
 | limit | int | 否 | 10 | 最大返回结果数 |
 | node_limit | int | 否 | None | 可选 HTTP 别名；如果提供，会覆盖 limit |
-| score_threshold | float | 否 | None | 最低相关性分数阈值 |
+| score_threshold | float | 否 | None | 最低相关性分数阈值；启用 `events_time_decay_protection` 时必须为非负数 |
 | filter | Dict | 否 | None | 元数据过滤器 |
 | since | str | 否 | None | 时间下界，支持 `2h` 或 ISO 8601 / `YYYY-MM-DD`。不带时区的值按 UTC 解释。CLI `--after` 会映射到这个字段 |
 | until | str | 否 | None | 时间上界，支持 `30m` 或 ISO 8601 / `YYYY-MM-DD`。不带时区的值按 UTC 解释。CLI `--before` 会映射到这个字段 |
@@ -401,7 +401,7 @@ openviking find "红色海报风格" --image ./poster.png --uri "viking://resour
 | tags | List[str] | 否 | None | 显式检索标签，必须是严格的 `k=v` 格式。多个 tags 之间是 AND 关系，结果必须同时包含所有请求的标签 |
 | limit | int | 否 | 10 | 最大返回结果数 |
 | node_limit | int | 否 | None | 可选 HTTP 别名；如果提供，会覆盖 limit |
-| score_threshold | float | 否 | None | 最低相关性分数阈值 |
+| score_threshold | float | 否 | None | 最低相关性分数阈值；启用 `events_time_decay_protection` 时必须为非负数 |
 | filter | Dict | 否 | None | 元数据过滤器 |
 | since | str | 否 | None | 时间下界，支持 `2h` 或 ISO 8601 / `YYYY-MM-DD`。不带时区的值按 UTC 解释。CLI `--after` 会映射到这个字段 |
 | until | str | 否 | None | 时间上界，支持 `30m` 或 ISO 8601 / `YYYY-MM-DD`。不带时区的值按 UTC 解释。CLI `--before` 会映射到这个字段 |
@@ -413,7 +413,7 @@ openviking find "红色海报风格" --image ./poster.png --uri "viking://resour
 
 `search()` 使用和 `find()` 相同的目标解析和显式标签过滤规则，包括由 `X-OpenViking-Actor-Peer` 或 SDK `actor_peer_id` 选择的 peer 集合过滤。提供 `image_url` 时，`search()` 会直接执行图片检索并跳过会话 query planning。
 
-事件时间衰减同时作用于语义 `search()` 和 `find()` 中 `viking://user/{user_id}/memories/events/` 与 `viking://user/{user_id}/peers/{peer_id}/memories/events/` 下的 L2 结果，不作用于其他记忆类型、L0/L1、无 query 的纯过滤 `find()`、`recall`、`grep` 或 `glob`。启用后按 `score = origin_score * time_score` 融合；保护期内 `time_score` 为 1，原分不变。命中的 event 结果额外返回 `origin_score` 和 `time_score`，CLI 分别展示为 semantic、time 和 final 分。时间取自已有索引的 `updated_at` 字段，无需重新索引或改写时间戳；字段缺失或非法时保持原分，`time_score` 为 `null`。衰减曲线由服务端内部维护，调用方只需按请求传入保护期，无需修改 `ov.conf` 或 `ovcli.conf`。
+事件时间衰减同时作用于语义 `find()`、`search(mode="list")` 和 `search(mode="context")` 中 `viking://user/{user_id}/memories/events/` 与 `viking://user/{user_id}/peers/{peer_id}/memories/events/` 下的 L2 结果，不作用于其他记忆类型、L0/L1、无 query 的纯过滤 `find()`、`recall`、`grep` 或 `glob`。启用后按 `score = origin_score * time_score` 融合；context 模式使用该最终分组装候选。保护期内 `time_score` 为 1，原分不变；未来时间戳按 age 为 0 处理。list 响应中的 event 结果额外返回 `origin_score` 和 `time_score`，CLI 分别展示为 semantic、time 和 final 分。时间取自已有索引的 `updated_at` 字段，无需重新索引或改写时间戳；字段缺失或非法时保持原分，list 响应中的 `time_score` 为 `null`。衰减曲线由服务端内部维护，调用方只需按请求传入保护期，无需修改 `ov.conf` 或 `ovcli.conf`。
 
 由记忆提取流程新生成或更新的记忆会自动写入 `memory_type=<类型>` 检索标签。启用衰减时，本地和云端均将带 `memory_type=events` 标签的 L2 记忆单独召回，再与其余结果合并排序，无需指定 peer id。存量数据不批量补标签；无标签事件继续在兼容召回中按 URI 识别和衰减。
 
@@ -636,7 +636,7 @@ Agent 插件每轮注入上下文时，过去需要按类型逐个检索、再�
 
 #### 2. 接口和参数说明
 
-**L0 检索域**：`query`、`image_url`、`context_type`、`limit`、`score_threshold`、`filter`、`tags`、`since`/`until` 与 list 模式一致。`limit` 只约束 quota-free 检索；一旦 `purpose` 或显式 `quotas` 启用分桶检索，各分类配额就是唯一候选上限。`target_uri` 在 context 模式下暂不支持（返回 400）；`level` 被忽略，档位由 `detail` 决定。
+**L0 检索域**：`query`、`image_url`、`context_type`、`limit`、`score_threshold`、`filter`、`tags`、`since`/`until` 以及可选的 `events_time_decay_protection` 与 list 模式一致。`limit` 只约束 quota-free 检索；一旦 `purpose` 或显式 `quotas` 启用分桶检索，各分类配额就是唯一候选上限。`target_uri` 在 context 模式下暂不支持（返回 400）；`level` 被忽略，档位由 `detail` 决定。
 
 **L1 查询理解**
 
