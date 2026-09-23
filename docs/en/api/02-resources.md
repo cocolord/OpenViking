@@ -189,6 +189,8 @@ This endpoint is the core entry point for resource management. It supports vario
 | watch_interval | float | No | 0 | Scheduled update interval (minutes). >0 creates a new Watch for a re-readable source, subject to target ownership rules; uploaded `temp_file_id` snapshots cannot be watched. <=0 creates no Watch: native imports with explicit `to` pause a single accessible task (409 if ambiguous), while Connector imports leave Watches untouched. Explicit `to` wins, otherwise the Watch binds to the imported `root_uri`. |
 | is_active | bool | No | True | Initial Watch scheduling state. `false` requires `watch_interval > 0` and either `to` or `parent`. `parent` is supported for native Feishu URL and Git imports; Connector imports still require an exact `to`. The initial import still runs once and the Watch remains paused afterward |
 | processing_mode | string | No | `semantic_and_vectors` | Post-ingest processing mode. `semantic_and_vectors` is the normal flow: generate semantic artifacts (`.abstract.md`, `.overview.md`) and vectors. `vectors_only` skips semantic understanding/VLM summarization and only vectorizes current resource files |
+| ttl_relative | integer | No | null | Retention in whole days (at least 1); mutually exclusive with `ttl_absolute` |
+| ttl_absolute | integer | No | null | Expiry as a Unix timestamp in seconds; mutually exclusive with `ttl_relative` |
 | telemetry | TelemetryRequest | No | False | Whether to return telemetry data |
 
 **Additional Notes**:
@@ -724,6 +726,30 @@ Possible shared response:
 ```
 
 ---
+
+## Resource TTL
+
+TTL is disabled by default. Public, user and peer resources use the same lifecycle. At creation, an explicit `ttl_relative` or `ttl_absolute` takes precedence over the nearest directory policy, the resource scope policy, and the library default. Omitting both import parameters inherits that policy.
+
+TTL belongs to the actual import root: a parsed document or imported directory owns its complete subtree; a flat `no_split` file owns only itself. The deadline is frozen when the resource is created, independent of directory modification times. Re-imports, content updates and Watch refreshes preserve that deadline. Policy changes affect future resources only, including when TTL is disabled later.
+
+```python
+client.add_resource("./guide.md", ttl_relative=7)
+client.update_resource_config("viking://resources/docs", ttl_relative=30)
+# Disable TTL for future imports under this path.
+client.update_resource_config("viking://resources/docs")
+```
+
+```bash
+ov add-resource ./guide.md --ttl-relative 7
+ov update-resource-config viking://resources/docs --ttl-relative 30
+```
+
+HTTP uses `POST /api/v1/resources` for imports and `PATCH /api/v1/resources/config` with `uri` and one TTL parameter for future policy changes. The corresponding MCP tools are `add_resource` and `update_resource_config`. External Connector imports use the configured directory policy; per-import TTL parameters on that route are rejected.
+
+`GET /api/v1/resources/ttl?uri=...` returns the effective frozen metadata. `PATCH /api/v1/resources/ttl` accepts `uri` and an ISO 8601 `expires_at` to revise a live resource's existing deadline. It preserves the resource generation and does not change sibling resources or directory policy. It cannot restore expired data or add TTL to unmanaged historical resources. An enclosing resource's earlier expiry still limits its children.
+
+Expired files, descendants, summaries and search candidates become invisible before asynchronous physical cleanup finishes. Cleanup reuses the persistent task queue and strict file/vector deletion; failure keeps the cleanup record for retry. Copy, move and OVPack preserve frozen deadlines. TTL state stays in OpenViking metadata and does not add cloud vector fields. A Watch must target an import root whose descendants share its lifetime. Refreshing an enclosing directory containing independently expiring resources is rejected, including after their cleanup, to prevent recreating them; watch those resources separately.
 
 ## Related Documentation
 

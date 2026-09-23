@@ -427,11 +427,11 @@ class OpenVikingConfig(BaseModel):
 
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory configuration")
 
-    ttl: TTLConfig = Field(
+    ttl: TTLConfig = RuntimeField(
         default_factory=TTLConfig,
         description=(
-            "Time-to-live policy for events and sessions. Default OFF. Only applies to "
-            "user events, peer events, and sessions directories."
+            "Time-to-live policy for events, sessions, and resources. Default OFF. "
+            "New objects freeze the resolved policy; existing lifetimes are preserved."
         ),
     )
 

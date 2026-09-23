@@ -264,6 +264,7 @@ class OpenVikingService:
         )
         await manager.initialize()
         self._runtime_config_manager = manager
+        self._viking_fs.runtime_config_manager = manager
         if self._vikingdb_manager is None or self._vikingdb_manager.acl_manager is None:
             raise NotInitializedError("ACL")
         self._vikingdb_manager.acl_manager.set_runtime_config_manager(manager)

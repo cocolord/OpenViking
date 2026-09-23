@@ -7,10 +7,11 @@ config into a frozen ``expires_at`` at object-creation time. Every writer that
 freezes TTL (events via the memory path, sessions via SessionMeta) and the
 background cleanup scanner go through here so the scope rules stay in one place.
 
-TTL is default OFF and strictly scoped to three directory kinds:
+TTL is default OFF and strictly scoped to four directory kinds:
 
 - ``user_events``  -> ``viking://user/{uid}/memories/events/...``
 - ``peer_events``  -> ``viking://user/{uid}/peers/{pid}/memories/events/...``
+- ``resources``    -> public, user and peer resource import roots
 - ``sessions``     -> ``viking://user/{uid}/sessions/{sid}...``
 
 Day granularity is expressed as ``ttl_days`` whole days after ``received_at``
@@ -24,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Optional
 from uuid import uuid4
 
-from openviking.core.namespace import uri_parts
+from openviking.core.namespace import classify_uri, uri_parts
 from openviking.storage.internal_names import WEBDAV_RESERVED_FILENAMES, is_storage_internal_name
 from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
 from openviking_cli.utils.config import TTLConfig, TTLScope, get_openviking_config
@@ -33,6 +34,9 @@ from openviking_cli.utils.config import TTLConfig, TTLScope, get_openviking_conf
 # rules so callers do not re-derive them.
 OBJECT_TYPE_EVENT = "event"
 OBJECT_TYPE_SESSION = "session"
+OBJECT_TYPE_RESOURCE = "resource"
+OBJECT_TYPE_RESOURCE_FILE = "resource_file"
+RESOURCE_TTL_FILENAME = ".ttl.json"
 TTL_GENERATION_FIELD = "ttl_generation"
 TTL_FIELD_NAMES = frozenset({"ttl_days", "received_at", "expires_at", TTL_GENERATION_FIELD})
 
@@ -40,16 +44,24 @@ TTL_FIELD_NAMES = frozenset({"ttl_days", "received_at", "expires_at", TTL_GENERA
 def ttl_scope_for_uri(uri: str) -> Optional[TTLScope]:
     """Classify a canonical URI into a TTL scope, or ``None`` when unscoped.
 
-    Only user events, peer events, and sessions are in scope. Anything else
-    (preferences, resources, entities, skills, non-event memories, ...) returns
+    Only user events, peer events, sessions, and resources are in scope. Anything else
+    (preferences, entities, skills, non-event memories, ...) returns
     ``None`` so TTL never touches it.
     """
     try:
         parts = uri_parts(uri)
     except ValueError:
         return None
+    if parts[:1] == ["resources"]:
+        return "resources"
     if len(parts) < 3 or parts[0] != "user":
         return None
+    classification = classify_uri(uri)
+    if (
+        classification.content_index is not None
+        and parts[classification.content_index] == "resources"
+    ):
+        return "resources"
     # sessions: viking://user/{uid}/sessions/...
     if parts[2] == "sessions":
         return "sessions"
@@ -77,6 +89,19 @@ def ttl_object_for_uri(uri: str, *, is_dir: bool = False) -> Optional[tuple[str,
     try:
         parts = uri_parts(uri)
     except ValueError:
+        return None
+    if scope == "resources":
+        root_depth = (classify_uri(uri).content_index or 0) + 1
+        if len(parts) <= root_depth or (
+            parts[-1] == RESOURCE_TTL_FILENAME and len(parts) == root_depth + 1
+        ):
+            return None
+        if parts[-1] == RESOURCE_TTL_FILENAME:
+            return OBJECT_TYPE_RESOURCE, "viking://" + "/".join(parts[:-1])
+        if parts[-1].startswith(".") and parts[-1].endswith(RESOURCE_TTL_FILENAME):
+            name = parts[-1][1 : -len(RESOURCE_TTL_FILENAME)]
+            if name:
+                return OBJECT_TYPE_RESOURCE_FILE, "viking://" + "/".join([*parts[:-1], name])
         return None
     if scope == "sessions":
         if len(parts) < 4:
@@ -116,6 +141,7 @@ def freeze_ttl_fields(
     *,
     received_at: Optional[datetime] = None,
     config: Optional[TTLConfig] = None,
+    resource_ttl: Optional[dict] = None,
 ) -> Optional[dict]:
     """Compute the frozen TTL snapshot for a new object, or ``None`` when off.
 
@@ -123,13 +149,26 @@ def freeze_ttl_fields(
     integer ``ttl_days`` actually applied. Callers persist this snapshot verbatim
     at creation time and never recompute it from later config changes.
     """
-    ttl_days = resolve_ttl_days(uri, config)
-    if ttl_days is None:
+    policy = None
+    if ttl_scope_for_uri(uri) == "resources":
+        from openviking_cli.utils.config.ttl_config import ResourceTTL
+
+        ttl_config = config if config is not None else _current_ttl_config()
+        if resource_ttl and any(value is not None for value in resource_ttl.values()):
+            policy = ResourceTTL(**resource_ttl).policy()
+        elif ttl_config is not None:
+            policy = ttl_config.resolve_uri_policy(uri, "resources")
+    ttl_days = policy.ttl_days if policy is not None else resolve_ttl_days(uri, config)
+    if ttl_days is None and (policy is None or policy.mode != "absolute"):
         return None
     received = received_at or datetime.now(timezone.utc)
     if received.tzinfo is None:
         received = received.replace(tzinfo=timezone.utc)
-    expires = compute_expires_at(received, ttl_days)
+    expires = (
+        datetime.fromtimestamp(policy.ttl_absolute, timezone.utc)
+        if policy is not None and policy.mode == "absolute"
+        else compute_expires_at(received, ttl_days)
+    )
     return {
         "ttl_days": ttl_days,
         "received_at": format_iso8601(received),
@@ -218,3 +257,14 @@ def _current_ttl_config() -> Optional[TTLConfig]:
     except Exception:
         # Config not initialized (e.g. unit tests, bootstrap). Fail closed to OFF.
         return None
+
+
+def ttl_metadata_uri(object_type: str, uri: str) -> str:
+    if object_type == OBJECT_TYPE_SESSION:
+        return f"{uri}/.meta.json"
+    if object_type == OBJECT_TYPE_RESOURCE:
+        return f"{uri}/{RESOURCE_TTL_FILENAME}"
+    if object_type == OBJECT_TYPE_RESOURCE_FILE:
+        parent, name = uri.rsplit("/", 1)
+        return f"{parent}/.{name}{RESOURCE_TTL_FILENAME}"
+    return uri

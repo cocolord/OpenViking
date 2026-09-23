@@ -334,6 +334,14 @@ enum AclCommands {
 #[derive(Subcommand)]
 enum Commands {
     // --- Data Operations ---
+    /// [Data] Set the TTL policy for future imports at a resource path; omit both values to disable
+    UpdateResourceConfig {
+        uri: String,
+        #[arg(long, conflicts_with = "ttl_absolute", value_parser = clap::value_parser!(i64).range(1..=365000))]
+        ttl_relative: Option<i64>,
+        #[arg(long, value_parser = clap::value_parser!(i64).range(1..=253402300799))]
+        ttl_absolute: Option<i64>,
+    },
     /// [Data] Add resources into OpenViking
     AddResource {
         /// Local path or URL to import
@@ -385,6 +393,12 @@ enum Commands {
             help_heading = "Common options"
         )]
         parent_auto_create: Option<String>,
+        /// Resource TTL in whole days (new resources only)
+        #[arg(long, conflicts_with_all = ["ttl_absolute", "manifest"], value_parser = clap::value_parser!(i64).range(1..=365000))]
+        ttl_relative: Option<i64>,
+        /// Absolute resource expiry as Unix seconds (new resources only)
+        #[arg(long, conflicts_with = "manifest", value_parser = clap::value_parser!(i64).range(1..=253402300799))]
+        ttl_absolute: Option<i64>,
         /// Reason for import
         #[arg(
             long,
@@ -3247,6 +3261,8 @@ async fn main() {
             watch_interval,
             processing_mode,
             resource_args,
+            ttl_relative,
+            ttl_absolute,
             upload_options,
         } => {
             let ctx =
@@ -3275,34 +3291,60 @@ async fn main() {
                     }
                 }
             } else if let Some(path) = path {
-                handlers::handle_add_resource(
-                    path,
-                    add_type,
-                    to,
-                    parent,
-                    parent_auto_create,
-                    reason,
-                    instruction,
-                    wait,
-                    timeout,
-                    strict_mode,
-                    ignore_dirs,
-                    include,
-                    exclude,
-                    no_directly_upload_media,
-                    watch_interval.unwrap_or(0.0),
-                    processing_mode,
-                    resource_args,
-                    tags,
-                    tag_mode,
-                    ctx,
-                )
-                .await
+                match handlers::parse_add_resource_args(resource_args.as_deref()) {
+                    Err(e) => Err(e),
+                    Ok(args) => {
+                        let mut args = args.unwrap_or_default();
+                        if let Some(value) = ttl_relative {
+                            args.insert("ttl_relative".into(), value.into());
+                        }
+                        if let Some(value) = ttl_absolute {
+                            args.insert("ttl_absolute".into(), value.into());
+                        }
+                        let resource_args = Some(serde_json::Value::Object(args).to_string());
+                        handlers::handle_add_resource(
+                            path,
+                            add_type,
+                            to,
+                            parent,
+                            parent_auto_create,
+                            reason,
+                            instruction,
+                            wait,
+                            timeout,
+                            strict_mode,
+                            ignore_dirs,
+                            include,
+                            exclude,
+                            no_directly_upload_media,
+                            watch_interval.unwrap_or(0.0),
+                            processing_mode,
+                            resource_args,
+                            tags,
+                            tag_mode,
+                            ctx,
+                        )
+                        .await
+                    }
+                }
             } else {
                 Err(error::Error::Client(
                     "a path/URL or --manifest is required".to_string(),
                 ))
             }
+        }
+        Commands::UpdateResourceConfig {
+            uri,
+            ttl_relative,
+            ttl_absolute,
+        } => {
+            let body = serde_json::json!({"uri": uri, "ttl_relative": ttl_relative, "ttl_absolute": ttl_absolute});
+            ctx.get_client()
+                .patch::<_, serde_json::Value>("/api/v1/resources/config", &body, &[])
+                .await
+                .map(|result| {
+                    output::output_success(&result, ctx.output_format, ctx.compact);
+                })
         }
         Commands::AddSkill(args) => {
             handlers::handle_add_skill(args, legacy_upload_options, ctx).await
@@ -3869,6 +3911,57 @@ mod tests {
 
     fn os_args(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn resource_ttl_flags_are_exclusive_and_require_positive_days() {
+        let cli =
+            Cli::try_parse_from(["ov", "add-resource", "a.md", "--ttl-relative", "7"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::AddResource {
+                ttl_relative: Some(7),
+                ttl_absolute: None,
+                ..
+            }
+        ));
+        for values in [
+            vec!["ov", "add-resource", "a.md", "--ttl-relative", "0"],
+            vec![
+                "ov",
+                "add-resource",
+                "a.md",
+                "--ttl-relative",
+                "7",
+                "--ttl-absolute",
+                "2000000000",
+            ],
+            vec![
+                "ov",
+                "add-resource",
+                "--manifest",
+                "a.json",
+                "--ttl-relative",
+                "7",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(values).is_err());
+        }
+        let cli = Cli::try_parse_from([
+            "ov",
+            "update-resource-config",
+            "viking://~/resources/reports",
+            "--ttl-absolute",
+            "2000000000",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::UpdateResourceConfig {
+                ttl_absolute: Some(2000000000),
+                ..
+            }
+        ));
     }
 
     #[test]

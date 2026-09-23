@@ -42,7 +42,7 @@ from openviking.utils.git_auth import is_git_https_url
 from openviking.utils.ingest_options import IngestOptions
 from openviking.utils.log_correlation import log_correlation
 from openviking.utils.summarizer import Summarizer
-from openviking_cli.exceptions import OpenVikingError
+from openviking_cli.exceptions import InvalidArgumentError, OpenVikingError
 from openviking_cli.utils import VikingURI, get_logger
 from openviking_cli.utils.config import get_openviking_config
 from openviking_cli.utils.storage import StoragePath
@@ -672,6 +672,13 @@ class ResourceProcessor:
             "errors": [],
             "source_path": None,
         }
+        from openviking_cli.utils.config.ttl_config import ResourceTTL
+
+        expected_ttl_generation = kwargs.pop("expected_ttl_generation", None)
+        resource_ttl = ResourceTTL(
+            ttl_relative=kwargs.pop("ttl_relative", None),
+            ttl_absolute=kwargs.pop("ttl_absolute", None),
+        ).model_dump(exclude_none=True)
         defer_post_processing = bool(kwargs.pop("defer_post_processing", False))
         preacquired_lock = kwargs.pop("resource_lock", None)
         ingest_options = IngestOptions.from_value(kwargs.pop("ingest_options", None))
@@ -880,6 +887,7 @@ class ResourceProcessor:
             local_artifact_doc_rel = ""
             incremental_noop = False
             context_update_plan = None
+            ttl_fields = {}
 
             if root_uri and temp_uri:
                 viking_fs = get_viking_fs()
@@ -928,6 +936,46 @@ class ResourceProcessor:
                                 uri=root_uri,
                                 root_is_file=root_is_file,
                             )
+                    from openviking.storage.resource_ttl import (
+                        prepare_resource_ttl,
+                        resource_ttl_fields,
+                    )
+
+                    if expected_ttl_generation is not None:
+                        # A Watch owns one import root. Replaying a parent that
+                        # has independently expiring descendants could recreate
+                        # them after cleanup; the persistent summary marker also
+                        # covers descendants already physically removed.
+                        if await viking_fs.ttl_registry.summary_requires_snapshot(
+                            ctx.account_id, root_uri
+                        ):
+                            raise InvalidArgumentError(
+                                "Watch refresh cannot cover independently expiring resources; "
+                                "watch their individual import roots instead"
+                            )
+                        live_fields = await resource_ttl_fields(viking_fs, root_uri, ctx=ctx)
+                        if (live_fields.get("ttl_generation") or "") != expected_ttl_generation:
+                            await self._cleanup_parse_result_artifact(
+                                parse_result,
+                                output_store=output_store,
+                                viking_fs=viking_fs,
+                                ctx=ctx,
+                            )
+                            return {
+                                "status": "success",
+                                "root_uri": root_uri,
+                                "skipped": "stale_ttl_generation",
+                                "_resource_lock": resource_lock,
+                            }
+                    ttl_fields = await prepare_resource_ttl(
+                        viking_fs,
+                        root_uri,
+                        is_dir=not root_is_file,
+                        existing=target_preexisting,
+                        ctx=ctx,
+                        lease_ref=resource_lock,
+                        resource_ttl=resource_ttl,
+                    )
                     artifact_ref = self._ensure_parse_artifact_ref(parse_result)
                     artifact_store = self._store_for_parse_artifact(
                         artifact_ref, output_store=output_store, viking_fs=viking_fs, ctx=ctx
@@ -994,6 +1042,7 @@ class ResourceProcessor:
                 prepared_artifact_ref["resource_rel"] = local_artifact_doc_rel
             prepared = {
                 "root_uri": root_uri,
+                "ttl_generation": ttl_fields.get("ttl_generation"),
                 "temp_uri": temp_uri or parse_result.temp_dir_path,
                 "temp_dir_path": parse_result.temp_dir_path,
                 "artifact_ref": prepared_artifact_ref,
@@ -1046,6 +1095,21 @@ class ResourceProcessor:
         from openviking.metrics.datasources.resource import ResourceIngestionEventDataSource
 
         root_uri = str(prepared.get("root_uri") or "")
+        if prepared.get("ttl_generation"):
+            from openviking.storage.resource_ttl import resource_ttl_fields, resource_ttl_visible
+
+            fs = get_viking_fs()
+            fields = await resource_ttl_fields(fs, root_uri, ctx=ctx)
+            if fields.get("ttl_generation") != prepared[
+                "ttl_generation"
+            ] or not await resource_ttl_visible(fs, root_uri, ctx=ctx, require_source=True):
+                if resource_lock is not None:
+                    await fs._async_agfs.pathlock_release(resource_lock)
+                return {
+                    "status": "success",
+                    "root_uri": root_uri,
+                    "skipped": "stale_ttl_generation",
+                }
         temp_uri = prepared.get("temp_uri")
         temp_dir_path = prepared.get("temp_dir_path")
         # Canonical plans contain only final resource URIs. An artifact ref is

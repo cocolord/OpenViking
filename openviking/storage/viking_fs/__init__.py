@@ -158,6 +158,7 @@ class VikingFS(
         from openviking.storage.ttl_registry import TTLRegistry
 
         self.ttl_registry = TTLRegistry(self._async_agfs)
+        self.runtime_config_manager = None
 
 
 VikingFS.__module__ = __name__

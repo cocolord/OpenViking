@@ -779,6 +779,34 @@ class AsyncHTTPClient:
         response = await self._request("POST", "/api/v1/resources", json=request_data)
         return self._handle_response_data(response).get("result", {})
 
+    async def update_resource_config(
+        self, uri: str, *, ttl_relative: Optional[int] = None, ttl_absolute: Optional[int] = None
+    ) -> Dict[str, Any]:
+        response = await self._request(
+            "PATCH",
+            "/api/v1/resources/config",
+            json={
+                "uri": VikingURI.normalize(uri),
+                "ttl_relative": ttl_relative,
+                "ttl_absolute": ttl_absolute,
+            },
+        )
+        return self._handle_response_data(response).get("result", {})
+
+    async def get_resource_ttl(self, uri: str) -> Dict[str, Any]:
+        response = await self._request(
+            "GET", "/api/v1/resources/ttl", params={"uri": VikingURI.normalize(uri)}
+        )
+        return self._handle_response_data(response).get("result", {})
+
+    async def update_resource_ttl(self, uri: str, expires_at: str) -> Dict[str, Any]:
+        response = await self._request(
+            "PATCH",
+            "/api/v1/resources/ttl",
+            json={"uri": VikingURI.normalize(uri), "expires_at": expires_at},
+        )
+        return self._handle_response_data(response).get("result", {})
+
     async def batch_add_messages(
         self,
         session_id: str,
@@ -2253,6 +2281,21 @@ class SyncHTTPClient:
                 options=options,
             )
         )
+
+    def update_resource_config(
+        self, uri: str, *, ttl_relative: Optional[int] = None, ttl_absolute: Optional[int] = None
+    ) -> Dict[str, Any]:
+        return run_async(
+            self._async_client.update_resource_config(
+                uri, ttl_relative=ttl_relative, ttl_absolute=ttl_absolute
+            )
+        )
+
+    def get_resource_ttl(self, uri: str) -> Dict[str, Any]:
+        return run_async(self._async_client.get_resource_ttl(uri))
+
+    def update_resource_ttl(self, uri: str, expires_at: str) -> Dict[str, Any]:
+        return run_async(self._async_client.update_resource_ttl(uri, expires_at))
 
     def batch_add_messages(
         self,

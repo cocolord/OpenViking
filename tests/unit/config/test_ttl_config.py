@@ -119,7 +119,6 @@ def test_directory_only_policy_enables_ttl_and_normalizes_slash():
 def test_directory_key_must_be_concrete_user_uri():
     invalid_uris = [
         "/local/a",
-        "viking://user/u1/resources/project",
         "viking://user/u1/preferences",
         "viking://user/u1/memories/entities",
         "viking://user/u1/sessions/s1",

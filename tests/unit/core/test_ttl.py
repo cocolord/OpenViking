@@ -45,7 +45,7 @@ def _install_config(monkeypatch, config: TTLConfig | None) -> None:
         # Out of scope: never TTL these.
         ("viking://user/u1/memories/notes/n.md", None),
         ("viking://user/u1/preferences/p", None),
-        ("viking://user/u1/resources/r.md", None),
+        ("viking://user/u1/resources/r.md", "resources"),
         ("viking://user/u1/peers/p1/memories/notes/n.md", None),
         ("viking://user/u1", None),
         ("not-a-viking-uri", None),
@@ -120,8 +120,9 @@ def test_resolve_ttl_days_uses_scope_then_global(monkeypatch):
     assert ttl.resolve_ttl_days("viking://user/u1/memories/events/e.md") == 30
     assert ttl.resolve_ttl_days("viking://user/u1/sessions/s1") == 7
     assert ttl.resolve_ttl_days("viking://user/u1/peers/p1/memories/events/e.md") is None
+    assert ttl.resolve_ttl_days("viking://user/u1/resources/r.md") == 7
     # Out-of-scope URIs are never TTL'd even when global is on.
-    assert ttl.resolve_ttl_days("viking://user/u1/resources/r.md") is None
+    assert ttl.resolve_ttl_days("viking://user/u1/skills/r.md") is None
 
 
 def test_resolve_ttl_days_none_when_config_unavailable(monkeypatch):
@@ -163,8 +164,9 @@ def test_freeze_ttl_fields_snapshot(monkeypatch):
 def test_freeze_ttl_fields_none_when_out_of_scope(monkeypatch):
     config = TTLConfig(**{"global": {"mode": "days", "ttl_days": 5}})
     _install_config(monkeypatch, config)
-    # sessions inherits global -> frozen; resources never in scope -> None
-    assert ttl.freeze_ttl_fields("viking://user/u1/resources/r.md") is None
+    # Sessions and resources inherit global; skills remain outside TTL.
+    assert ttl.freeze_ttl_fields("viking://user/u1/skills/r.md") is None
+    assert ttl.freeze_ttl_fields("viking://user/u1/resources/r.md") is not None
     assert ttl.freeze_ttl_fields("viking://user/u1/sessions/s1") is not None
 
 

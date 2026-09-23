@@ -19,6 +19,8 @@ from openviking_cli.session.user_id import UserIdentifier
 class _DummyAgfs:
     def stat(self, _path, ctx=None):
         """Return a minimal stat payload for paths assumed to exist in tree tests."""
+        if "/_system/ttl/" in _path or _path.endswith(".ttl.json"):
+            raise FileNotFoundError(_path)
         return {}
 
 

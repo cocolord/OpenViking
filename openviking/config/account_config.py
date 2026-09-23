@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from openviking_cli.utils.config.agent_evolution_config import AgentEvolutionConfig
 from openviking_cli.utils.config.github_config import GitHubConfig
 from openviking_cli.utils.config.runtime_field import RuntimeField
+from openviking_cli.utils.config.ttl_config import TTLConfig
 
 
 class AccountAclSettings(BaseModel):
@@ -57,6 +58,7 @@ class AccountConfig(BaseModel):
         fallback="agent_evolution",
     )
     acl: Optional[AccountAclSettings] = RuntimeField(default=None)
+    ttl: Optional[TTLConfig] = RuntimeField(default=None, fallback="ttl")
 
     # Deferred account-level sections (vlm, memory, embedding, vectordb)
     # have no active consumers. Ignore historical or newer persisted sections;

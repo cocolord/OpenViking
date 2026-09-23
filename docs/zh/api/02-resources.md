@@ -184,6 +184,8 @@ URL/文件  Parser  TreeBuilder  AGFS    Summarizer/Vector
 | processing_mode | string | 否 | `semantic_and_vectors` | 入库后的处理模式。`semantic_and_vectors` 是默认流程：生成语义产物（`.abstract.md`、`.overview.md`）并生成向量。`vectors_only` 跳过语义理解/VLM 总结，只对当前资源文件生成向量 |
 | tags | string[] | 否 | None | 导入时写入向量检索记录的显式检索标签，格式必须是 `k=v`，例如 `["team=search", "env=test"]`。搜索接口可用同名 `tags` 参数过滤召回 |
 | tag_mode | string | 否 | `"replace"` | `tags` 的写入模式，可选 `replace` 或 `append`。导入新资源时会随本次生成的每条向量记录写入；不会在完成后额外调用 `set_tags`，响应也不返回 `tags_result` |
+| ttl_relative | integer | 否 | null | 保留天数，正整数；与 `ttl_absolute` 互斥 |
+| ttl_absolute | integer | 否 | null | 到期时间，Unix 秒级时间戳；与 `ttl_relative` 互斥 |
 | telemetry | TelemetryRequest | 否 | False | 是否返回遥测数据 |
 
 **补充说明**：
@@ -732,6 +734,30 @@ shared 模式的响应示例：
 ```
 
 ---
+
+## 资源 TTL
+
+TTL 默认关闭，公共资源、用户资源和 peer 资源使用相同规则。创建时按“本次导入显式参数 > 最近目录策略 > resources 范围默认 > 库全局默认”解析；导入时不传 `ttl_relative` 和 `ttl_absolute` 则继承策略。
+
+生命周期归属于实际导入根：解析后的文档或导入目录连同整棵子树一起到期；`no_split` 生成的独立文件只清理自身，不影响同目录其他资源。到期时间在创建时冻结，不使用目录修改时间。重复导入、内容修改和 Watch 刷新保留原期限；目录策略修改或关闭仅影响之后创建的资源。
+
+```python
+client.add_resource("./guide.md", ttl_relative=7)
+client.update_resource_config("viking://resources/docs", ttl_relative=30)
+# 关闭此路径下后续导入资源的 TTL。
+client.update_resource_config("viking://resources/docs")
+```
+
+```bash
+ov add-resource ./guide.md --ttl-relative 7
+ov update-resource-config viking://resources/docs --ttl-relative 30
+```
+
+HTTP 导入使用 `POST /api/v1/resources`；修改后续策略使用 `PATCH /api/v1/resources/config`，传入 `uri` 和一个 TTL 参数。MCP 对应 `add_resource`、`update_resource_config`。外部 Connector 导入使用已配置的目录策略，该路径不接受单次导入 TTL 参数。
+
+`GET /api/v1/resources/ttl?uri=...` 读取实际生效的冻结元数据。`PATCH /api/v1/resources/ttl` 传入 `uri` 和 ISO 8601 格式的 `expires_at`，可调整存活资源已有的到期时间；保留 generation，不改变兄弟资源或目录策略。此入口不恢复已过期数据，也不为历史未纳管资源补设 TTL。若资源属于另一资源子树，仍受父资源更早的期限约束。
+
+到期后先隐藏正文、子树、摘要和检索候选，再异步物理清理。清理复用持久化任务队列和文件／向量严格删除；失败保留登记并重试。复制、移动与 OVPack 保留冻结期限。TTL 状态保存在 OV 元数据中，不增加公有云向量字段。Watch 应绑定生命周期一致的导入根；若父目录包含独立到期的子资源，父目录刷新会报错，即使子资源已清理也不会重新导入，应分别监控各资源根。
 
 ## 相关文档
 

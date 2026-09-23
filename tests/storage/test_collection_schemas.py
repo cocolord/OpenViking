@@ -56,6 +56,27 @@ from openviking_cli.utils.config.vectordb_config import (
 )
 
 
+@pytest.fixture(autouse=True)
+def default_resource_ttl_disabled(monkeypatch):
+    async def stat(path, **kwargs):
+        if path.endswith(".ttl.json"):
+            raise FileNotFoundError(path)
+        return {"isDir": False}
+
+    fs = SimpleNamespace(
+        ttl_registry=SimpleNamespace(
+            account_may_have_records=AsyncMock(return_value=False), get=AsyncMock(return_value=None)
+        ),
+        _uri_to_path=lambda uri, **kwargs: uri,
+        _async_agfs=SimpleNamespace(
+            stat=stat,
+            pathlock_acquire_exact=AsyncMock(return_value={}),
+            pathlock_release=AsyncMock(),
+        ),
+    )
+    monkeypatch.setattr("openviking.storage.viking_fs.get_viking_fs", lambda: fs)
+
+
 class _DummyEmbedder:
     def __init__(self):
         self.calls = 0

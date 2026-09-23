@@ -1153,6 +1153,25 @@ async def _maybe_sitemap_hint(path: str) -> str:
 
 
 @mcp.tool()
+async def update_resource_config(
+    uri: str, ttl_relative: Optional[int] = None, ttl_absolute: Optional[int] = None
+) -> str:
+    """Set TTL for future resource imports at a path; omit both values to disable.
+
+    ttl_relative is whole days; ttl_absolute is a Unix timestamp in seconds.
+    Existing resources retain their frozen expiry.
+    """
+    ctx = _get_ctx()
+    from openviking.core.uri_validation import validate_content_target_uri
+
+    uri = validate_content_target_uri(uri, ctx, kind="resource")
+    result = await get_service().resources.update_resource_config(
+        uri, ctx, ttl_relative=ttl_relative, ttl_absolute=ttl_absolute
+    )
+    return f"Resource TTL policy updated: {result}"
+
+
+@mcp.tool()
 async def add_resource(
     path: str = "",
     temp_file_id: str = "",
@@ -1165,6 +1184,8 @@ async def add_resource(
     tags: Optional[list[str]] = None,
     tag_mode: str = "replace",
     args: Optional[dict[str, Any]] = None,
+    ttl_relative: Optional[int] = None,
+    ttl_absolute: Optional[int] = None,
 ) -> str:
     """Add a resource to OpenViking. Asynchronous — processing happens in the background.
 
@@ -1273,6 +1294,8 @@ async def add_resource(
                 processing_mode=processing_mode,
                 tags=tags,
                 tag_mode=tag_mode,
+                ttl_relative=ttl_relative,
+                ttl_absolute=ttl_absolute,
             )
         except (PermissionDeniedError, InvalidArgumentError) as exc:
             return f"Error: {exc}"
@@ -1327,6 +1350,8 @@ async def add_resource(
                 args=args,
                 tags=tags,
                 tag_mode=tag_mode,
+                ttl_relative=ttl_relative,
+                ttl_absolute=ttl_absolute,
             )
         except Exception as exc:
             return f"Error adding resource: {exc}"
@@ -1373,6 +1398,8 @@ async def add_resource(
         tags=tags,
         tag_mode=tag_mode,
         parse_mode=mode.value,
+        ttl_relative=ttl_relative,
+        ttl_absolute=ttl_absolute,
     )
     base_url, url_source = _resolve_public_base_url()
     upload_url = f"{base_url}/api/v1/resources/temp_upload?token={quote(token, safe='')}"

@@ -14,6 +14,7 @@ from openviking.core.ttl import hidden_by_ttl
 from openviking.pyagfs import AsyncAGFSClient
 from openviking.server.error_mapping import is_not_found_error
 from openviking.server.identity import RequestContext, Role
+from openviking.service.periodic_task import PeriodicTask
 from openviking.session.auto_commit_policy import AutoCommitPolicy
 from openviking.utils.time_utils import parse_iso_datetime
 from openviking_cli.session.user_id import UserIdentifier
@@ -25,7 +26,7 @@ SESSION_META_SUFFIX = "/.meta.json"
 AGFS_SESSION_SCAN_ROOT = "/local"
 
 
-class SessionAutoCommitScheduler:
+class SessionAutoCommitScheduler(PeriodicTask):
     """Scheduler for idle-based automatic session commits."""
 
     DEFAULT_CHECK_INTERVAL = 60.0
@@ -48,44 +49,12 @@ class SessionAutoCommitScheduler:
             0.0,
             float(getattr(config, "scan_batch_pause_seconds", 0.0) or 0.0),
         )
-        self._sleep = sleep
-        self._running = False
-        self._task: Optional[asyncio.Task] = None
+        super().__init__(interval=self._check_interval, sleep=sleep)
         self._agfs_client: Optional[AsyncAGFSClient] = None
 
-    async def start(self) -> None:
-        if self._running:
-            return
-        self._running = True
-        logger.info(
-            "SessionAutoCommitScheduler started with check interval %.3fs", self._check_interval
-        )
-        self._task = asyncio.create_task(self._run_loop())
-
-    async def stop(self) -> None:
-        self._running = False
-        if self._task is not None:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
-
-    async def _run_loop(self) -> None:
-        while self._running:
-            try:
-                await self._sleep(self._check_interval)
-            except asyncio.CancelledError:
-                break
-
-            try:
-                if self._config.idle_enabled:
-                    await self._scan_once()
-            except Exception as exc:
-                logger.error("Session auto-commit scheduler loop failed: %s", exc, exc_info=True)
-
     async def _scan_once(self) -> None:
+        if not self._config.idle_enabled:
+            return
         now = datetime.now(timezone.utc)
         scanned = 0
         due = 0

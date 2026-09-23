@@ -18,9 +18,13 @@ from openviking.core.namespace import (
 )
 from openviking.core.ttl import (
     OBJECT_TYPE_EVENT,
+    OBJECT_TYPE_RESOURCE,
+    OBJECT_TYPE_RESOURCE_FILE,
     OBJECT_TYPE_SESSION,
     ttl_enabled,
+    ttl_metadata_uri,
     ttl_object_for_uri,
+    ttl_scope_for_uri,
 )
 from openviking.pyagfs.exceptions import (
     AGFSClientError,
@@ -330,6 +334,7 @@ class _OpsMixin:
             if strict:
                 await self._confirm_vector_scope_cleared(target_uri, ctx=ctx)
                 await self._confirm_fs_scope_cleared(path, target_uri)
+            await self._remove_resource_file_metadata(target_uri, ctx=ctx, lease_ref=lease_ref)
             logger.info(f"[VikingFS] rm target not found, cleaned orphan index: {uri}")
             return {"estimated_deleted_count": estimated_count}
 
@@ -403,10 +408,28 @@ class _OpsMixin:
             if strict:
                 await self._confirm_vector_scope_cleared(target_uri, ctx=ctx)
                 await self._confirm_fs_scope_cleared(path, target_uri)
+            await self._remove_resource_file_metadata(target_uri, ctx=ctx, lease_ref=lease_ref)
             return result
         finally:
             if lease_ref is None and lease is not None:
                 await self._async_agfs.pathlock_release(lease)
+
+    async def _remove_resource_file_metadata(self, uri: str, *, ctx, lease_ref=None) -> None:
+        if ttl_scope_for_uri(uri) != "resources" or ttl_object_for_uri(uri) is not None:
+            return
+        metadata_uri = ttl_metadata_uri(OBJECT_TYPE_RESOURCE_FILE, uri)
+        path = self._uri_to_path(metadata_uri, ctx=ctx)
+        try:
+            await self._async_agfs.stat(path, bypass_cache=True)
+        except Exception as exc:
+            if is_storage_not_found(exc):
+                return
+            raise
+        lease = await self._async_agfs.pathlock_acquire_exact(path, owner_lease_ref=lease_ref)
+        try:
+            await self.remove_files(metadata_uri, ctx=ctx, lease_ref=lease)
+        finally:
+            await self._async_agfs.pathlock_release(lease)
 
     async def remove_files(
         self,
@@ -621,6 +644,17 @@ class _OpsMixin:
                     )
 
         await visit(old_uri, new_uri, is_dir)
+        if not is_dir and ttl_scope_for_uri(old_uri) == "resources":
+            metadata_uri = ttl_metadata_uri(OBJECT_TYPE_RESOURCE_FILE, old_uri)
+            try:
+                await self._async_agfs.stat(
+                    self._uri_to_path(metadata_uri, ctx=ctx), bypass_cache=True
+                )
+            except Exception as exc:
+                if not is_storage_not_found(exc):
+                    raise
+            else:
+                source_uris.append(metadata_uri)
         return source_uris
 
     async def _ensure_copy_source_access(
@@ -718,8 +752,26 @@ class _OpsMixin:
         ctx: Optional[RequestContext],
         lease_ref: Dict[str, Any],
     ) -> int:
+        fields = {}
+        if ttl_scope_for_uri(old_uri) == "resources":
+            from openviking.storage.resource_ttl import resource_ttl_fields, write_resource_fields
+
+            fields = await resource_ttl_fields(self, old_uri, ctx=self._ctx_or_default(ctx))
+            if fields:
+                if ttl_scope_for_uri(new_uri) != "resources":
+                    raise InvalidArgumentError(
+                        "TTL resources must remain in the resources namespace"
+                    )
+                await write_resource_fields(
+                    self,
+                    OBJECT_TYPE_RESOURCE if is_dir else OBJECT_TYPE_RESOURCE_FILE,
+                    new_uri,
+                    fields,
+                    ctx=self._ctx_or_default(ctx),
+                    lease_ref=lease_ref,
+                )
         if is_dir:
-            return await self._copy_directory_under_tree_locks(
+            copied = await self._copy_directory_under_tree_locks(
                 old_path,
                 new_path,
                 old_uri=old_uri,
@@ -727,6 +779,16 @@ class _OpsMixin:
                 ctx=ctx,
                 lease_ref=lease_ref,
             )
+            if fields:
+                await write_resource_fields(
+                    self,
+                    OBJECT_TYPE_RESOURCE,
+                    new_uri,
+                    fields,
+                    ctx=self._ctx_or_default(ctx),
+                    lease_ref=lease_ref,
+                )
+            return copied
 
         await self._async_agfs.cp(
             old_path,
@@ -749,6 +811,10 @@ class _OpsMixin:
             recursive=is_dir,
             fs_ctx=self._pathlock_fs_ctx(ctx, lease_ref),
         )
+        if not is_dir:
+            await self._remove_resource_file_metadata(
+                self._path_to_uri(path, ctx=ctx), ctx=ctx, lease_ref=lease_ref
+            )
 
     async def mv(
         self,
@@ -924,6 +990,8 @@ class _OpsMixin:
                 old_path, recursive=is_dir, fs_ctx=self._pathlock_fs_ctx(ctx, lease)
             )
             await self._remove_transferred_ttl_records(uris_to_move, ctx=ctx)
+            if not is_dir:
+                await self._remove_resource_file_metadata(old_uri, ctx=ctx, lease_ref=lease)
             result: Dict[str, Any] = {
                 "operation_id": operation_id,
                 "operation": "move",
@@ -966,23 +1034,48 @@ class _OpsMixin:
         source_uri_set = {uri.rstrip("/") for uri in source_uris}
         registrations: set[tuple[str, str]] = set()
         for source_uri in source_uris:
-            target_uri = new_scope + source_uri.rstrip("/")[len(old_scope) :]
+            if source_uri == ttl_metadata_uri(OBJECT_TYPE_RESOURCE_FILE, old_scope):
+                target_uri = ttl_metadata_uri(OBJECT_TYPE_RESOURCE_FILE, new_scope)
+            else:
+                target_uri = new_scope + source_uri.rstrip("/")[len(old_scope) :]
             target = ttl_object_for_uri(target_uri)
             if target is None:
                 continue
             object_type, object_uri = target
-            target_registration_uri = (
-                f"{object_uri}/.meta.json" if object_type == OBJECT_TYPE_SESSION else object_uri
+            target_registration_uri = ttl_metadata_uri(object_type, object_uri)
+            source_registration_uri = (
+                source_uri
+                if object_type == OBJECT_TYPE_RESOURCE_FILE
+                else old_scope + target_registration_uri[len(new_scope) :]
             )
-            source_registration_uri = old_scope + target_registration_uri[len(new_scope) :]
             if source_registration_uri not in source_uri_set:
                 continue
             registrations.add((source_registration_uri, target_registration_uri))
 
         fs_ctx = self._pathlock_fs_ctx(ctx, lease_ref)
         mutations: List[_TTLWriteMutation] = []
+        resource_root_metadata = None
         try:
+            if ttl_scope_for_uri(old_scope) == "resources":
+                from openviking.storage.resource_ttl import resource_ttl_fields
+
+                fields = await resource_ttl_fields(self, old_scope, ctx=self._ctx_or_default(ctx))
+                if fields:
+                    if ttl_scope_for_uri(new_scope) != "resources":
+                        raise InvalidArgumentError(
+                            "TTL resources must remain in the resources namespace"
+                        )
+                    stat = await self._async_agfs.stat(self._uri_to_path(old_scope, ctx=ctx))
+                    kind = OBJECT_TYPE_RESOURCE if stat.get("isDir") else OBJECT_TYPE_RESOURCE_FILE
+                    resource_root_metadata = ttl_metadata_uri(kind, new_scope)
+                    mutation = await self._prepare_ttl_write(
+                        resource_root_metadata, json.dumps(fields).encode(), ctx=ctx
+                    )
+                    if mutation is not None:
+                        mutations.append(mutation)
             for source_uri, target_uri in sorted(registrations):
+                if target_uri == resource_root_metadata:
+                    continue
                 path = self._uri_to_path(source_uri, ctx=ctx)
                 stat = await self._async_agfs.stat(path, fs_ctx=fs_ctx)
                 if isinstance(stat, dict) and stat.get("isDir", False):
@@ -1014,6 +1107,27 @@ class _OpsMixin:
     ) -> None:
         """Undo projections for target bytes that were not published."""
         for mutation in mutations:
+            desired = mutation.desired
+            if desired is not None and desired.object_type in {
+                OBJECT_TYPE_RESOURCE,
+                OBJECT_TYPE_RESOURCE_FILE,
+            }:
+                from openviking.storage.resource_ttl import read_resource_fields
+
+                fields = await read_resource_fields(
+                    self, desired.object_type, desired.object_uri, ctx=self._ctx_or_default(ctx)
+                )
+                if fields is not None:
+                    # A failed copy can leave published bytes. Keep their cleanup
+                    # registration instead of rolling it back to an absent object.
+                    await self.ttl_registry.upsert(
+                        replace(
+                            desired,
+                            expires_at=fields["expires_at"],
+                            generation=fields["ttl_generation"],
+                        )
+                    )
+                    continue
             await self._rollback_ttl_write(mutation, ctx=ctx)
 
     async def _remove_transferred_ttl_records(
@@ -2441,7 +2555,7 @@ class _OpsMixin:
             return None
         object_type, object_uri = target
         text = content.decode("utf-8")
-        if object_type == OBJECT_TYPE_SESSION:
+        if object_type in {OBJECT_TYPE_SESSION, OBJECT_TYPE_RESOURCE, OBJECT_TYPE_RESOURCE_FILE}:
             fields = json.loads(text)
         else:
             from openviking.session.memory.utils.messages import (

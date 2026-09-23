@@ -791,7 +791,7 @@ class _AccessMixin:
                 ):
                     return False
             return not hidden_by_ttl(expires_at)
-        if ttl_scope_for_uri(uri) in {"user_events", "peer_events"}:
+        if ttl_scope_for_uri(uri) in {"user_events", "peer_events", "resources"}:
             # Legacy summaries have no trustworthy dependency deadline. Once
             # TTL is in use they must be regenerated before serving their body.
             directory_uri = (
@@ -820,6 +820,20 @@ class _AccessMixin:
         become visible when cleanup has already removed their source metadata.
         """
         scope = ttl_scope_for_uri(uri)
+        if scope == "resources":
+            from openviking.storage.internal_names import is_ttl_metadata_name
+            from openviking.storage.resource_ttl import resource_ttl_visible
+
+            if is_ttl_metadata_name(uri.rsplit("/", 1)[-1]):
+                target = ttl_object_for_uri(uri)
+                return target is not None and await resource_ttl_visible(
+                    self, target[1], ctx=ctx, require_source=True
+                )
+            if ttl_enabled() or await self.ttl_registry.account_may_have_records(ctx.account_id):
+                if not await resource_ttl_visible(
+                    self, uri, ctx=ctx, require_source=require_source
+                ):
+                    return False
         if scope != "sessions" and uri.rsplit("/", 1)[-1] in {".abstract.md", ".overview.md"}:
             candidates = [path] if path is not None else self._read_paths(uri, ctx=ctx)
             for candidate in candidates:
@@ -836,7 +850,7 @@ class _AccessMixin:
                     uri, raw, ctx, vector_abstract=vector_abstract
                 )
             return False
-        if scope is None:
+        if scope is None or scope == "resources":
             return True
         if not ttl_enabled() and not await self.ttl_registry.account_may_have_records(
             ctx.account_id

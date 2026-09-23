@@ -662,8 +662,11 @@ def test_refresh_does_not_resurrect_evicted_account():
 
 def test_account_config_field_attributes():
     fields = AccountConfig.model_fields
-    assert set(fields) == {"acl", "agent_evolution", "feishu", "github"}
-    assert collect_runtime_field_paths(AccountConfig) == {
+    from openviking_cli.utils.config.ttl_config import TTLConfig
+
+    assert set(fields) == {"acl", "agent_evolution", "feishu", "github", "ttl"}
+    ttl_paths = {("ttl",), *(("ttl", *path) for path in collect_runtime_field_paths(TTLConfig))}
+    assert collect_runtime_field_paths(AccountConfig) - ttl_paths == {
         ("acl",),
         ("acl", "enabled"),
         ("agent_evolution",),
@@ -684,6 +687,8 @@ def test_account_config_field_attributes():
     assert fallback_of(fields["github"]) is None
     assert is_dynamic(fields["agent_evolution"])
     assert fallback_of(fields["agent_evolution"]) == "agent_evolution"
+    assert fallback_of(fields["ttl"]) == "ttl"
+    assert is_dynamic(fields["ttl"])
     assert collect_frozen_paths(AccountConfig) == set()
 
 

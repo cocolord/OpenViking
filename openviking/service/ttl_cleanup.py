@@ -21,11 +21,15 @@ from uuid import NAMESPACE_URL, uuid5
 
 from openviking.core.ttl import (
     OBJECT_TYPE_EVENT,
+    OBJECT_TYPE_RESOURCE,
+    OBJECT_TYPE_RESOURCE_FILE,
     OBJECT_TYPE_SESSION,
     hidden_by_ttl,
+    ttl_metadata_uri,
 )
 from openviking.server.error_mapping import is_storage_not_found
 from openviking.server.identity import RequestContext, Role
+from openviking.service.periodic_task import PeriodicTask
 from openviking.service.task_store import SYSTEM_TASK_ACCOUNT_ID, SYSTEM_TASK_USER_ID
 from openviking.service.task_tracker import TaskStatus, get_task_tracker
 from openviking.service.task_tracker_concurrency import OwnerLoopDispatcher, run_to_completion
@@ -191,7 +195,25 @@ class TTLCleanupService:
             parent_uri = VikingURI(scheduled.object_uri).parent.uri
             lease = await viking_fs._async_agfs.pathlock_acquire_batch(
                 [
-                    {"path": object_path, "kind": "exact"},
+                    {
+                        "path": object_path,
+                        "kind": "tree"
+                        if scheduled.object_type == OBJECT_TYPE_RESOURCE
+                        else "exact",
+                    },
+                    *(
+                        [
+                            {
+                                "path": viking_fs._uri_to_path(
+                                    ttl_metadata_uri(scheduled.object_type, scheduled.object_uri),
+                                    ctx=ctx,
+                                ),
+                                "kind": "exact",
+                            }
+                        ]
+                        if scheduled.object_type == OBJECT_TYPE_RESOURCE_FILE
+                        else []
+                    ),
                     {
                         "path": viking_fs._uri_to_path(f"{parent_uri}/.abstract.md", ctx=ctx),
                         "kind": "exact",
@@ -236,14 +258,19 @@ class TTLCleanupService:
             # Missing source still requires strict vector cleanup.  Passing the
             # already-held lease makes the live re-check and the whole delete
             # one critical section; writers cannot renew or recreate between.
-            await viking_fs.rm(
+            remove = (
+                self._service.fs.rm
+                if scheduled.object_type in {OBJECT_TYPE_RESOURCE, OBJECT_TYPE_RESOURCE_FILE}
+                else viking_fs.rm
+            )
+            await remove(
                 scheduled.object_uri,
-                recursive=scheduled.object_type == OBJECT_TYPE_SESSION,
+                recursive=scheduled.object_type in {OBJECT_TYPE_SESSION, OBJECT_TYPE_RESOURCE},
                 ctx=ctx,
                 lease_ref=lease,
                 strict=True,
             )
-            if scheduled.object_type == OBJECT_TYPE_EVENT:
+            if scheduled.object_type != OBJECT_TYPE_SESSION:
                 await self._invalidate_event_parent(
                     event_uri=scheduled.object_uri,
                     ctx=ctx,
@@ -278,12 +305,15 @@ class TTLCleanupService:
         summary before the files and exact parent L0/L1 vectors are removed.
         Rebuild is asynchronous; invalidation itself is part of strict cleanup.
         """
+        from openviking.core.namespace import context_type_for_uri
+
+        context_type = context_type_for_uri(event_uri)
         parent_uri = VikingURI(event_uri).parent.uri
         queue_manager = self._service._queue_manager
         semantic_queue = queue_manager.get_queue(queue_manager.SEMANTIC, allow_create=True)
         semantic_msg = SemanticMsg(
             uri=parent_uri,
-            context_type="memory",
+            context_type=context_type,
             recursive=False,
             account_id=ctx.account_id,
             user_id=ctx.user.user_id,
@@ -292,7 +322,7 @@ class TTLCleanupService:
             changes={"deleted": [event_uri]},
             generation_trigger="ttl_cleanup",
             coalesce_key=build_semantic_coalesce_key(
-                context_type="memory",
+                context_type=context_type,
                 uri=parent_uri,
                 account_id=ctx.account_id,
                 user_id=ctx.user.user_id,
@@ -320,18 +350,14 @@ class TTLCleanupService:
         self, scheduled: TTLRecord, ctx: RequestContext
     ) -> Optional[TTLRecord]:
         viking_fs = self._service.viking_fs
-        read_uri = (
-            f"{scheduled.object_uri}/.meta.json"
-            if scheduled.object_type == OBJECT_TYPE_SESSION
-            else scheduled.object_uri
-        )
+        read_uri = ttl_metadata_uri(scheduled.object_type, scheduled.object_uri)
         try:
             raw = await viking_fs.read_file(read_uri, ctx=ctx, include_expired=True)
         except Exception as exc:
             if is_storage_not_found(exc):
                 return None
             raise
-        if scheduled.object_type == OBJECT_TYPE_SESSION:
+        if scheduled.object_type != OBJECT_TYPE_EVENT:
             fields = json.loads(raw)
         else:
             fields = parse_memory_file_with_fields(raw)
@@ -347,7 +373,7 @@ class TTLCleanupService:
         )
 
 
-class TTLCleanupScheduler:
+class TTLCleanupScheduler(PeriodicTask):
     """Periodically enqueue due records from the persistent TTL registry."""
 
     DEFAULT_CHECK_INTERVAL = 30.0
@@ -363,44 +389,7 @@ class TTLCleanupScheduler:
         self._check_interval = (
             self.DEFAULT_CHECK_INTERVAL if check_interval is None else float(check_interval)
         )
-        self._sleep = sleep
-        self._running = False
-        self._task: Optional[asyncio.Task] = None
-
-    async def start(self) -> None:
-        if self._running:
-            return
-        self._running = True
-        logger.info(
-            "TTLCleanupScheduler started with check interval %.3fs",
-            self._check_interval,
-        )
-        self._task = asyncio.create_task(self._run_loop())
-
-    async def stop(self) -> None:
-        self._running = False
-        if self._task is not None:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
-
-    async def _run_loop(self) -> None:
-        while self._running:
-            try:
-                await self._sleep(self._check_interval)
-            except asyncio.CancelledError:
-                break
-            try:
-                # Existing frozen snapshots remain authoritative even if the
-                # policy is later disabled, so cleanup must continue whenever
-                # registry records exist.  With default-off, the registry is
-                # empty and no business directory is traversed.
-                await self._scan_once()
-            except Exception:
-                logger.exception("TTL cleanup scheduler loop failed")
+        super().__init__(interval=self._check_interval, sleep=sleep)
 
     async def _scan_once(self) -> None:
         queue_manager = self._service._queue_manager
@@ -451,7 +440,12 @@ class _TTLCleanupProcessor(DequeueHandlerBase):
         object_type = str(target.get("object_type") or "")
         object_uri = str(target.get("object_uri") or "")
         generation = str(target.get("generation") or "")
-        if object_type not in (OBJECT_TYPE_EVENT, OBJECT_TYPE_SESSION):
+        if object_type not in (
+            OBJECT_TYPE_EVENT,
+            OBJECT_TYPE_SESSION,
+            OBJECT_TYPE_RESOURCE,
+            OBJECT_TYPE_RESOURCE_FILE,
+        ):
             raise ValueError("Invalid TTL cleanup object type")
         if not object_uri or not generation:
             raise ValueError("Invalid TTL cleanup object fence")

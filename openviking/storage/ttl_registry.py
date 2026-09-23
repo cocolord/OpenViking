@@ -112,14 +112,19 @@ class TTLRegistry:
         marker = self.marker_path(record.account_id)
         await self._agfs.ensure_parent_dirs(marker)
         await self._agfs.write(marker, b"1")
-        if record.object_type == "event":
-            directory_uri = record.object_uri.rsplit("/", 1)[0]
+        from openviking.core.ttl import ttl_scope_for_uri
+
+        directory_uri = record.object_uri.rsplit("/", 1)[0]
+        while record.object_type != "session":
             key = (record.account_id, directory_uri)
             if key not in self._known_summary_dirs:
                 summary_marker = self._summary_marker(*key)
                 await self._agfs.ensure_parent_dirs(summary_marker)
                 await self._agfs.write(summary_marker, b"1")
                 self._known_summary_dirs.add(key)
+            directory_uri = directory_uri.rsplit("/", 1)[0]
+            if record.object_type == "event" or ttl_scope_for_uri(directory_uri) != "resources":
+                break
         fields = asdict(record)
         await self._tasks.schedule(
             _TASK_KIND,

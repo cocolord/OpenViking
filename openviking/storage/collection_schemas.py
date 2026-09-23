@@ -18,7 +18,12 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from openviking.core.context import ContextType, ResourceContentType
-from openviking.core.ttl import OBJECT_TYPE_EVENT, TTL_FIELD_NAMES, ttl_object_for_uri
+from openviking.core.ttl import (
+    OBJECT_TYPE_EVENT,
+    TTL_FIELD_NAMES,
+    ttl_object_for_uri,
+    ttl_scope_for_uri,
+)
 from openviking.models.embedder.base import embed_compat
 from openviking.server.error_mapping import is_storage_not_found
 from openviking.server.identity import RequestContext, Role
@@ -1009,9 +1014,9 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                             self._merge_request_stats(embedding_msg.telemetry_id, processed=1)
                             self._record_request_success(embedding_msg)
                             return ProcessResult.success(inserted_data)
-                    elif (
-                        inserted_data.get("level", 2) == 2
-                        and (ttl_object_for_uri(str(uri or "")) or (None,))[0] == OBJECT_TYPE_EVENT
+                    elif inserted_data.get("level", 2) == 2 and (
+                        (ttl_object_for_uri(str(uri or "")) or (None,))[0] == OBJECT_TYPE_EVENT
+                        or ttl_scope_for_uri(str(uri or "")) == "resources"
                     ):
                         result = await self._write_ttl_vector_if_current(
                             embedding_msg, ctx, _write_vector
@@ -1140,23 +1145,40 @@ class TextEmbeddingHandler(DequeueHandlerBase):
         data = embedding_msg.context_data
         uri = str(data.get("uri") or "")
         target = ttl_object_for_uri(uri)
-        if target is None or target[0] != OBJECT_TYPE_EVENT:
+        resource = ttl_scope_for_uri(uri) == "resources"
+        if not resource and (target is None or target[0] != OBJECT_TYPE_EVENT):
             return await write_vector()
 
         viking_fs = get_viking_fs()
-        object_uri = target[1]
+        object_uri = uri if resource else target[1]
         path = viking_fs._uri_to_path(object_uri, ctx=ctx)
         # Producers enqueue before releasing their source write lease. Wait for
         # that lease, then validate the persisted generation under our own lock.
         lease = await viking_fs._async_agfs.pathlock_acquire_exact(path, timeout_secs=300.0)
         try:
             try:
-                content = await viking_fs.read_file(object_uri, ctx=ctx, include_expired=True)
+                if resource:
+                    from openviking.storage.resource_ttl import (
+                        resource_ttl_fields,
+                        resource_ttl_visible,
+                    )
+
+                    if not await resource_ttl_visible(viking_fs, uri, ctx=ctx, require_source=True):
+                        return None
+                    fields = await resource_ttl_fields(viking_fs, uri, ctx=ctx)
+                    if data.get("md5"):
+                        from openviking.utils.content_hash import content_md5
+
+                        raw = await viking_fs.read_file_bytes(uri, ctx=ctx)
+                        if content_md5(raw) != data["md5"]:
+                            return None
+                else:
+                    content = await viking_fs.read_file(object_uri, ctx=ctx, include_expired=True)
+                    fields = parse_memory_file_with_fields(content)
             except Exception as exc:
                 if is_storage_not_found(exc):
                     return None
                 raise
-            fields = parse_memory_file_with_fields(content)
             if hidden_by_ttl(fields.get("expires_at")) or str(
                 fields.get("ttl_generation") or ""
             ) != str(data.get("ttl_generation") or ""):

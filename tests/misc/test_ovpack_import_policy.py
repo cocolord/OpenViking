@@ -10,6 +10,7 @@ import os
 import tempfile
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -32,6 +33,12 @@ from tests.storage.test_transfer_merge_binding import indexed_fs as indexed_fs
 
 class FakeVikingFS:
     def __init__(self, existing_roots: set[str] | None = None) -> None:
+        self._async_agfs = SimpleNamespace(
+            pathlock_acquire_tree=AsyncMock(return_value={}),
+            pathlock_acquire_tree_batch=AsyncMock(return_value={}),
+            pathlock_release=AsyncMock(),
+        )
+        self._uri_to_path = lambda uri, ctx=None: "/local/default/" + uri.removeprefix("viking://")
         self.written_files: list[str] = []
         self.created_dirs: list[str] = []
         self.tree_calls: list[str] = []
@@ -43,7 +50,7 @@ class FakeVikingFS:
         assert skip_count is True
         return {"uri": uri, "isDir": True}
 
-    async def mkdir(self, uri: str, exist_ok: bool = False, ctx=None):
+    async def mkdir(self, uri: str, exist_ok: bool = False, ctx=None, lease_ref=None):
         self.created_dirs.append(uri)
 
     async def ls(self, uri: str, ctx=None):
@@ -51,11 +58,11 @@ class FakeVikingFS:
             return []
         raise NotFoundError(uri, "file")
 
-    async def rm(self, uri: str, recursive: bool = False, ctx=None):
+    async def rm(self, uri: str, recursive: bool = False, ctx=None, lease_ref=None):
         assert recursive is True
         self.removed_roots.append(uri)
 
-    async def write_file_bytes(self, uri: str, data: bytes, ctx=None):
+    async def write_file_bytes(self, uri: str, data: bytes, ctx=None, lease_ref=None):
         self.written_files.append(uri)
         self.write_contexts.append(ctx)
 
@@ -72,6 +79,9 @@ class FakeVikingFS:
 
 class FakeExportVikingFS:
     def __init__(self) -> None:
+        self.ttl_registry = SimpleNamespace(account_may_have_records=AsyncMock(return_value=False))
+        self._uri_to_path = lambda uri, ctx=None: uri
+        self._async_agfs = SimpleNamespace(stat=AsyncMock(side_effect=FileNotFoundError))
         self.binary_files = {
             "viking://resources/demo/notes.txt": b"hello",
         }
