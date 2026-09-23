@@ -15,6 +15,7 @@ from openviking.storage.viking_vector_index_backend import (
     VikingVectorIndexBackend,
     _SingleAccountBackend,
 )
+from openviking.utils.time_decay import MAX_TIME_DECAY_CANDIDATES
 from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils.config.vectordb_config import VectorDBBackendConfig
 
@@ -108,8 +109,87 @@ async def test_cloud_event_scope_uses_one_post_process_query():
     assert len(calls) == 1
     assert calls[0]["limit"] == 10
     assert calls[0]["return_detail_info"] is True
-    assert calls[0]["advance"]["post_process_input_limit"] == 30
+    assert calls[0]["advance"]["post_process_input_limit"] == MAX_TIME_DECAY_CANDIDATES
     assert calls[0]["advance"]["post_process_ops"][0]["fusion_by"] == "multiply"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend_type", ["local", "vikingdb", "volcengine"])
+async def test_event_uri_takes_precedence_over_a_conflicting_type_tag(backend_type):
+    backend = _backend_with_type(backend_type)
+
+    async def fake_search(**kwargs):
+        result = {
+            "uri": "viking://user/alice/memories/events/old.md",
+            "context_type": "memory",
+            "level": 2,
+            "search_tags": ["memory_type=preferences"],
+            "updated_at": "2026-01-01T00:00:00Z",
+            "_score": 0.8,
+        }
+        if kwargs.get("advance"):
+            result.update(_score=0.4, _origin_score=0.8, _time_score=0.5)
+        return [result]
+
+    backend.search = fake_search
+    results = await backend.search_in_tenant(
+        ctx=_ctx(),
+        query_vector=[1.0],
+        context_type="memory",
+        target_directories=["viking://user/alice/memories/events"],
+        level=[2],
+        limit=1,
+        events_time_decay_protection="0",
+        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
+    )
+
+    assert results[0]["_origin_score"] == pytest.approx(0.8)
+    assert results[0]["_time_score"] == pytest.approx(0.5)
+    assert results[0]["_score"] == pytest.approx(0.4)
+
+
+@pytest.mark.asyncio
+async def test_local_decay_considers_candidates_beyond_the_final_window():
+    backend = _backend_with_type("local")
+    calls = []
+    candidates = [
+        {
+            "uri": f"viking://user/alice/memories/events/old-{index}.md",
+            "context_type": "memory",
+            "level": 2,
+            "updated_at": "2025-01-01T00:00:00Z",
+            "_score": score,
+        }
+        for index, score in enumerate((0.99, 0.98, 0.97), start=1)
+    ]
+    candidates.append(
+        {
+            "uri": "viking://user/alice/memories/events/fresh.md",
+            "context_type": "memory",
+            "level": 2,
+            "updated_at": "2026-01-08T00:00:00Z",
+            "_score": 0.96,
+        }
+    )
+
+    async def fake_search(**kwargs):
+        calls.append(kwargs)
+        return [dict(candidate) for candidate in candidates[: kwargs["limit"]]]
+
+    backend.search = fake_search
+    results = await backend.search_in_tenant(
+        ctx=_ctx(),
+        query_vector=[1.0],
+        context_type="memory",
+        target_directories=["viking://user/alice/memories/events"],
+        level=[2],
+        limit=1,
+        events_time_decay_protection="0",
+        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
+    )
+
+    assert calls[0]["limit"] == MAX_TIME_DECAY_CANDIDATES
+    assert results[0]["uri"] == "viking://user/alice/memories/events/fresh.md"
 
 
 @pytest.mark.asyncio
@@ -204,11 +284,11 @@ async def test_cloud_default_user_scope_splits_tagged_events_without_a_peer():
     )
 
     assert len(calls) == 2
-    assert calls[0]["limit"] == 30
+    assert calls[0]["limit"] == MAX_TIME_DECAY_CANDIDATES
     assert calls[0]["advance"] is None
     assert calls[0]["return_detail_info"] is False
 
-    assert calls[1]["advance"]["post_process_input_limit"] == 30
+    assert calls[1]["advance"]["post_process_input_limit"] == MAX_TIME_DECAY_CANDIDATES
     assert Eq("search_tags", "memory_type=events") in calls[1]["filter"].conds
 
 
@@ -641,7 +721,7 @@ async def test_decay_fuses_legacy_user_and_peer_events(backend_type):
     )
 
     assert len(calls) == 2
-    assert calls[0]["limit"] == 9
+    assert calls[0]["limit"] == MAX_TIME_DECAY_CANDIDATES
     assert [item["uri"] for item in results] == [
         "viking://user/alice/memories/preferences/pref.md",
         "viking://user/alice/peers/peer-a/memories/events/recent",
@@ -726,7 +806,7 @@ async def test_decay_applies_to_a_peer_only_target():
     )
 
     assert len(calls) == 1
-    assert calls[0]["limit"] == 30
+    assert calls[0]["limit"] == MAX_TIME_DECAY_CANDIDATES
     assert results[0]["_score"] == pytest.approx(0.2)
     assert results[0]["_origin_score"] == pytest.approx(0.2)
     assert results[0]["_time_score"] == pytest.approx(1.0)
@@ -755,7 +835,7 @@ async def test_decay_applies_under_bare_user_target():
     )
 
     assert len(calls) == 2
-    assert calls[0]["limit"] == 6
+    assert calls[0]["limit"] == MAX_TIME_DECAY_CANDIDATES
 
 
 @pytest.mark.asyncio
@@ -970,12 +1050,12 @@ async def test_local_tag_split_does_not_boost_fresh_events(tmp_path):
     [
         ("memory", 2, [], True),
         ("memory", 2, ["memory_type=events"], True),
-        ("memory", 2, ["memory_type=preferences"], False),
+        ("memory", 2, ["memory_type=preferences"], True),
         ("memory", 1, ["memory_type=events"], False),
         ("resource", 2, ["memory_type=events"], False),
     ],
 )
-def test_event_classification_prefers_type_tags_and_limits_decay_to_memory_l2(
+def test_event_classification_prefers_event_uris_and_limits_decay_to_memory_l2(
     context_type, level, tags, expected
 ):
     assert (

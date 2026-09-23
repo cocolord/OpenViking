@@ -267,6 +267,7 @@ async def find(
     level: Optional[List[int]] = None,
     context_type: Optional[Union[str, List[str]]] = None,
     read_content: bool = False,
+    events_time_decay_protection: Optional[str] = None,
 ) -> str:
     """Fast semantic retrieval without session context. Returns ranked memories, resources, and skills with URI, abstract, and score. context_type="skill" returns one hit per skill package, pointing at its SKILL.md, and without target_uri searches both the user's own and the account-shared skills."""
     service = get_service()
@@ -299,6 +300,7 @@ async def find(
             score_threshold=min_score,
             filter=context_filter,
             level=level,
+            events_time_decay_protection=events_time_decay_protection,
         )
     return await _format_search_result(result, service=service, ctx=ctx, read_content=read_content)
 

@@ -554,7 +554,7 @@ openviking search "watch vs scheduled" --after 2026-03-15 --before 2026-03-20
 
 # 对 user 和 peer 的事件记忆启用时间衰减排序
 openviking search "recent decisions" --context-type memory --level 2 \
-    --events-time-decay-weight 0.2 --events-time-decay-protection 1d
+    --events-time-decay-protection 1d
 
 # 不带会话的搜索（仍进行意图分析）
 openviking search "how to implement OAuth 2.0 authorization code flow"

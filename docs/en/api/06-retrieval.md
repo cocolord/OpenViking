@@ -552,7 +552,7 @@ openviking search "watch vs scheduled" --after 2026-03-15 --before 2026-03-20
 
 # Rank user and peer event memories with time decay
 openviking search "recent decisions" --context-type memory --level 2 \
-    --events-time-decay-weight 0.2 --events-time-decay-protection 1d
+    --events-time-decay-protection 1d
 
 # Search without session (still performs intent analysis)
 openviking search "how to implement OAuth 2.0 authorization code flow"

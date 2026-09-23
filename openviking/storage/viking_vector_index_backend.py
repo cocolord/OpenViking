@@ -44,6 +44,7 @@ from openviking.storage.vectordb.utils.logging_init import init_cpp_logging
 from openviking.storage.vectordb_adapters import create_collection_adapter
 from openviking.utils.tags import merge_search_tags, preserve_memory_type_tag
 from openviking.utils.time_decay import (
+    MAX_TIME_DECAY_CANDIDATES,
     build_time_decay_fusion_spec,
     build_time_decay_post_process_ops,
     parse_duration_ms,
@@ -1864,8 +1865,16 @@ class VikingVectorIndexBackend:
         defer_fusion: bool = False,
     ) -> List[Dict[str, Any]]:
         request_now = request_now or datetime.now(timezone.utc)
-        candidate_limit = time_decay_candidate_limit(limit, offset)
+        # Multiplicative decay can reorder an event from beyond any fixed
+        # multiple of the requested window into the final top-k. Keep the
+        # smaller heuristic pool only for the optional external-rerank path;
+        # direct decay ranking evaluates the complete supported candidate
+        # budget so it does not silently miss such events.
         final_window = limit + offset
+        rerank_candidate_limit = time_decay_candidate_limit(limit, offset)
+        candidate_limit = (
+            rerank_candidate_limit if defer_fusion else MAX_TIME_DECAY_CANDIDATES
+        )
         # An explicit event-only L2 scope also covers legacy records without tags.
         event_only = bool(
             level is not None
@@ -1984,10 +1993,15 @@ class VikingVectorIndexBackend:
     def _is_event_l2(result: Mapping[str, Any]) -> bool:
         if result.get("level") != 2 or result.get("context_type", "memory") != "memory":
             return False
+        # The URI is the public namespace contract. Prefer it when an old or
+        # malformed record carries a conflicting memory_type tag; cloud
+        # event-only searches already classify the same record by this scope.
+        if VikingVectorIndexBackend._is_event_uri(str(result.get("uri", ""))):
+            return True
         for tag in result.get("search_tags") or []:
             if tag.startswith("memory_type="):
                 return tag == "memory_type=events"
-        return VikingVectorIndexBackend._is_event_uri(str(result.get("uri", "")))
+        return False
 
     @staticmethod
     def _is_event_uri(uri: str) -> bool:

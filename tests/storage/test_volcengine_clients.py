@@ -1,7 +1,12 @@
+import inspect
+
 import pytest
 import requests
 from volcengine.base.Request import Request
 
+from openviking.storage.vectordb.collection.collection import ICollection
+from openviking.storage.vectordb.collection.http_collection import HttpCollection
+from openviking.storage.vectordb.collection.local_collection import LocalCollection
 from openviking.storage.vectordb.collection.volcengine_clients import (
     ClientForConsoleApi,
     ClientForDataApi,
@@ -10,6 +15,7 @@ from openviking.storage.vectordb.collection.volcengine_clients import (
 from openviking.storage.vectordb.collection.volcengine_collection import VolcengineCollection
 from openviking.storage.vectordb_adapters.base import VIKINGDB_STRING_FIELD_BYTE_LIMIT
 from openviking.storage.vectordb_adapters.local_adapter import LocalCollectionAdapter
+from openviking.storage.vectordb_adapters.opengauss.collection import OpenGaussCollection
 from openviking.storage.vectordb_adapters.vikingdb_private_adapter import (
     VikingDBPrivateCollectionAdapter,
 )
@@ -18,6 +24,24 @@ from openviking_cli.utils.config.vectordb_config import (
     VectorDBBackendConfig,
     VolcengineConfig,
 )
+
+
+@pytest.mark.parametrize(
+    "collection_type", [ICollection, LocalCollection, HttpCollection, OpenGaussCollection]
+)
+def test_collection_vector_search_contract_includes_remote_ranking_options(collection_type):
+    parameters = inspect.signature(collection_type.search_by_vector).parameters
+
+    assert parameters["advance"].default is None
+    assert parameters["return_detail_info"].default is False
+
+
+@pytest.mark.parametrize(
+    "collection_type", [LocalCollection, HttpCollection, OpenGaussCollection]
+)
+def test_non_vikingdb_collections_reject_remote_ranking_options(collection_type):
+    with pytest.raises(NotImplementedError, match="Advanced vector ranking options"):
+        collection_type.search_by_vector(None, "default", advance={"post_process_ops": []})
 
 
 def test_console_client_prepare_request_includes_session_token():
