@@ -57,6 +57,7 @@ The `find()` method performs pure vector similarity search for simple query scen
 | query | str | No | "" | Search query string. Required unless `image_url` is provided |
 | image_url | str | No | None | Image query as a `data:image/...;base64,...`, `http(s)://`, or `viking://` URI. Requires a multimodal embedding model |
 | target_uri | str \| List[str] | No | "" | Limit search to specific URI prefix |
+| events_time_decay_protection | str \| null | No | null | Omit or pass `null` to disable decay. Pass `"0"` to decay immediately, or a duration such as `"7d"` to preserve the original score during that period and decay afterward. Supports non-negative integer `Xm`/`Xh`/`Xd` |
 | context_type | str \| List[str] | No | None | Limit results to one or more `ContextType` values: `memory`, `resource`, or `skill` |
 | tags | List[str] | No | None | Explicit retrieval tags in strict `k=v` form. Multiple tags are combined with AND; a result must contain every requested tag |
 | node_limit | int | No | None | Optional HTTP alias; overrides `limit` when provided |
