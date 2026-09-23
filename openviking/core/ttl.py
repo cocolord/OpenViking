@@ -66,11 +66,13 @@ def object_type_for_scope(scope: TTLScope) -> str:
     return OBJECT_TYPE_SESSION if scope == "sessions" else OBJECT_TYPE_EVENT
 
 
-def ttl_object_for_uri(uri: str) -> Optional[tuple[str, str]]:
+def ttl_object_for_uri(uri: str, *, is_dir: bool = False) -> Optional[tuple[str, str]]:
     """Return ``(object_type, canonical_object_uri)`` for a TTL object path.
 
-    A session's root metadata controls its complete subtree.  Event containers
-    and their generated dot-files are not independently expiring objects.
+    A session's root metadata controls its complete subtree. Event files may
+    have any extension (or none), just like public content writes. Callers
+    walking the filesystem must identify directories with ``is_dir``; event
+    containers and generated dot-files are not independently expiring objects.
     """
     scope = ttl_scope_for_uri(uri)
     if scope is None:
@@ -83,7 +85,8 @@ def ttl_object_for_uri(uri: str) -> Optional[tuple[str, str]]:
         if len(parts) < 4:
             return None
         return OBJECT_TYPE_SESSION, "viking://" + "/".join(parts[:4])
-    if not parts or not parts[-1].endswith(".md") or parts[-1].startswith("."):
+    event_root_depth = 6 if scope == "peer_events" else 4
+    if is_dir or len(parts) <= event_root_depth or parts[-1].startswith("."):
         return None
     return OBJECT_TYPE_EVENT, "viking://" + "/".join(parts)
 

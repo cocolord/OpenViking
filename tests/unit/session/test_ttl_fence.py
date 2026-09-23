@@ -15,6 +15,7 @@ from openviking.session.ttl_fence import (
     StaleSessionGenerationError,
     session_generation_fence,
 )
+from openviking_cli.exceptions import NotFoundError
 
 
 def _fs(metadata):
@@ -57,8 +58,8 @@ async def test_disabled_fence_preserves_legacy_lock_behavior():
         ({"ttl_generation": "g1", "expires_at": "2999-01-01T00:00:00.000Z"}, True),
         ({"ttl_generation": "g2", "expires_at": "2999-01-01T00:00:00.000Z"}, False),
         ({"ttl_generation": "g1", "expires_at": "2000-01-01T00:00:00.000Z"}, False),
-        (["not", "metadata"], False),
-        (ValueError("invalid json"), False),
+        (FileNotFoundError("session metadata"), False),
+        (NotFoundError("session metadata", "file"), False),
     ],
 )
 async def test_is_current_requires_same_live_generation(metadata, expected):
@@ -68,6 +69,33 @@ async def test_is_current_requires_same_live_generation(metadata, expected):
 
     assert fence.key == ("viking://user/u1/sessions/s1", "g1")
     assert await fence.is_current() is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [TimeoutError("AGFS timed out"), ConnectionError("AGFS offline")])
+async def test_storage_failure_is_not_a_stale_generation_and_releases_lock(error):
+    fs = _fs(error)
+    fence = session_generation_fence(
+        fs, object(), session_uri="viking://user/u1/sessions/s1", generation="g1"
+    )
+
+    with pytest.raises(type(error), match=str(error)):
+        async with fence.lock():
+            pytest.fail("unverified work must not enter the write section")
+    fs._async_agfs.pathlock_release.assert_awaited_once_with("tree-lease")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", ["not json", "[]", "null"])
+async def test_corrupt_metadata_is_not_a_stale_generation(raw):
+    fs = _fs({})
+    fs.read_file.return_value = raw
+    fence = session_generation_fence(
+        fs, object(), session_uri="viking://user/u1/sessions/s1", generation="g1"
+    )
+
+    with pytest.raises(ValueError):
+        await fence.require_current()
 
 
 @pytest.mark.asyncio

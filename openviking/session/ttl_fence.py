@@ -143,13 +143,17 @@ class SessionGenerationFence:
                 ctx=self.ctx,
                 include_expired=True,
             )
-            metadata = json.loads(raw)
-        except Exception:
-            return False
-        return (
-            isinstance(metadata, dict)
-            and str(metadata.get("ttl_generation") or "") == self.generation
-            and (allow_expired or not hidden_by_ttl(metadata.get("expires_at")))
+        except Exception as exc:
+            if is_not_found_error(exc):
+                return False
+            # An unavailable source is not proof that this generation is stale.
+            # Let the normal failure/retry path handle storage errors.
+            raise
+        metadata = json.loads(raw)
+        if not isinstance(metadata, dict):
+            raise ValueError(f"Invalid session metadata: {self.session_uri}")
+        return str(metadata.get("ttl_generation") or "") == self.generation and (
+            allow_expired or not hidden_by_ttl(metadata.get("expires_at"))
         )
 
     async def require_current(self, *, allow_expired: bool = False) -> None:

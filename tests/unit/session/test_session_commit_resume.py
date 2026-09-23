@@ -334,6 +334,70 @@ async def test_resume_queued_commit_fails_terminally_for_unreadable_archive(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("persistent", [False, True])
+async def test_phase2_metadata_outage_never_completes_as_stale(monkeypatch, persistent):
+    uri = "viking://user/default/sessions/session-1"
+    archive = uri + "/history/archive_001"
+    storage = _MemoryVikingFS(
+        {
+            uri + "/.meta.json": json.dumps(
+                {"ttl_generation": "g1", "expires_at": "2999-01-01T00:00:00Z"}
+            )
+        }
+    )
+    read = storage.read_file
+    attempts = 0
+
+    async def unreliable_read(uri, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if persistent or attempts == 1:
+            raise TimeoutError("session metadata unavailable")
+        return await read(uri, **kwargs)
+
+    storage.read_file = unreliable_read
+    session = Session(viking_fs=storage, session_id="session-1", session_uri=uri)
+    tracker = TaskTracker(_TaskStore())
+    monkeypatch.setattr("openviking.service.task_tracker.get_task_tracker", lambda: tracker)
+    monkeypatch.setattr(session, "_prepare_phase2_archive_messages", AsyncMock())
+    task = await tracker.create(
+        "session_commit",
+        task_id="ttl-outage",
+        resource_id="session-1",
+        account_id=session.ctx.account_id,
+        user_id=session.ctx.user.user_id,
+    )
+
+    extraction = session._run_memory_extraction(
+        task_id=task.task_id,
+        archive_uri=archive,
+        messages=[],
+        first_message_id="first",
+        last_message_id="last",
+        memory_policy={},
+        ttl_generation="g1",
+    )
+    if persistent:
+        # Failure-marker fencing is also unavailable: raise so QueueFS cannot
+        # acknowledge this delivery and restart recovery can retry it.
+        with pytest.raises(TimeoutError, match="session metadata unavailable"):
+            await extraction
+        assert archive + "/.failed.json" not in storage.files
+    else:
+        await extraction
+        failure = json.loads(storage.files[archive + "/.failed.json"])
+        assert failure["error"] == "session metadata unavailable"
+    task = await tracker.get(
+        task.task_id, account_id=session.ctx.account_id, user_id=session.ctx.user.user_id
+    )
+    if not persistent:
+        assert task.status == TaskStatus.FAILED
+    assert task.status != TaskStatus.COMPLETED
+    assert archive + "/.done" not in storage.files
+    session._prepare_phase2_archive_messages.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_session_context_skips_pending_archive_with_missing_messages(monkeypatch):
     session_uri = "viking://user/default/sessions/session-1"
     archive_uri = f"{session_uri}/history/archive_001"

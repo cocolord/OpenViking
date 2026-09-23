@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Optional
 
@@ -26,7 +25,6 @@ logger = get_logger(__name__)
 _ROOT = "/local"
 _TASK_KIND = "ttl_cleanup"
 _MARKER = "_system/ttl/.enabled"
-_ABSENT_MARKER_CACHE_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
@@ -58,7 +56,6 @@ class TTLRegistry:
         self._tasks = PersistentTaskStore(agfs)
         self._known_accounts: set[str] = set()
         self._known_summary_dirs: set[tuple[str, str]] = set()
-        self._absent_marker_until: dict[str, float] = {}
 
     @staticmethod
     def _key(account_id: str, uri: str) -> str:
@@ -95,23 +92,19 @@ class TTLRegistry:
         return True
 
     async def account_may_have_records(self, account_id: str) -> bool:
-        """Cheap default-off gate: one cached marker stat, never an object scan."""
+        """Cache marker presence only; another worker can publish the first record."""
         if account_id in self._known_accounts:
             return True
-        now = time.monotonic()
-        if self._absent_marker_until.get(account_id, 0.0) > now:
-            return False
         try:
-            await self._agfs.stat(self.marker_path(account_id))
+            # Avoid plugin-local stat caches as well as process-local misses.
+            await self._agfs.stat(self.marker_path(account_id), bypass_cache=True)
         except Exception as exc:
             if not is_not_found_error(exc):
                 # Fail open for reads: if registry state cannot be inspected,
                 # object metadata is still able to enforce its own deadline.
                 return True
-            self._absent_marker_until[account_id] = now + _ABSENT_MARKER_CACHE_SECONDS
             return False
         self._known_accounts.add(account_id)
-        self._absent_marker_until.pop(account_id, None)
         return True
 
     async def upsert(self, record: TTLRecord) -> None:
@@ -137,7 +130,6 @@ class TTLRegistry:
             preserve=lambda item: item["payload"]["record"] == fields,
         )
         self._known_accounts.add(record.account_id)
-        self._absent_marker_until.pop(record.account_id, None)
 
     async def get(self, account_id: str, uri: str) -> Optional[TTLRecord]:
         item = await self._tasks.get_scheduled(_TASK_KIND, self._key(account_id, uri))

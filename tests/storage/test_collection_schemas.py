@@ -951,11 +951,13 @@ async def test_embedding_handler_materialize_content_keeps_inline(monkeypatch):
     assert content == "already inline"
 
 
-def _ttl_event_embedding_message(generation: str = "generation-1") -> EmbeddingMsg:
+def _ttl_event_embedding_message(
+    generation: str = "generation-1", *, extension: str = ".md"
+) -> EmbeddingMsg:
     return EmbeddingMsg(
         "embedding text",
         {
-            "uri": "viking://user/default/memories/events/event.md",
+            "uri": "viking://user/default/memories/events/event" + extension,
             "ttl_generation": generation,
         },
     )
@@ -1022,7 +1024,8 @@ async def test_ttl_event_embedding_skips_when_source_is_missing(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_ttl_event_embedding_skips_when_source_is_expired(monkeypatch):
+@pytest.mark.parametrize("extension", [".md", ".MD", ".txt", ""])
+async def test_ttl_event_embedding_skips_when_source_is_expired(monkeypatch, extension):
     fs = _install_ttl_event_fs(
         monkeypatch,
         content=_ttl_memory_content(
@@ -1034,7 +1037,7 @@ async def test_ttl_event_embedding_skips_when_source_is_expired(monkeypatch):
     ctx = RequestContext(user=UserIdentifier("default", "default"), role=Role.ROOT)
 
     result = await handler._write_ttl_vector_if_current(
-        _ttl_event_embedding_message(), ctx, write_vector
+        _ttl_event_embedding_message(extension=extension), ctx, write_vector
     )
 
     assert result is None
@@ -1085,9 +1088,13 @@ async def test_ttl_event_embedding_writes_current_generation_under_lock(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_ttl_event_merge_reads_and_upserts_under_source_lease(monkeypatch):
+@pytest.mark.parametrize("extension", [".md", ".MD", ".txt", ""])
+@pytest.mark.parametrize("include_level", [True, False])
+async def test_ttl_event_merge_reads_and_upserts_under_source_lease(
+    monkeypatch, extension, include_level
+):
     order = []
-    uri = "viking://user/default/memories/events/event.md"
+    uri = "viking://user/default/memories/events/event" + extension
     fs = _install_ttl_event_fs(
         monkeypatch,
         content=_ttl_memory_content(
@@ -1153,6 +1160,8 @@ async def test_ttl_event_merge_reads_and_upserts_under_source_lease(monkeypatch)
             "received_at": "2998-12-31T00:00:00.000Z",
         },
     )
+    if not include_level:
+        msg.context_data.pop("level")
 
     result = await handler.on_dequeue(_build_operation_payload(msg))
 
@@ -1160,6 +1169,32 @@ async def test_ttl_event_merge_reads_and_upserts_under_source_lease(monkeypatch)
     assert order == ["acquire", "read_source", "get_strict", "upsert", "release"]
     assert captured["search_tags"] == ["kept"]
     assert not {"ttl_days", "received_at", "expires_at", "ttl_generation"} & captured.keys()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("level", [0, 1])
+async def test_event_directory_embedding_does_not_use_a_file_generation_fence(monkeypatch, level):
+    monkeypatch.setattr(
+        "openviking_cli.utils.config.get_openviking_config",
+        lambda: _DummyConfig(_DummyEmbedder()),
+    )
+    store = SimpleNamespace(is_closing=False, uses_content_field=False, upsert=AsyncMock())
+    fs = _install_ttl_event_fs(monkeypatch, error=IsADirectoryError())
+    handler = TextEmbeddingHandler(store)
+    message = EmbeddingMsg(
+        "directory summary",
+        {
+            "uri": "viking://user/default/memories/events/2026",
+            "account_id": "default",
+            "level": level,
+        },
+    )
+
+    result = await handler.on_dequeue(_build_operation_payload(message))
+
+    assert result.outcome is ProcessOutcome.SUCCESS
+    store.upsert.assert_awaited_once()
+    fs.read_file.assert_not_awaited()
 
 
 @pytest.mark.asyncio

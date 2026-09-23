@@ -8,11 +8,15 @@ import asyncio
 import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from openviking.server.identity import RequestContext, Role
 from openviking.storage.ttl_registry import TTLRecord, TTLRegistry, record_from_fields
+from openviking.storage.viking_fs import VikingFS
+from openviking_cli.exceptions import NotFoundError
 from openviking_cli.session.user_id import UserIdentifier
 
 
@@ -51,7 +55,7 @@ class _MemoryAGFS:
             raise FileNotFoundError(path)
         return self.files[path]
 
-    async def stat(self, path):
+    async def stat(self, path, **kwargs):
         self.stat_calls.append(path)
         if path not in self.files:
             raise FileNotFoundError(path)
@@ -98,7 +102,7 @@ async def test_upsert_publishes_marker_before_record_and_roundtrips():
 
     assert await registry.account_may_have_records("acct") is False
     assert await registry.account_may_have_records("acct") is False
-    assert agfs.stat_calls == [registry.marker_path("acct")]
+    assert agfs.stat_calls == [registry.marker_path("acct")] * 2
 
     await registry.upsert(record)
 
@@ -110,9 +114,52 @@ async def test_upsert_publishes_marker_before_record_and_roundtrips():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("read_kind", ["text", "bytes", "grep"])
+async def test_reader_sees_first_ttl_object_imported_by_another_worker(monkeypatch, read_kind):
+    class CachedAGFS(_MemoryAGFS):
+        async def stat(self, path, *, bypass_cache=False):
+            if not bypass_cache:
+                raise FileNotFoundError("cached marker miss")
+            return await super().stat(path)
+
+    agfs = CachedAGFS()
+    reader = TTLRegistry(agfs)
+    writer = TTLRegistry(agfs)
+    uri = "viking://user/u1/memories/events/expired.md"
+    assert await reader.account_may_have_records("acct") is False
+    record = replace(_record(uri=uri), object_type="event", expires_at="2000-01-01T00:00:00Z")
+    await writer.upsert(record)
+
+    fs = VikingFS(agfs=SimpleNamespace())
+    fs.ttl_registry = reader
+    ctx = RequestContext(user=UserIdentifier("acct", "u1"), role=Role.ROOT)
+    path = fs._uri_to_path(uri, ctx=ctx)
+    fs._async_agfs.stat = AsyncMock(return_value={"isDir": False})
+    fs._async_agfs.read = AsyncMock(
+        return_value=b'body\n<!-- MEMORY_FIELDS {"expires_at":"2000-01-01T00:00:00Z"} -->'
+    )
+    monkeypatch.setattr("openviking.storage.viking_fs._access.ttl_enabled", lambda: False)
+    if read_kind == "grep":
+        fs._async_agfs.grep = AsyncMock(
+            return_value={"matches": [{"file": path, "line": 1, "content": "body"}]}
+        )
+        result = await fs._grep_with_agfs(uri.rsplit("/", 1)[0], "body", node_limit=1, ctx=ctx)
+        assert result["matches"] == []
+        assert fs._async_agfs.grep.await_args.kwargs["node_limit"] is None
+    else:
+        read = fs.read_file if read_kind == "text" else fs.read_file_bytes
+        with pytest.raises(NotFoundError):
+            await read(uri, ctx=ctx)
+    fs._async_agfs.read.assert_awaited()
+    assert await reader.account_may_have_records("acct") is True
+    # Only positive observations may be reused across requests.
+    assert agfs.stat_calls == [reader.marker_path("acct")] * 2
+
+
+@pytest.mark.asyncio
 async def test_marker_inspection_fails_open_on_storage_error():
     class _UnavailableAGFS(_MemoryAGFS):
-        async def stat(self, path):
+        async def stat(self, path, **kwargs):
             raise RuntimeError("backend unavailable")
 
     assert await TTLRegistry(_UnavailableAGFS()).account_may_have_records("acct") is True

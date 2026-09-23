@@ -144,6 +144,15 @@ def tracker():
             False,
             "pathlock_acquire_batch",
         ),
+        *[
+            (
+                _record(OBJECT_TYPE_EVENT, object_uri=EVENT_URI.removesuffix(".md") + extension),
+                _event_body(),
+                False,
+                "pathlock_acquire_batch",
+            )
+            for extension in (".MD", ".txt", ".TXT")
+        ],
     ],
 )
 async def test_expired_object_is_deleted_strictly_and_registry_removed(

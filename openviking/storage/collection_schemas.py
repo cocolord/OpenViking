@@ -1009,7 +1009,10 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                             self._merge_request_stats(embedding_msg.telemetry_id, processed=1)
                             self._record_request_success(embedding_msg)
                             return ProcessResult.success(inserted_data)
-                    elif (ttl_object_for_uri(str(uri or "")) or (None,))[0] == OBJECT_TYPE_EVENT:
+                    elif (
+                        inserted_data.get("level", 2) == 2
+                        and (ttl_object_for_uri(str(uri or "")) or (None,))[0] == OBJECT_TYPE_EVENT
+                    ):
                         result = await self._write_ttl_vector_if_current(
                             embedding_msg, ctx, _write_vector
                         )

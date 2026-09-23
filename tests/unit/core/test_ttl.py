@@ -61,6 +61,43 @@ def test_object_type_for_scope():
     assert ttl.object_type_for_scope("peer_events") == ttl.OBJECT_TYPE_EVENT
 
 
+@pytest.mark.parametrize("owner", ["user/u1", "user/u1/peers/p1"])
+@pytest.mark.parametrize(
+    "extension",
+    [
+        ".md",
+        ".MD",
+        ".txt",
+        ".TXT",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".py",
+        ".js",
+        ".ts",
+        ".custom",
+        "",
+    ],
+)
+def test_event_objects_cover_all_public_content_write_extensions(owner, extension):
+    uri = f"viking://{owner}/memories/events/2026/event{extension}"
+    assert ttl.ttl_object_for_uri(uri) == (ttl.OBJECT_TYPE_EVENT, uri)
+
+
+@pytest.mark.parametrize("path", ["", "/.abstract.md", "/.overview.md", "/.relations.json"])
+def test_event_containers_and_derived_files_are_not_ttl_objects(path):
+    uri = "viking://user/u1/memories/events" + path
+    assert ttl.ttl_object_for_uri(uri) is None
+
+
+def test_event_directory_is_not_an_object_even_with_a_file_extension():
+    for name in ("2026", "notes.md", "events.txt"):
+        assert (
+            ttl.ttl_object_for_uri(f"viking://user/u1/memories/events/{name}", is_dir=True) is None
+        )
+
+
 # ── resolve_ttl_days / freeze_ttl_fields ────────────────────────────────────
 
 

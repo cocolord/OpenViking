@@ -813,7 +813,7 @@ class _AccessMixin:
     ) -> bool:
         """Return object-level TTL visibility without recursing through VikingFS.
 
-        Event expiry is stored in the event markdown file itself. Session expiry
+        Event expiry is stored in the event text file itself. Session expiry
         is stored at the session root and hides the complete session subtree.
         Directory policy nodes are never visibility objects by themselves.
         Vector candidates require a readable source: stale index rows must not
@@ -842,9 +842,9 @@ class _AccessMixin:
             ctx.account_id
         ):
             # Default-off accounts have no marker. Avoid parsing event/session
-            # metadata on their hot read paths. While policy is enabled we never
-            # trust a cached marker miss: another service process may have just
-            # created the account's first TTL object.
+            # metadata on their hot read paths. Marker misses are never cached:
+            # another process may import the first frozen TTL object even while
+            # policy is disabled.
             return True
 
         parts = self._safe_uri_parts(uri)
@@ -865,8 +865,8 @@ class _AccessMixin:
                     candidate_paths.append(candidate)
             metadata_paths = [f"{candidate}/.meta.json" for candidate in candidate_paths]
         else:
-            # Only concrete event markdown files carry a frozen TTL snapshot.
-            if not parts or not parts[-1].endswith(".md"):
+            # Match write registration regardless of filename extension.
+            if ttl_object_for_uri(uri) is None:
                 return True
             metadata_paths = [path] if path is not None else []
             canonical_path = self._uri_to_path(uri, ctx=ctx)
@@ -877,7 +877,15 @@ class _AccessMixin:
             if not metadata_path:
                 continue
             try:
-                await self._async_agfs.stat(metadata_path)
+                stat = await self._async_agfs.stat(metadata_path)
+                if (
+                    scope != "sessions"
+                    and ttl_object_for_uri(
+                        uri, is_dir=isinstance(stat, dict) and stat.get("isDir", False)
+                    )
+                    is None
+                ):
+                    return True
                 raw = self._handle_agfs_read(await self._async_agfs.read(metadata_path))
             except Exception as exc:
                 if is_not_found_error(exc):
