@@ -93,34 +93,25 @@ def test_nearest_directory_override_inherits_explicit_parent():
             "viking://user/u1/memories/events/private/shared": {"mode": "inherit"},
         },
     )
-    assert config.resolve_uri(
-        "viking://user/u1/memories/events/e.md", "user_events"
-    ) == 14
-    assert config.resolve_uri(
-        "viking://user/u1/memories/events/private/e.md", "user_events"
-    ) is None
-    assert config.resolve_uri(
-        "viking://user/u1/memories/events/private/shared/e.md", "user_events"
-    ) is None
+    assert config.resolve_uri("viking://user/u1/memories/events/e.md", "user_events") == 14
+    assert (
+        config.resolve_uri("viking://user/u1/memories/events/private/e.md", "user_events") is None
+    )
+    assert (
+        config.resolve_uri("viking://user/u1/memories/events/private/shared/e.md", "user_events")
+        is None
+    )
 
 
 def test_directory_matching_respects_path_boundaries():
     config = TTLConfig(
-        directories={
-            "viking://user/u1/memories/events/a": {"mode": "days", "ttl_days": 9}
-        }
+        directories={"viking://user/u1/memories/events/a": {"mode": "days", "ttl_days": 9}}
     )
-    assert config.resolve_uri(
-        "viking://user/u1/memories/events/abc/e.md", "user_events"
-    ) is None
+    assert config.resolve_uri("viking://user/u1/memories/events/abc/e.md", "user_events") is None
 
 
 def test_directory_only_policy_enables_ttl_and_normalizes_slash():
-    config = TTLConfig(
-        directories={
-            "viking://user/u1/sessions/": {"mode": "days", "ttl_days": 2}
-        }
-    )
+    config = TTLConfig(directories={"viking://user/u1/sessions/": {"mode": "days", "ttl_days": 2}})
     assert config.enabled is True
     assert "viking://user/u1/sessions" in config.directories
 
@@ -131,6 +122,9 @@ def test_directory_key_must_be_concrete_user_uri():
         "viking://user/u1/resources/project",
         "viking://user/u1/preferences",
         "viking://user/u1/memories/entities",
+        "viking://user/u1/sessions/s1",
+        "viking://user/u1/memories/events/2026/e.md",
+        "viking://user/u1/peers/p1/memories/events/e.md",
     ]
     for uri in invalid_uris:
         with pytest.raises(ValidationError):

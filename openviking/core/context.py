@@ -80,6 +80,7 @@ class Context:
         account_id: Optional[str] = None,
         owner_user_id: Optional[str] = None,
         owner_space: Optional[str] = None,
+        md5: Optional[str] = None,
         id: Optional[str] = None,
         expires_at: Optional[str] = None,
         ttl_generation: Optional[str] = None,
@@ -116,6 +117,10 @@ class Context:
             owner_user_id if owner_user_id is not None else owner_fields["owner_user_id"]
         )
         self.owner_space = owner_space or owner_fields["owner_user_id"] or ""
+        # md5 of the final stored bytes for this URI; None/"" means unknown (old
+        # records or non-file records), and incremental diff falls back to reading
+        # bytes rather than assuming equality.
+        self.md5 = md5 or ""
         self.vector: Optional[List[float]] = None
         self.vectorize = Vectorize(abstract)
 
@@ -177,6 +182,10 @@ class Context:
         }
         if self.level is not None:
             data["level"] = int(self.level)
+        # Only emit md5 when known so we never overwrite an existing fingerprint
+        # with an empty string via partial update.
+        if self.md5:
+            data["md5"] = self.md5
 
         if self.expires_at is not None:
             data["expires_at"] = self.expires_at
@@ -242,6 +251,7 @@ class Context:
             owner_space=data.get("owner_space"),
             expires_at=data.get("expires_at"),
             ttl_generation=data.get("ttl_generation"),
+            md5=data.get("md5"),
         )
         obj.id = data.get("id", obj.id)
         obj.vector = data.get("vector")

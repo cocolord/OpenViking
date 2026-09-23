@@ -27,7 +27,7 @@ TTL_SCOPES: tuple[TTLScope, ...] = ("user_events", "peer_events", "sessions")
 
 
 def _is_supported_directory_uri(uri: str) -> bool:
-    """Return whether ``uri`` is inside one of the three TTL namespaces."""
+    """Accept directory policies, never an individual event or session."""
     if not uri.startswith("viking://") or "?" in uri or "#" in uri:
         return False
     path = uri[len("viking://") :].rstrip("/")
@@ -35,13 +35,25 @@ def _is_supported_directory_uri(uri: str) -> bool:
     if any(not part for part in parts) or len(parts) < 3 or parts[0] != "user":
         return False
     if parts[2] == "sessions":
-        return True
+        # A session ID is an object root, not a configurable directory.
+        return len(parts) == 3
     if len(parts) >= 4 and parts[2:4] == ["memories", "events"]:
-        return True
-    return len(parts) >= 6 and parts[2] == "peers" and parts[4:6] == [
-        "memories",
-        "events",
-    ]
+        event_path = parts[4:]
+    elif (
+        len(parts) >= 6
+        and parts[2] == "peers"
+        and parts[4:6]
+        == [
+            "memories",
+            "events",
+        ]
+    ):
+        event_path = parts[6:]
+    else:
+        return False
+    # Event objects are Markdown files; accepting one as a policy key would
+    # silently reintroduce the per-object TTL excluded by the product review.
+    return not any(part.endswith(".md") for part in event_path)
 
 
 class TTLPolicy(BaseModel):
