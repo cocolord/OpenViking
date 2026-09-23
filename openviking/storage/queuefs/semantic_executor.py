@@ -720,6 +720,11 @@ class SemanticTreeExecutor:
                     for child_uri in children_dirs:
                         self._schedule_dir(child_uri, dir_uri)
             return False
+        except LockAcquisitionError:
+            # A content-write message can be dequeued before the writer releases
+            # its exact-path lease. Let SemanticProcessor re-enqueue this
+            # recoverable conflict instead of acknowledging unfinished file work.
+            raise
         except Exception as e:
             logger.error(f"Failed to dispatch directory {dir_uri}: {e}", exc_info=True)
             self._record_skill_failure(dir_uri, e)

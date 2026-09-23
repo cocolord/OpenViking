@@ -389,6 +389,34 @@ async def test_busy_parent_snapshot_preserves_changed_file_work(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_directory_listing_lock_conflict_propagates_for_retry(monkeypatch):
+    root_uri = "viking://resources"
+    changed = f"{root_uri}/cp-source-test.md"
+    fake_fs = _FakeVikingFS({})
+    fake_fs.ls = AsyncMock(side_effect=LockAcquisitionError("source write still locked"))
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
+    _patch_semantic_config(monkeypatch)
+
+    executor = SemanticTreeExecutor(
+        processor=_FakeProcessor(),
+        context_type="resource",
+        max_concurrent_llm=2,
+        ctx=RequestContext(user=UserIdentifier("acc1", "user1"), role=Role.USER),
+        incremental_update=True,
+        target_uri=root_uri,
+        recursive=False,
+        changes={"added": [changed]},
+        generation_trigger="content_write",
+        aggregate_directory=False,
+    )
+
+    with pytest.raises(LockAcquisitionError, match="source write still locked"):
+        await executor.run(root_uri)
+
+
+@pytest.mark.asyncio
 async def test_semantic_executor_shares_node_scheduler_across_roots(monkeypatch):
     root_a = "viking://resources/root-a"
     root_b = "viking://resources/root-b"
