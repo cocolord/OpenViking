@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 from openviking.core.context import ContextType, ResourceContentType
 from openviking.core.ttl import OBJECT_TYPE_EVENT, TTL_FIELD_NAMES, ttl_object_for_uri
 from openviking.models.embedder.base import embed_compat
-from openviking.server.error_mapping import is_not_found_error
+from openviking.server.error_mapping import is_storage_not_found
 from openviking.server.identity import RequestContext, Role
 from openviking.service.task_tracker_concurrency import run_to_completion
 from openviking.storage.acl import ACL_GRANT_FIELDS, ACL_MODE_FIELD, AclMode
@@ -1153,7 +1153,7 @@ class TextEmbeddingHandler(DequeueHandlerBase):
             try:
                 content = await viking_fs.read_file(object_uri, ctx=ctx, include_expired=True)
             except Exception as exc:
-                if is_not_found_error(exc):
+                if is_storage_not_found(exc):
                     return None
                 raise
             fields = parse_memory_file_with_fields(content)
@@ -1189,7 +1189,7 @@ class TextEmbeddingHandler(DequeueHandlerBase):
             try:
                 raw = await viking_fs.read_file(sidecar_uri, ctx=ctx)
             except Exception as exc:
-                if is_not_found_error(exc):
+                if is_storage_not_found(exc):
                     return None
                 raise
             if semantic_body_digest(body_for_preview(raw)) != expected_digest:

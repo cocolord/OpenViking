@@ -23,7 +23,7 @@ from openviking.core.ttl import (
     ttl_scope_for_uri,
 )
 from openviking.resource.watch_storage import is_watch_task_control_uri
-from openviking.server.error_mapping import is_not_found_error
+from openviking.server.error_mapping import is_not_found_error, is_storage_not_found
 from openviking.server.identity import RequestContext, Role
 from openviking.storage.acl import (
     AclAction,
@@ -827,7 +827,7 @@ class _AccessMixin:
                     await self._async_agfs.stat(candidate)
                     raw = self._handle_agfs_read(await self._async_agfs.read(candidate))
                 except Exception as exc:
-                    if is_not_found_error(exc):
+                    if is_storage_not_found(exc):
                         continue
                     if require_source:
                         raise
@@ -888,7 +888,7 @@ class _AccessMixin:
                     return True
                 raw = self._handle_agfs_read(await self._async_agfs.read(metadata_path))
             except Exception as exc:
-                if is_not_found_error(exc):
+                if is_storage_not_found(exc):
                     continue
                 # A transient source failure cannot prove an object is live.
                 # Propagate it even for ls/glob instead of exposing an expired
@@ -919,13 +919,7 @@ class _AccessMixin:
         target = ttl_object_for_uri(uri)
         if target is not None:
             _object_type, object_uri = target
-            try:
-                record = await self.ttl_registry.get(ctx.account_id, object_uri)
-            except Exception:
-                # The metadata may already be gone after a partial strict
-                # delete. Do not expose its remaining subtree if the durable
-                # expiry record cannot be checked.
-                raise
+            record = await self.ttl_registry.get(ctx.account_id, object_uri)
             if record is not None and hidden_by_ttl(record.expires_at):
                 return False
         return not require_source

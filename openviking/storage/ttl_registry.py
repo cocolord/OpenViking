@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Optional
 
 from openviking.pyagfs import AsyncAGFSClient
-from openviking.server.error_mapping import is_not_found_error
+from openviking.server.error_mapping import is_storage_not_found
 from openviking.server.identity import RequestContext
 from openviking.service.task_store import PersistentTaskStore
 from openviking_cli.utils.logger import get_logger
@@ -83,9 +83,9 @@ class TTLRegistry:
         key = (account_id, directory_uri.rstrip("/"))
         if key not in self._known_summary_dirs:
             try:
-                await self._agfs.stat(self._summary_marker(*key))
+                await self._agfs.stat(self._summary_marker(*key), bypass_cache=True)
             except Exception as exc:
-                if is_not_found_error(exc):
+                if is_storage_not_found(exc):
                     return False
                 raise
             self._known_summary_dirs.add(key)
@@ -99,7 +99,7 @@ class TTLRegistry:
             # Avoid plugin-local stat caches as well as process-local misses.
             await self._agfs.stat(self.marker_path(account_id), bypass_cache=True)
         except Exception as exc:
-            if not is_not_found_error(exc):
+            if not is_storage_not_found(exc):
                 # Fail open for reads: if registry state cannot be inspected,
                 # object metadata is still able to enforce its own deadline.
                 return True

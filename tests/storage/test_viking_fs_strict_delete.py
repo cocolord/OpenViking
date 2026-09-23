@@ -6,12 +6,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from openviking.pyagfs.exceptions import AGFSNetworkError
 from openviking.server.identity import RequestContext, Role
 from openviking.storage.expr import Eq, In, Or, PathScope
 from openviking.storage.vectordb.index.cuvs_index import matches_filter
 from openviking.storage.vectordb_adapters.local_adapter import LocalCollectionAdapter
 from openviking.storage.viking_fs import VikingFS
 from openviking.storage.viking_vector_index_backend import VikingVectorIndexBackend
+from openviking_cli.exceptions import UnavailableError
 from openviking_cli.session.user_id import UserIdentifier
 
 
@@ -23,12 +25,19 @@ def _ctx() -> RequestContext:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("storage_outage", [False, True])
 async def test_strict_recursive_delete_clears_orphan_vector_subtree_when_source_is_missing(
     monkeypatch,
+    storage_outage,
 ):
     session_uri = "viking://user/alice/sessions/session-1"
     session_path = "/local/acct/user/alice/sessions/session-1"
-    agfs = SimpleNamespace(stat=AsyncMock(side_effect=FileNotFoundError(session_path)))
+    error = (
+        AGFSNetworkError("endpoint not found")
+        if storage_outage
+        else FileNotFoundError(session_path)
+    )
+    agfs = SimpleNamespace(stat=AsyncMock(side_effect=error))
     vector_store = SimpleNamespace(
         delete_uris=AsyncMock(),
         delete_uri_scope=AsyncMock(),
@@ -46,6 +55,13 @@ async def test_strict_recursive_delete_clears_orphan_vector_subtree_when_source_
     monkeypatch.setattr(fs, "_collect_uris", AsyncMock(return_value=[]))
     monkeypatch.setattr(fs, "_confirm_fs_scope_cleared", AsyncMock())
 
+    if storage_outage:
+        with pytest.raises(UnavailableError, match="endpoint not found"):
+            await fs.rm(session_uri, recursive=True, ctx=_ctx(), strict=True)
+        vector_store.delete_uris.assert_not_awaited()
+        vector_store.delete_uri_scope.assert_not_awaited()
+        return
+
     await fs.rm(session_uri, recursive=True, ctx=_ctx(), strict=True)
 
     vector_store.delete_uris.assert_awaited_once()
@@ -58,6 +74,14 @@ async def test_strict_recursive_delete_clears_orphan_vector_subtree_when_source_
         "filter": Or([Eq("uri", session_uri), PathScope("uri", session_uri, depth=-1)]),
         "ctx": _ctx(),
     }
+
+
+@pytest.mark.asyncio
+async def test_strict_delete_confirmation_cannot_mistake_storage_outage_for_absence():
+    fs = VikingFS(agfs=SimpleNamespace())
+    fs._async_agfs.stat = AsyncMock(side_effect=AGFSNetworkError("endpoint not found"))
+    with pytest.raises(AGFSNetworkError, match="endpoint not found"):
+        await fs._confirm_fs_scope_cleared("/local/acct/path", "viking://resources/path")
 
 
 @pytest.mark.asyncio

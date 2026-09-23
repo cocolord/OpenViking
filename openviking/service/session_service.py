@@ -7,7 +7,6 @@ Provides session management operations: session, sessions, add_message, commit, 
 """
 
 import asyncio
-import json
 from dataclasses import replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -356,33 +355,11 @@ class SessionService:
 
         return list(sessions_by_id.values())
 
-    async def _session_expired(self, session_uri: str, ctx: RequestContext) -> bool:
-        """Whether a session is logically expired per its frozen ``.meta.json``.
-
-        Best-effort: an unreadable or malformed meta means we cannot prove
-        expiry, so the session stays visible (fail-open), matching the
-        absent-``expires_at``-is-visible rule of the vector read barrier.
-        """
-        try:
-            meta_content = await self._viking_fs.read_file(
-                f"{session_uri}/.meta.json", ctx=ctx
-            )
-            expires_at = json.loads(meta_content).get("expires_at", "")
-        except Exception:
-            return False
-        return hidden_by_ttl(expires_at)
-
-    async def delete(
-        self, session_id: str, ctx: RequestContext, *, strict: bool = False
-    ) -> bool:
+    async def delete(self, session_id: str, ctx: RequestContext) -> bool:
         """Delete a session.
 
         Args:
             session_id: Session ID to delete
-            strict: When True (the TTL cleanup path), wait until every backing
-                record — session files and vector index — is confirmed removed
-                before returning success. The default interactive delete keeps
-                the historical best-effort semantics.
 
         Returns:
             True if deleted successfully
@@ -397,7 +374,7 @@ class SessionService:
             self._record_lifecycle_metric("delete", "error")
             raise NotFoundError(session_id, "session")
 
-        await self._viking_fs.rm(session_uri, recursive=True, ctx=ctx, strict=strict)
+        await self._viking_fs.rm(session_uri, recursive=True, ctx=ctx)
         logger.info(f"Deleted session: {session_id}")
         self._record_lifecycle_metric("delete", "ok")
         return True

@@ -387,6 +387,9 @@ class _MemoryTTLRegistry:
     async def get(self, account_id, uri):
         return self.records.get((account_id, uri))
 
+    async def account_may_have_records(self, account_id):
+        return any(account == account_id for account, _uri in self.records)
+
     async def upsert(self, record):
         self.mutations.append(("upsert", record.object_uri, record.generation))
         self.records[(record.account_id, record.object_uri)] = record

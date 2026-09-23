@@ -253,6 +253,25 @@ async def test_phase2_completion_renews_from_one_persisted_timestamp():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [AGFSNetworkError, AGFSTimeoutError])
+async def test_phase2_final_meta_read_outage_is_not_stale(error_type):
+    uri = "viking://user/default/sessions/session-1"
+    metadata = json.dumps({"ttl_generation": "g1", "expires_at": "2999-01-01T00:00:00Z"})
+    storage = _MemoryVikingFS({uri + "/.meta.json": metadata})
+    # The fence read succeeds; the subsequent merge read fails under the same lock.
+    storage.read_file = AsyncMock(side_effect=[metadata, error_type("endpoint not found")])
+    session = Session(viking_fs=storage, session_id="session-1", session_uri=uri)
+    with pytest.raises(error_type, match="endpoint not found"):
+        await session._merge_and_save_commit_meta(
+            archive_index=1,
+            memories_extracted={},
+            telemetry_snapshot=None,
+            ttl_generation="g1",
+        )
+    assert storage.files == {uri + "/.meta.json": metadata}
+
+
+@pytest.mark.asyncio
 async def test_done_recovery_repairs_ttl_with_original_completion_time():
     session_uri = "viking://user/default/sessions/session-1"
     archive_uri = f"{session_uri}/history/archive_001"

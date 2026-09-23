@@ -269,6 +269,9 @@ class _TTLTransferRegistry:
     async def get(self, account_id, uri):
         return self.records.get((account_id, uri))
 
+    async def account_may_have_records(self, account_id):
+        return any(account == account_id for account, _uri in self.records)
+
     async def upsert(self, record):
         self.events.append(("ttl-upsert", record.object_uri, record.generation))
         self.records[(record.account_id, record.object_uri)] = record
@@ -341,6 +344,28 @@ async def test_cp_overwrite_keeps_old_generation_until_bytes_are_published(monke
     assert next(i for i, event in enumerate(agfs.events) if event[0] == "cp") < (
         agfs.events.index(ttl_events[1])
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["cp", "mv"])
+@pytest.mark.parametrize("overwrite", [False, True])
+async def test_failed_ttl_transfer_restores_previous_projection(monkeypatch, operation, overwrite):
+    fs, agfs = _ttl_transfer_fs(monkeypatch)
+    source = "viking://user/alice/memories/events/source.md"
+    target = "viking://user/alice/memories/events/target.md"
+    old = TTLRecord(target, "event", "acct", "alice", "2040-01-01T00:00:00Z", "target-old")
+    if overwrite:
+        fs.ttl_registry.records[("acct", target)] = old
+    vector_method = "_copy_vector_store_uris" if operation == "cp" else "_update_vector_store_uris"
+    monkeypatch.setattr(
+        fs, vector_method, AsyncMock(side_effect=RuntimeError("vector unavailable"))
+    )
+
+    with pytest.raises(RuntimeError, match="vector unavailable"):
+        await getattr(fs, operation)(source, target, ctx=_ctx())
+
+    assert fs.ttl_registry.records == ({("acct", target): old} if overwrite else {})
+    assert fs._uri_to_path(source, ctx=_ctx()) in agfs.paths
 
 
 @pytest.mark.asyncio

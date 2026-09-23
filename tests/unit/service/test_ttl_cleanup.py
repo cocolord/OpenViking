@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from openviking.core.ttl import OBJECT_TYPE_EVENT, OBJECT_TYPE_SESSION
+from openviking.pyagfs.exceptions import AGFSNetworkError, AGFSTimeoutError
 from openviking.service import ttl_cleanup
 from openviking.service.task_tracker import TaskStatus, TaskTracker, set_task_tracker
 from openviking.service.task_work_index import bind_task_context, get_task_context
@@ -293,6 +294,22 @@ async def test_stale_registry_generation_is_a_noop(tracker):
     viking_fs.read_file.assert_not_awaited()
     viking_fs.rm.assert_not_awaited()
     registry.remove_if_generation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [AGFSNetworkError, AGFSTimeoutError])
+async def test_source_outage_with_not_found_text_retries_without_deleting(tracker, error_type):
+    record = _record(OBJECT_TYPE_EVENT, object_uri=EVENT_URI)
+    cleanup, fs, registry, _ = _make_service(
+        record=record, live_content=error_type("backend endpoint not found")
+    )
+
+    result = await cleanup._process(_message(record))
+
+    assert result.outcome is ProcessOutcome.REQUEUED
+    fs.rm.assert_not_awaited()
+    registry.remove_if_generation.assert_not_awaited()
+    registry.defer_retry.assert_awaited_once()
 
 
 @pytest.mark.asyncio

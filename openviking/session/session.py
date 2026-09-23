@@ -4386,11 +4386,13 @@ class Session:
                     include_expired=bool(ttl_generation),
                 )
                 latest_meta = SessionMeta.from_dict(json.loads(meta_content))
-            except Exception:
+            except Exception as exc:
                 if ttl_generation:
-                    raise StaleSessionGenerationError(
-                        f"stale TTL session generation: {self._session_uri}"
-                    )
+                    if _is_storage_not_found(exc):
+                        raise StaleSessionGenerationError(
+                            f"stale TTL session generation: {self._session_uri}"
+                        ) from exc
+                    raise
                 latest_meta = self._meta
 
             archive_meta = await self._read_archive_meta(archive_uri)

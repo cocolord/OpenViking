@@ -55,12 +55,6 @@ def test_ttl_scope_for_uri(uri, expected):
     assert ttl.ttl_scope_for_uri(uri) == expected
 
 
-def test_object_type_for_scope():
-    assert ttl.object_type_for_scope("sessions") == ttl.OBJECT_TYPE_SESSION
-    assert ttl.object_type_for_scope("user_events") == ttl.OBJECT_TYPE_EVENT
-    assert ttl.object_type_for_scope("peer_events") == ttl.OBJECT_TYPE_EVENT
-
-
 @pytest.mark.parametrize("owner", ["user/u1", "user/u1/peers/p1"])
 @pytest.mark.parametrize("basename", ["event", ".note"])
 @pytest.mark.parametrize(

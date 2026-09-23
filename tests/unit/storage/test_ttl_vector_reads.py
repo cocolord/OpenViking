@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from openviking.core.ttl import TTL_FIELD_NAMES
+from openviking.pyagfs.exceptions import AGFSNetworkError
 from openviking.server.identity import RequestContext, Role
 from openviking.storage.abstract_overview import render_abstract_overview
 from openviking.storage.collection_schemas import CollectionSchemas
@@ -207,23 +208,29 @@ async def test_orphan_vectors_hidden_but_raw_cleanup_query_can_find_them(setup):
 
 
 @pytest.mark.asyncio
-async def test_source_read_error_cannot_return_unverified_vector_content(setup):
+@pytest.mark.parametrize(
+    "error", [OSError("storage unavailable"), AGFSNetworkError("endpoint not found")]
+)
+async def test_source_read_error_cannot_return_unverified_vector_content(setup, error):
     s = setup
     uri = ROOT + "/event.md"
     s.source(uri, PAST)
     s.rows.append({"uri": uri, "level": 2})
-    s.fs._async_agfs.read = AsyncMock(side_effect=OSError("storage unavailable"))
-    with pytest.raises(OSError, match="storage unavailable"):
+    s.fs._async_agfs.read = AsyncMock(side_effect=error)
+    with pytest.raises(type(error), match=str(error)):
         await s.backend.query(ctx=s.ctx, include_expired=False)
 
 
 @pytest.mark.asyncio
-async def test_source_read_error_cannot_expose_event_name(setup):
+@pytest.mark.parametrize(
+    "error", [OSError("storage unavailable"), AGFSNetworkError("endpoint not found")]
+)
+async def test_source_read_error_cannot_expose_event_name(setup, error):
     s = setup
     uri = ROOT + "/event.md"
     s.source(uri, PAST)
-    s.fs._async_agfs.read = AsyncMock(side_effect=OSError("storage unavailable"))
-    with pytest.raises(OSError, match="storage unavailable"):
+    s.fs._async_agfs.read = AsyncMock(side_effect=error)
+    with pytest.raises(type(error), match=str(error)):
         await s.fs._ttl_uri_visible(uri, s.ctx)
 
 

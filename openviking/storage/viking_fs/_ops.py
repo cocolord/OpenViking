@@ -28,7 +28,7 @@ from openviking.pyagfs.exceptions import (
     AGFSHTTPError,
 )
 from openviking.resource.watch_storage import is_watch_task_control_uri
-from openviking.server.error_mapping import is_not_found_error, map_exception
+from openviking.server.error_mapping import is_not_found_error, is_storage_not_found, map_exception
 from openviking.server.identity import RequestContext, Role
 from openviking.storage.abstract_overview import (
     ABSTRACT_OVERVIEW_FILENAMES,
@@ -62,7 +62,6 @@ class _TTLWriteMutation:
     object_uri: str
     previous: Optional["TTLRecord"]
     desired: Optional["TTLRecord"]
-    preregistered: Optional["TTLRecord"]
 
 
 def _glob_match_uri(entry_uri: str, is_dir: Optional[bool]) -> str:
@@ -311,7 +310,7 @@ class _OpsMixin:
             stat = await self._async_agfs.stat(path)
             is_dir = stat.get("isDir", False) if isinstance(stat, dict) else False
         except Exception as exc:
-            if not is_not_found_error(exc):
+            if not (is_storage_not_found(exc) if strict else is_not_found_error(exc)):
                 mapped = map_exception(exc, resource=uri)
                 if mapped is not None:
                     raise mapped from exc
@@ -962,10 +961,10 @@ class _OpsMixin:
         *,
         ctx: Optional[RequestContext],
         lease_ref: Dict[str, Any],
-    ) -> Dict[str, tuple[Optional["TTLRecord"], Optional["TTLRecord"]]]:
+    ) -> List[_TTLWriteMutation]:
         """Register target TTL snapshots before copied bytes are published."""
         source_uri_set = {uri.rstrip("/") for uri in source_uris}
-        registrations: set[tuple[str, str, str]] = set()
+        registrations: set[tuple[str, str]] = set()
         for source_uri in source_uris:
             target_uri = new_scope + source_uri.rstrip("/")[len(old_scope) :]
             target = ttl_object_for_uri(target_uri)
@@ -978,30 +977,20 @@ class _OpsMixin:
             source_registration_uri = old_scope + target_registration_uri[len(new_scope) :]
             if source_registration_uri not in source_uri_set:
                 continue
-            registrations.add((source_registration_uri, target_registration_uri, object_uri))
+            registrations.add((source_registration_uri, target_registration_uri))
 
         fs_ctx = self._pathlock_fs_ctx(ctx, lease_ref)
-        real_ctx = self._ctx_or_default(ctx)
-        mutations: Dict[str, tuple[Optional["TTLRecord"], Optional["TTLRecord"]]] = {}
+        mutations: List[_TTLWriteMutation] = []
         try:
-            for source_uri, target_uri, object_uri in sorted(registrations):
-                previous = await self.ttl_registry.get(real_ctx.account_id, object_uri)
+            for source_uri, target_uri in sorted(registrations):
                 path = self._uri_to_path(source_uri, ctx=ctx)
                 stat = await self._async_agfs.stat(path, fs_ctx=fs_ctx)
                 if isinstance(stat, dict) and stat.get("isDir", False):
                     continue
                 raw = self._handle_agfs_read(await self._async_agfs.read(path, fs_ctx=fs_ctx))
-                registered = self._ttl_record_for_write(target_uri, raw, ctx=ctx)
-                if registered is not None:
-                    if previous is None:
-                        await self.ttl_registry.upsert(registered)
-                    else:
-                        earlier_expiry = min(
-                            (previous.expires_at, registered.expires_at),
-                            key=parse_iso_datetime,
-                        )
-                        await self.ttl_registry.upsert(replace(previous, expires_at=earlier_expiry))
-                mutations[object_uri] = (previous, registered)
+                mutation = await self._prepare_ttl_write(target_uri, raw, ctx=ctx)
+                if mutation is not None:
+                    mutations.append(mutation)
         except Exception:
             await self._rollback_transferred_ttl_records(mutations, ctx=ctx)
             raise
@@ -1009,51 +998,23 @@ class _OpsMixin:
 
     async def _complete_transferred_ttl_records(
         self,
-        mutations: Dict[str, tuple[Optional["TTLRecord"], Optional["TTLRecord"]]],
+        mutations: List[_TTLWriteMutation],
         *,
         ctx: Optional[RequestContext],
     ) -> None:
         """Publish the final target projection after filesystem success."""
-        real_ctx = self._ctx_or_default(ctx)
-        for object_uri, (previous, registered) in mutations.items():
-            if registered is not None:
-                if previous is not None:
-                    await self.ttl_registry.upsert(registered)
-            elif previous is not None:
-                await self.ttl_registry.remove_if_generation(
-                    real_ctx.account_id, object_uri, previous.generation
-                )
+        for mutation in mutations:
+            await self._complete_ttl_write(mutation, ctx=ctx)
 
     async def _rollback_transferred_ttl_records(
         self,
-        mutations: Dict[str, tuple[Optional["TTLRecord"], Optional["TTLRecord"]]],
+        mutations: List[_TTLWriteMutation],
         *,
         ctx: Optional[RequestContext],
     ) -> None:
         """Undo projections for target bytes that were not published."""
-        real_ctx = self._ctx_or_default(ctx)
-        for object_uri, (previous, registered) in mutations.items():
-            if registered is None:
-                continue
-            try:
-                current = await self.ttl_registry.get(real_ctx.account_id, object_uri)
-                expected = {registered.generation}
-                if previous is not None:
-                    expected.add(previous.generation)
-                if current is None or current.generation not in expected:
-                    continue
-                if previous is not None:
-                    await self.ttl_registry.upsert(previous)
-                else:
-                    await self.ttl_registry.remove_if_generation(
-                        real_ctx.account_id, object_uri, registered.generation
-                    )
-            except Exception:
-                logger.warning(
-                    "Failed to roll back TTL transfer projection for %s",
-                    object_uri,
-                    exc_info=True,
-                )
+        for mutation in mutations:
+            await self._rollback_ttl_write(mutation, ctx=ctx)
 
     async def _remove_transferred_ttl_records(
         self, source_uris: List[str], *, ctx: Optional[RequestContext]
@@ -2365,6 +2326,18 @@ class _OpsMixin:
             if owned_lease is not None:
                 await self._async_agfs.pathlock_release(owned_lease)
 
+    @staticmethod
+    def _ttl_metadata_target(uri: str) -> Optional[tuple[str, str]]:
+        """Identify the source file that owns an event or session's TTL snapshot."""
+        target = ttl_object_for_uri(uri)
+        if target is not None:
+            object_type, object_uri = target
+            if object_type == OBJECT_TYPE_EVENT and object_uri != uri.rstrip("/"):
+                return None
+            if object_type == OBJECT_TYPE_SESSION and uri.rstrip("/") != f"{object_uri}/.meta.json":
+                return None
+        return target
+
     async def _prepare_ttl_write(
         self,
         uri: str,
@@ -2378,14 +2351,10 @@ class _OpsMixin:
         live generation and the earlier deadline until bytes are durable, so a
         failed or interrupted write cannot postpone cleanup of the old object.
         """
-        target = ttl_object_for_uri(uri)
+        target = self._ttl_metadata_target(uri)
         if target is None:
             return None
-        object_type, object_uri = target
-        if object_type == OBJECT_TYPE_EVENT and object_uri != uri.rstrip("/"):
-            return None
-        if object_type == OBJECT_TYPE_SESSION and uri.rstrip("/") != (f"{object_uri}/.meta.json"):
-            return None
+        _object_type, object_uri = target
 
         real_ctx = self._ctx_or_default(ctx)
         desired = self._ttl_record_for_write(uri, content, ctx=ctx)
@@ -2396,7 +2365,6 @@ class _OpsMixin:
         ):
             return None
         previous = await self.ttl_registry.get(real_ctx.account_id, object_uri)
-        preregistered = None
         if desired is not None:
             preregistered = desired
             if previous is not None:
@@ -2411,7 +2379,6 @@ class _OpsMixin:
             object_uri=object_uri,
             previous=previous,
             desired=desired,
-            preregistered=preregistered,
         )
 
     async def _complete_ttl_write(
@@ -2434,12 +2401,17 @@ class _OpsMixin:
     async def _rollback_ttl_write(
         self, mutation: Optional[_TTLWriteMutation], *, ctx: Optional[RequestContext]
     ) -> None:
-        if mutation is None or mutation.preregistered is None:
+        if mutation is None or mutation.desired is None:
             return
         real_ctx = self._ctx_or_default(ctx)
         try:
             current = await self.ttl_registry.get(real_ctx.account_id, mutation.object_uri)
-            if current is None or current.generation != mutation.preregistered.generation:
+            # A multi-file transfer can fail after completing some projections.
+            # Roll back either stage, but never an unrelated replacement.
+            expected = {mutation.desired.generation}
+            if mutation.previous is not None:
+                expected.add(mutation.previous.generation)
+            if current is None or current.generation not in expected:
                 return
             if mutation.previous is not None:
                 await self.ttl_registry.upsert(mutation.previous)
@@ -2447,7 +2419,7 @@ class _OpsMixin:
                 await self.ttl_registry.remove_if_generation(
                     real_ctx.account_id,
                     mutation.object_uri,
-                    mutation.preregistered.generation,
+                    mutation.desired.generation,
                 )
         except Exception:
             logger.warning(
@@ -2464,14 +2436,10 @@ class _OpsMixin:
         ctx: Optional[RequestContext],
     ) -> Optional["TTLRecord"]:
         """Parse a frozen TTL snapshot without changing the registry."""
-        target = ttl_object_for_uri(uri)
+        target = self._ttl_metadata_target(uri)
         if target is None:
             return None
         object_type, object_uri = target
-        if object_type == OBJECT_TYPE_EVENT and object_uri != uri.rstrip("/"):
-            return None
-        if object_type == OBJECT_TYPE_SESSION and uri.rstrip("/") != (f"{object_uri}/.meta.json"):
-            return None
         text = content.decode("utf-8")
         if object_type == OBJECT_TYPE_SESSION:
             fields = json.loads(text)
@@ -2495,7 +2463,7 @@ class _OpsMixin:
         try:
             await self._async_agfs.stat(path, bypass_cache=True)
         except Exception as exc:
-            if is_not_found_error(exc):
+            if is_storage_not_found(exc):
                 return
             raise
         raise RuntimeError(f"Filesystem data still present after delete: {uri}")

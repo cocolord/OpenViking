@@ -13,6 +13,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from openviking.pyagfs.exceptions import (
+    AGFSDirectoryNotEmptyError,
+    AGFSNetworkError,
+    AGFSTimeoutError,
+)
 from openviking.server.identity import RequestContext, Role
 from openviking.storage.ttl_registry import TTLRecord, TTLRegistry, record_from_fields
 from openviking.storage.viking_fs import VikingFS
@@ -66,7 +71,7 @@ class _MemoryAGFS:
         if path in self.files:
             del self.files[path]
         elif any(key.startswith(path + "/") for key in self.files):
-            raise RuntimeError("directory not empty")
+            raise AGFSDirectoryNotEmptyError("directory not empty")
         else:
             raise FileNotFoundError(path)
 
@@ -157,24 +162,56 @@ async def test_reader_sees_first_ttl_object_imported_by_another_worker(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_marker_inspection_fails_open_on_storage_error():
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("backend unavailable"),
+        AGFSNetworkError("endpoint not found"),
+        AGFSTimeoutError("backend not found before timeout"),
+    ],
+)
+async def test_marker_inspection_fails_open_on_storage_error(error):
     class _UnavailableAGFS(_MemoryAGFS):
         async def stat(self, path, **kwargs):
-            raise RuntimeError("backend unavailable")
+            raise error
 
     assert await TTLRegistry(_UnavailableAGFS()).account_may_have_records("acct") is True
 
 
 @pytest.mark.asyncio
-async def test_summary_marker_is_specific_to_event_parent_and_survives_cleanup():
+@pytest.mark.parametrize("operation", ["record", "summary", "claim"])
+async def test_registry_outage_is_not_treated_as_absence(operation):
     agfs = _MemoryAGFS()
     registry = TTLRegistry(agfs)
+    error = AGFSNetworkError("backend endpoint not found")
+    agfs.read = agfs.stat = agfs.ls = AsyncMock(side_effect=error)
+    with pytest.raises(AGFSNetworkError, match="endpoint not found"):
+        if operation == "record":
+            await registry.get("acct", _record().object_uri)
+        elif operation == "summary":
+            await registry.summary_requires_snapshot("acct", "viking://user/u1/memories/events")
+        else:
+            _ = [item async for item in registry.claim_due(now=datetime.now(timezone.utc))]
+
+
+@pytest.mark.asyncio
+async def test_summary_marker_is_specific_to_event_parent_and_survives_cleanup():
+    class CachedAGFS(_MemoryAGFS):
+        async def stat(self, path, *, bypass_cache=False):
+            if not bypass_cache:
+                raise FileNotFoundError("cached marker miss")
+            return await super().stat(path)
+
+    agfs = CachedAGFS()
+    registry = TTLRegistry(agfs)
+    reader = TTLRegistry(agfs)
     directory = "viking://user/u1/memories/events/day"
     await registry.upsert(_record())  # Session TTL does not affect event summaries.
-    assert not await registry.summary_requires_snapshot("acct", directory)
+    assert not await reader.summary_requires_snapshot("acct", directory)
     event = replace(_record(uri=directory + "/e.md"), object_type="event")
     await registry.upsert(event)
     await registry.remove_if_generation("acct", event.object_uri, event.generation)
+    assert await reader.summary_requires_snapshot("acct", directory)
     restarted = TTLRegistry(agfs)
     assert await restarted.summary_requires_snapshot("acct", directory)
     assert not await restarted.summary_requires_snapshot("acct", directory + "-sibling")

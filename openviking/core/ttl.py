@@ -62,11 +62,6 @@ def ttl_scope_for_uri(uri: str) -> Optional[TTLScope]:
     return None
 
 
-def object_type_for_scope(scope: TTLScope) -> str:
-    """Return the lifecycle object_type tag for a resolved TTL scope."""
-    return OBJECT_TYPE_SESSION if scope == "sessions" else OBJECT_TYPE_EVENT
-
-
 def ttl_object_for_uri(uri: str, *, is_dir: bool = False) -> Optional[tuple[str, str]]:
     """Return ``(object_type, canonical_object_uri)`` for a TTL object path.
 

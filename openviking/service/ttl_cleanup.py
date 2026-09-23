@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from uuid import NAMESPACE_URL, uuid5
@@ -23,7 +24,7 @@ from openviking.core.ttl import (
     OBJECT_TYPE_SESSION,
     hidden_by_ttl,
 )
-from openviking.server.error_mapping import is_not_found_error
+from openviking.server.error_mapping import is_storage_not_found
 from openviking.server.identity import RequestContext, Role
 from openviking.service.task_store import SYSTEM_TASK_ACCOUNT_ID, SYSTEM_TASK_USER_ID
 from openviking.service.task_tracker import TaskStatus, get_task_tracker
@@ -67,14 +68,7 @@ def _ttl_cleanup_message(
         "task_id": task_id or _cleanup_task_id(record, attempt=retry_count),
         "account_id": SYSTEM_TASK_ACCOUNT_ID,
         "user_id": SYSTEM_TASK_USER_ID,
-        "target": {
-            "object_type": record.object_type,
-            "object_uri": record.object_uri,
-            "account_id": record.account_id,
-            "user_id": record.user_id,
-            "expires_at": record.expires_at,
-            "generation": record.generation,
-        },
+        "target": asdict(record),
         "retry_count": max(0, int(retry_count)),
     }
 
@@ -106,15 +100,7 @@ class TTLCleanupService:
         """Settle or durably replace one cleanup delivery."""
         task_id = message["task_id"]
         owner = {"account_id": message["account_id"], "user_id": message["user_id"]}
-        target = message["target"]
-        record = TTLRecord(
-            object_uri=target["object_uri"],
-            object_type=target["object_type"],
-            account_id=target["account_id"],
-            user_id=target["user_id"],
-            expires_at=target["expires_at"],
-            generation=target["generation"],
-        )
+        record = TTLRecord.from_dict(message["target"])
 
         tracker = get_task_tracker()
         task = await tracker.create(
@@ -342,7 +328,7 @@ class TTLCleanupService:
         try:
             raw = await viking_fs.read_file(read_uri, ctx=ctx, include_expired=True)
         except Exception as exc:
-            if is_not_found_error(exc):
+            if is_storage_not_found(exc):
                 return None
             raise
         if scheduled.object_type == OBJECT_TYPE_SESSION:
@@ -495,13 +481,7 @@ class _TTLCleanupProcessor(DequeueHandlerBase):
 
     async def on_cancelled(self, data: Optional[dict[str, Any]]) -> ProcessResult:
         """Recover legacy terminal cleanup tasks instead of dropping work."""
-        if not data:
-            return ProcessResult.success()
-        try:
-            message = self._parse_message(data)
-        except (json.JSONDecodeError, TypeError, ValueError) as exc:
-            return ProcessResult.failed(str(exc))
-        return await self._dispatcher.run(lambda: self._cleanup_service._process(message))
+        return await self.on_dequeue(data)
 
 
 async def setup_ttl_cleanup(*, service: Any) -> Optional[TTLCleanupService]:

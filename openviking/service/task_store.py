@@ -16,8 +16,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Protocol
 
 from openviking.pyagfs import AsyncAGFSClient
-from openviking.pyagfs.exceptions import AGFSAlreadyExistsError, AGFSNotFoundError
-from openviking.server.error_mapping import is_not_found_error
+from openviking.pyagfs.exceptions import (
+    AGFSAlreadyExistsError,
+    AGFSDirectoryNotEmptyError,
+    AGFSNotFoundError,
+)
+from openviking.server.error_mapping import is_storage_not_found
 from openviking.service.task_tracker_concurrency import StoreIOLimiter, run_to_completion
 from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
 
@@ -108,7 +112,7 @@ class PersistentTaskStore:
         try:
             item = json.loads(_decode_bytes(await self._agfs.read(self.schedule_path(kind, key))))
         except Exception as exc:
-            if is_not_found_error(exc):
+            if is_storage_not_found(exc):
                 return None
             raise
         if item.get("key") != key or item.get("kind") != kind:
@@ -119,7 +123,7 @@ class PersistentTaskStore:
         try:
             await self._agfs.rm(path, auto_pathlock=False, fs_ctx=fs_ctx)
         except Exception as exc:
-            if not is_not_found_error(exc):
+            if not is_storage_not_found(exc):
                 raise
 
     async def _put_scheduled(self, item: dict, previous: dict | None, fs_ctx: dict) -> None:
@@ -205,7 +209,7 @@ class PersistentTaskStore:
             try:
                 entries = await self._agfs.ls(path, limit=limit, sort_by="name")
             except Exception as exc:
-                if is_not_found_error(exc):
+                if is_storage_not_found(exc):
                     return
                 raise
             for entry in entries:
@@ -229,12 +233,9 @@ class PersistentTaskStore:
                 try:
                     await self._agfs.rm(path, auto_pathlock=False)
                 except Exception as exc:
-                    from openviking.pyagfs.exceptions import AGFSDirectoryNotEmptyError
-
                     if not (
-                        is_not_found_error(exc)
+                        is_storage_not_found(exc)
                         or isinstance(exc, AGFSDirectoryNotEmptyError)
-                        or "not empty" in str(exc).lower()
                     ):
                         raise
 
@@ -244,7 +245,7 @@ class PersistentTaskStore:
             try:
                 raw = await self._agfs.read(path)
             except Exception as exc:
-                if is_not_found_error(exc):
+                if is_storage_not_found(exc):
                     continue
                 raise
             byte_count += len(raw)
