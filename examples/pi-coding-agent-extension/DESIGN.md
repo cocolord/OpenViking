@@ -88,7 +88,7 @@ The OV session id is `pi-<pi session id>`, derived locally by the shared `derive
 
 ### takeover.ts
 
-A binding, not a mechanism. The state machine lives in `lib/takeover-core.mjs`, which is pure and unit-tested; `takeover.ts` supplies its I/O: flush and commit go to `SyncManager`, the archive overview comes from the session context endpoint, state is persisted through `pi.appendEntry`, and the watermark is read back from sync.
+A binding, not a mechanism. The state machine lives in `lib/takeover-core.mjs`, which is pure and unit-tested; `takeover.ts` supplies its I/O: flush and commit go to `SyncManager`, the overview is read from the exact archive URI returned by that commit, state is persisted through `pi.appendEntry`, and the watermark is read back from sync.
 
 Context takeover makes OpenViking the authoritative long-term store for a pi session. Pi still keeps recent turns locally; committed history is represented to the model by OpenViking's archive overview through pi's `context` hook.
 
@@ -97,7 +97,7 @@ Context takeover makes OpenViking the authoritative long-term store for a pi ses
 | Field | Meaning |
 |---|---|
 | `coveredUserTurns` | Real user turns already covered by the archive overview |
-| `overview` | Latest archive overview returned by the session context endpoint |
+| `overview` | Working Memory read from the exact archive covered by the boundary |
 | `fingerprint` | Fingerprint of the last covered message, for branch-mismatch detection |
 | `pendingTokens` | Estimated synced token pressure since the last successful advance |
 | `lastSeenUserTurns` | User turns counted in the most recent `context` hook |
@@ -117,7 +117,7 @@ At startup the extension scans the branch from the end for the newest such entry
 2. When `pendingTokens` reaches `takeoverTokenThreshold`, and there are more user turns than `takeoverKeepRecentTurns`, takeover tries to advance.
 3. Advancing requires the flush barrier: every `addMessage` entry queued for *this* session must be delivered. Queued `commitSession` entries and entries belonging to other sessions do not hold it closed.
 4. The commit runs with `queueOnFailure: false`.
-5. The session context endpoint is polled until `latest_archive_overview` is available — `takeoverOverviewPollMax` attempts, `takeoverOverviewPollMs` apart. An empty overview is never injected; the boundary stays where it is and the token pressure resets so the next threshold crossing retries instead of re-committing every turn.
+5. The commit's `<archive_uri>/.done` marker is polled through the content API — `takeoverOverviewPollMax` attempts, `takeoverOverviewPollMs` apart — and its directory overview is fetched once after that completion barrier appears. This identity check matters because the session context endpoint may legitimately keep returning the previous completed archive while the new one is still being summarized, and `.overview.md` may be written before sibling Phase 2 work finishes. A pending or failed archive, missing archive URI, disabled Working Memory, or empty overview is never accepted; the boundary stays where it is and the token pressure resets so the next threshold crossing retries instead of re-committing every turn.
 6. On success the boundary advances to `lastSeenUserTurns - takeoverKeepRecentTurns`.
 7. The `context` hook then replaces every covered message with one synthetic user message beginning `[OpenViking Session Context]`, keeps the recent tail verbatim, and recall is injected into the newest kept user turn as usual.
 

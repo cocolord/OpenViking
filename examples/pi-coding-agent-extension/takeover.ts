@@ -16,13 +16,23 @@ export function createTakeoverManager(opts: {
     io: {
       flush: () => sync.flushForTakeover(),
       commit: (commitOpts?: { queueOnFailure?: boolean; keepRecentCount?: number }) => sync.commit(commitOpts),
-      fetchOverview: async (tokenBudget?: number) => {
-        if (!sync.sessionId) return "";
-        const ctx = await client.getSessionContext(
-          sync.sessionId,
-          tokenBudget ?? config.takeoverOverviewBudget * 4,
-        );
-        return ctx?.latest_archive_overview ?? "";
+      fetchOverview: async (archiveUri: string) => {
+        try {
+          const response = await client.readArchiveOverviewResponse(archiveUri);
+          if (!response.ok) {
+            const normalWait = response.error?.code === "ARCHIVE_NOT_READY";
+            if (!normalWait) {
+              opts.log?.(
+                `takeover: archive overview read failed (${response.status ?? 0} ${response.error?.code || "unknown"})`,
+              );
+            }
+            return normalWait ? "" : null;
+          }
+          return response.result ?? "";
+        } catch (error) {
+          opts.log?.(`takeover: archive overview read failed (${error instanceof Error ? error.message : String(error)})`);
+          return null;
+        }
       },
       persistEntry: (customType: string, data: any) => {
         if (typeof pi?.appendEntry === "function") {

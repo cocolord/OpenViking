@@ -8,10 +8,11 @@ import { createOvHttp } from "./shared/ov-http.mjs";
 //
 // Scope: session plumbing only — health, the OV session and its commit, plus the
 // raw `fetchJSON` the shared recall/sync/profile modules are built on. Search,
-// content reads, filesystem operations and resource ingest are the model's
-// business and reach the server over MCP (`lib/mcp-bridge.mjs`), so their REST
-// wrappers are gone rather than kept as a second, drifting path to the same
-// endpoints.
+// general content reads, filesystem operations and resource ingest are the
+// model's business and reach the server over MCP (`lib/mcp-bridge.mjs`). The
+// archive reads below are takeover plumbing: they pin the overview to the
+// exact archive returned by commit, so an older session overview cannot move
+// the local history boundary.
 
 export interface OVSessionMeta {
   session_id: string;
@@ -106,6 +107,72 @@ export class OVClient {
       undefined, { timeoutMs: 10000 },
     );
     return res.ok ? res.result : null;
+  }
+
+  /** Read the Working Memory only after this exact archive is fully complete. */
+  async readArchiveOverviewResponse(archiveUri: string): Promise<OVResponse<string>> {
+    const base = String(archiveUri ?? "").trim().replace(/\/+$/, "");
+    if (!base) {
+      return {
+        ok: false,
+        result: null,
+        status: 400,
+        error: { code: "INVALID_ARCHIVE_URI", message: "archive URI is required" },
+      };
+    }
+
+    const done = await this.fetchJSON<string>(
+      `/api/v1/content/read?uri=${encodeURIComponent(`${base}/.done`)}`,
+      undefined, { timeoutMs: 10000 },
+    );
+    if (!done.ok) {
+      if (done.status !== 404) return done;
+      return {
+        ...done,
+        error: {
+          code: "ARCHIVE_NOT_READY",
+          message: "archive completion marker is not available",
+          cause: done.error,
+        },
+      };
+    }
+    if (typeof done.result !== "string" || !done.result.trim()) {
+      return {
+        ...done,
+        ok: false,
+        result: null,
+        error: { code: "ARCHIVE_NOT_READY", message: "archive completion marker is empty" },
+      };
+    }
+    try {
+      const marker = JSON.parse(done.result);
+      if (marker?.working_memory_enabled === false) {
+        return {
+          ...done,
+          ok: false,
+          result: null,
+          error: { code: "ARCHIVE_OVERVIEW_DISABLED", message: "working memory is disabled for this archive" },
+        };
+      }
+    } catch {
+      // Legacy markers may not be JSON; their overview remains authoritative.
+    }
+
+    const overview = await this.fetchJSON<string>(
+      `/api/v1/content/overview?uri=${encodeURIComponent(base)}`,
+      undefined, { timeoutMs: 10000 },
+    );
+    if (!overview.ok) return overview;
+    const body = typeof overview.result === "string" ? overview.result.trim() : "";
+    if (!body || /\[Directory overview is not ready\]$/.test(body)) {
+      return {
+        ...overview,
+        ok: false,
+        result: null,
+        error: { code: "ARCHIVE_OVERVIEW_NOT_READY", message: "archive overview is not ready" },
+      };
+    }
+    return { ...overview, result: body };
   }
 
   /** POST /api/v1/sessions/{id}/commit — commit session for archiving + extraction */

@@ -269,13 +269,11 @@ export class TakeoverCore {
         return false;
       }
 
-      const committed = await this.io.commit({ queueOnFailure: false, keepRecentCount: this.config.takeoverKeepRecentTurns });
+      const { committed, overview } = await this.commitAndFetchOverview();
       if (!committed) {
         this.log("takeover: commit failed; retaining pending tokens");
         return false;
       }
-
-      const overview = await this.pollOverview();
       if (!overview) {
         // Commit accepted but overview not ready: don't advance the boundary —
         // never inject an empty overview. Reset the token pressure so the next
@@ -310,10 +308,7 @@ export class TakeoverCore {
       const flushed = await this.io.flush();
       if (!flushed) return undefined;
 
-      const committed = await this.io.commit({ queueOnFailure: false, keepRecentCount: this.config.takeoverKeepRecentTurns });
-      if (!committed) return undefined;
-
-      const overview = await this.pollOverview();
+      const { overview } = await this.commitAndFetchOverview();
       if (!overview) return undefined;
 
       this.overview = overview;
@@ -382,12 +377,31 @@ export class TakeoverCore {
     }
   }
 
-  async pollOverview() {
+  async commitAndFetchOverview() {
+    const committed = await this.io.commit({
+      queueOnFailure: false,
+      keepRecentCount: this.config.takeoverKeepRecentTurns,
+    });
+    if (!committed) return { committed: false, overview: "" };
+
+    const archiveUri = typeof committed?.archive_uri === "string" ? committed.archive_uri.trim() : "";
+    if (!archiveUri) {
+      this.log("takeover: commit returned no archive URI; boundary unchanged");
+      return { committed: true, overview: "" };
+    }
+    return { committed: true, overview: await this.pollOverview(archiveUri) };
+  }
+
+  async pollOverview(archiveUri) {
     for (let i = 0; i < this.config.takeoverOverviewPollMax; i++) {
-      const value = await this.io.fetchOverview(this.config.takeoverOverviewBudget * 4);
-      const overview = typeof value === "string"
-        ? value.trim()
-        : String(value?.latest_archive_overview || "").trim();
+      let value;
+      try {
+        value = await this.io.fetchOverview(archiveUri);
+      } catch {
+        value = null;
+      }
+      if (value === null) return "";
+      const overview = typeof value === "string" ? value.trim() : "";
       if (overview) return overview;
       if (i < this.config.takeoverOverviewPollMax - 1 && this.config.takeoverOverviewPollMs > 0) {
         await this.io.sleep(this.config.takeoverOverviewPollMs);

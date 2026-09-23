@@ -29,7 +29,7 @@ export interface TakeoverConfig {
 export interface TakeoverIo {
   flush?: () => Promise<boolean> | boolean;
   commit?: (opts?: { queueOnFailure?: boolean; keepRecentCount?: number }) => Promise<unknown> | unknown;
-  fetchOverview?: (tokenBudget?: number) => Promise<string | { latest_archive_overview?: string | null } | null> | string | { latest_archive_overview?: string | null } | null;
+  fetchOverview?: (archiveUri: string) => Promise<string | null> | string | null;
   persistEntry?: (customType: string, data: TakeoverPersistedState) => void;
   getWatermark?: () => number;
   sleep?: (ms: number) => Promise<void>;
@@ -76,5 +76,6 @@ export class TakeoverCore {
   truncatedOverview(): string;
   persistedState(): TakeoverPersistedState;
   persist(): void;
-  pollOverview(): Promise<string>;
+  commitAndFetchOverview(): Promise<{ committed: boolean; overview: string }>;
+  pollOverview(archiveUri: string): Promise<string>;
 }

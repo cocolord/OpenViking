@@ -432,7 +432,7 @@ JS 系 harness 的召回逻辑均由 `recall-core.mjs` 中的三级降级链处�
 
 - 接管面是 `context` 事件的 messages 改写，不接管 pi 的历史存储。触发是 token 压力（30000 + 保留 3 轮），而非 pi 的压缩事件。
 - 替换动作：先定位边界，再把边界前的全部消息替换成一条合成 user 消息 `[OpenViking Session Context]`。其中 overview 按 3000 token 截断；timestamp 取保留首条 -1，以稳定 provider payload 吃 prompt cache。
-- 数据源是 `GET /sessions/{id}/context` 的 `latest_archive_overview`（轮询 15×2s）；状态持久化在 pi 自己的 branch custom entry `ov-takeover`。
+- 数据源是 commit 返回的精确归档：先通过 `GET /content/read` 轮询其 `.done` 标记（15 次、间隔 2 秒），完成后只通过一次 `GET /content/overview` 读取 Working Memory；这样既不会用旧归档仍可见的 overview 或 Phase 2 中间结果误推进新边界，也不会反复读取 overview 不可用的终态归档。状态持久化在 pi 自己的 branch custom entry `ov-takeover`。
 - 失败姿态 = fail-open 回完整历史（指纹不匹配 / 历史短于边界 / overview 拿不到三重回退）。
 - 与 pi 原生压缩的关系：`session_before_compact` 成功时返回 `{compaction:{summary, firstKeptEntryId, …, details:{source:"openviking"}}}` 覆盖 pi 摘要；缺 `firstKeptEntryId` 时走 pi 默认压缩。
 

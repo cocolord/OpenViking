@@ -49,8 +49,8 @@ function makeCore(overrides = {}) {
         ? { task_id: "t-1", archive_uri: "viking://archive/1" }
         : overrides.commitResult;
     },
-    fetchOverview: async (budget) => {
-      calls.lastOverviewBudget = budget;
+    fetchOverview: async (archiveUri) => {
+      calls.lastOverviewArchiveUri = archiveUri;
       const values = overrides.overviews ?? ["overview ready"];
       const value = values[Math.min(calls.overviewCalls || 0, values.length - 1)];
       calls.overviewCalls = (calls.overviewCalls || 0) + 1;
@@ -238,7 +238,7 @@ test("onTurnSynced waits for threshold and enough user turns", async () => {
 test("commitAndAdvance advances boundary and persists after overview is ready", async () => {
   const { core, calls, setWatermark } = makeCore({
     watermark: 4,
-    overviews: ["", { latest_archive_overview: "fresh overview" }],
+    overviews: ["", "fresh overview"],
   });
   core.transformContext([user("one"), assistant("a"), user("two"), assistant("b"), user("three")]);
   setWatermark(5);
@@ -250,6 +250,7 @@ test("commitAndAdvance advances boundary and persists after overview is ready", 
   assert.equal(calls.flushed, 1);
   assert.equal(calls.committed, 1);
   assert.equal(calls.lastCommitOpts.queueOnFailure, false);
+  assert.equal(calls.lastOverviewArchiveUri, "viking://archive/1");
   assert.deepEqual(calls.slept, [1]);
   assert.equal(calls.persisted.length, 1);
   assert.equal(calls.persisted[0].type, TAKEOVER_ENTRY_TYPE);
@@ -279,6 +280,63 @@ test("commitAndAdvance keeps boundary unchanged when overview is not ready", asy
   assert.equal(core.state.pendingTokens, 10);
 });
 
+test("commitAndAdvance fails open when overview reads throw", async () => {
+  const { core, calls } = makeCore({
+    io: { fetchOverview: async () => { throw new Error("network error"); } },
+  });
+  core.coveredUserTurns = 1;
+  core.overview = "previous overview";
+  core.lastSeenUserTurns = 4;
+
+  assert.equal(await core.commitAndAdvance(), false);
+  assert.equal(core.state.coveredUserTurns, 1);
+  assert.equal(core.state.overview, "previous overview");
+  assert.equal(core.state.pendingTokens, 0);
+  assert.equal(calls.persisted.length, 0);
+  assert.deepEqual(calls.slept, []);
+});
+
+test("commitAndAdvance waits for the overview of the committed archive", async () => {
+  const committedArchive = "viking://archive/2";
+  const { core, calls } = makeCore({
+    commitResult: { task_id: "t-2", archive_uri: committedArchive },
+    io: {
+      fetchOverview: async (archiveUri) =>
+        archiveUri === committedArchive ? "" : "overview from archive 1",
+    },
+  });
+  core.coveredUserTurns = 1;
+  core.overview = "overview from archive 1";
+  core.lastSeenUserTurns = 4;
+
+  assert.equal(await core.commitAndAdvance(), false);
+  assert.equal(core.state.coveredUserTurns, 1);
+  assert.equal(core.state.overview, "overview from archive 1");
+  assert.equal(calls.persisted.length, 0);
+});
+
+test("commitAndAdvance fails open when a commit has no archive identity", async () => {
+  let overviewCalls = 0;
+  const { core, calls } = makeCore({
+    commitResult: { task_id: "legacy-task" },
+    io: {
+      fetchOverview: async () => {
+        overviewCalls++;
+        return "overview from an earlier archive";
+      },
+    },
+  });
+  core.coveredUserTurns = 1;
+  core.overview = "overview from an earlier archive";
+  core.lastSeenUserTurns = 4;
+
+  assert.equal(await core.commitAndAdvance(), false);
+  assert.equal(core.state.coveredUserTurns, 1);
+  assert.equal(core.state.overview, "overview from an earlier archive");
+  assert.equal(overviewCalls, 0);
+  assert.equal(calls.persisted.length, 0);
+});
+
 test("concurrent commitAndAdvance calls are serialized", async () => {
   let release;
   const gate = new Promise((resolve) => { release = resolve; });
@@ -301,7 +359,7 @@ test("concurrent commitAndAdvance calls are serialized", async () => {
 });
 
 test("handleBeforeCompact returns OV summary and resets boundary", async () => {
-  const { core } = makeCore({ overviews: ["compact overview"] });
+  const { core, calls } = makeCore({ overviews: ["compact overview"] });
   core.restore([
     { type: "custom", customType: TAKEOVER_ENTRY_TYPE, data: { coveredUserTurns: 2, overview: "old", pendingTokens: 50 } },
   ]);
@@ -310,6 +368,7 @@ test("handleBeforeCompact returns OV summary and resets boundary", async () => {
   assert.equal(result.compaction.tokensBefore, 1234);
   assert.equal(result.compaction.details.source, "openviking");
   assert.match(result.compaction.summary, /compact overview/);
+  assert.equal(calls.lastOverviewArchiveUri, "viking://archive/1");
   assert.equal(core.state.coveredUserTurns, 0);
   assert.equal(core.state.pendingTokens, 0);
 });
@@ -318,6 +377,59 @@ test("handleBeforeCompact fail-opens without firstKeptEntryId or overview", asyn
   const { core } = makeCore({ overviews: [""] });
   assert.equal(await core.handleBeforeCompact({ tokensBefore: 1 }), undefined);
   assert.equal(await core.handleBeforeCompact({ firstKeptEntryId: "x", tokensBefore: 1 }), undefined);
+});
+
+test("handleBeforeCompact waits for the overview of the committed archive", async () => {
+  const committedArchive = "viking://archive/2";
+  const { core, calls } = makeCore({
+    commitResult: { task_id: "t-2", archive_uri: committedArchive },
+    io: {
+      fetchOverview: async (archiveUri) =>
+        archiveUri === committedArchive ? "" : "overview from archive 1",
+    },
+  });
+  core.restore([
+    {
+      type: "custom",
+      customType: TAKEOVER_ENTRY_TYPE,
+      data: { coveredUserTurns: 2, overview: "overview from archive 1", pendingTokens: 50 },
+    },
+  ]);
+
+  const result = await core.handleBeforeCompact({ firstKeptEntryId: "entry-3", tokensBefore: 1234 });
+
+  assert.equal(result, undefined);
+  assert.equal(core.state.coveredUserTurns, 2);
+  assert.equal(core.state.overview, "overview from archive 1");
+  assert.equal(core.state.pendingTokens, 50);
+  assert.equal(calls.persisted.length, 0);
+});
+
+test("handleBeforeCompact fails open when a commit has no archive identity", async () => {
+  let overviewCalls = 0;
+  const { core, calls } = makeCore({
+    commitResult: { task_id: "legacy-task" },
+    io: {
+      fetchOverview: async () => {
+        overviewCalls++;
+        return "overview from an earlier archive";
+      },
+    },
+  });
+  core.restore([
+    {
+      type: "custom",
+      customType: TAKEOVER_ENTRY_TYPE,
+      data: { coveredUserTurns: 2, overview: "overview from an earlier archive", pendingTokens: 50 },
+    },
+  ]);
+
+  assert.equal(await core.handleBeforeCompact({ firstKeptEntryId: "entry-3", tokensBefore: 1234 }), undefined);
+  assert.equal(core.state.coveredUserTurns, 2);
+  assert.equal(core.state.overview, "overview from an earlier archive");
+  assert.equal(core.state.pendingTokens, 50);
+  assert.equal(overviewCalls, 0);
+  assert.equal(calls.persisted.length, 0);
 });
 
 test("disabled takeover is a passthrough", async () => {
