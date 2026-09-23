@@ -369,6 +369,9 @@ JSON 输出 - 错误：
 |------|------|------|
 | POST | `/api/v1/resources/temp_upload` | 上传后续导入所需的临时文件 |
 | POST | `/api/v1/resources` | 从 URL 或临时文件添加资源 |
+| PATCH | `/api/v1/resources/config` | 设置目录下新资源的 TTL 策略 |
+| GET | `/api/v1/resources/ttl` | 查询资源冻结的 TTL 元数据 |
+| PATCH | `/api/v1/resources/ttl` | 修改未过期资源的冻结到期时间 |
 | GET | `/api/v1/fs/ls` | 列出目录 |
 | GET | `/api/v1/fs/tree` | 获取目录树 |
 | GET | `/api/v1/fs/stat` | 获取资源状态 |

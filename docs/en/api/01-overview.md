@@ -374,6 +374,9 @@ This catalog follows the routes actually mounted by the server. Each group headi
 |--------|------|-------------|
 | POST | `/api/v1/resources/temp_upload` | Upload a temporary file for a later import |
 | POST | `/api/v1/resources` | Add a resource from a URL or temporary upload |
+| PATCH | `/api/v1/resources/config` | Set the TTL policy for new resources under a directory |
+| GET | `/api/v1/resources/ttl` | Read a resource's frozen TTL metadata |
+| PATCH | `/api/v1/resources/ttl` | Update a live resource's frozen expiry |
 | GET | `/api/v1/fs/ls` | List a directory |
 | GET | `/api/v1/fs/tree` | Get a directory tree |
 | GET | `/api/v1/fs/stat` | Get resource status |
