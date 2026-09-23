@@ -61,6 +61,7 @@ class SearchContextOptions(_ExtraOptions, total=False):
 class AddResourceOptions(_ExtraOptions, total=False):
     ttl_relative: int
     ttl_absolute: int
+    acl: Dict[str, Any]
     reason: str
     instruction: str
     create_parent: bool
@@ -76,7 +77,7 @@ class AddResourceOptions(_ExtraOptions, total=False):
     processing_mode: ProcessingMode
     add_type: str
     tags: List[str]
-    tag_mode: Literal["replace", "append"]
+    tag_mode: Literal["replace", "append", "clear"]
 
 
 class AddSkillOptions(_ExtraOptions, total=False):
@@ -89,10 +90,11 @@ class UpdateSkillOptions(AddSkillOptions, total=False):
 
 
 class WriteOptions(_ExtraOptions, total=False):
+    acl: Dict[str, Any]
     telemetry: Any
     processing_mode: ProcessingMode
     tags: List[str]
-    tag_mode: Literal["replace", "append"]
+    tag_mode: Literal["replace", "append", "clear"]
 
 
 class BatchWriteOptions(_ExtraOptions, total=False):
@@ -110,7 +112,7 @@ class SetTagsOptions(_ExtraOptions, total=False):
 
 class ReindexOptions(_ExtraOptions, total=False):
     tags: List[str]
-    tag_mode: Literal["replace", "append"]
+    tag_mode: Literal["replace", "append", "clear"]
 
 
 class CreateSessionOptions(_ExtraOptions, total=False):

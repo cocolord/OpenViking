@@ -11,30 +11,56 @@ import pytest
 from openviking.service.task_tracker import get_task_tracker
 from openviking.storage.resource_ttl import prepare_resource_ttl
 from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
+from openviking_cli.utils.config.open_viking_config import (
+    get_openviking_config,
+    set_openviking_config,
+)
 from tests.storage.test_transfer_merge_binding import root_ctx
 
 ROOT = "viking://user/default/resources"
 
 
+@pytest.fixture(autouse=True)
+def restore_cluster_config():
+    # Runtime PATCH publishes a process-wide singleton; keep later tests isolated.
+    original = get_openviking_config()
+    yield
+    set_openviking_config(original)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("parse_mode", ["default", "no_split"])
+@pytest.mark.parametrize("root", [ROOT, "viking://resources"])
 async def test_import_freezes_ttl_and_reimport_preserves_it(
-    client, service, upload_temp_dir, parse_mode
+    client, service, upload_temp_dir, parse_mode, root
 ):
     source = upload_temp_dir / "ttl-resource.md"
     source.write_text("# Guide\n\nAn imported resource with a frozen lifetime.\n")
-    await service.viking_fs.mkdir(ROOT, exist_ok=True, ctx=root_ctx())
+    await service.viking_fs.mkdir(root, exist_ok=True, ctx=root_ctx())
     request = {
         "temp_file_id": source.name,
-        **({"parent": ROOT} if parse_mode == "no_split" else {"to": ROOT + "/ttl-resource"}),
+        **({"parent": root} if parse_mode == "no_split" else {"to": root + "/ttl-resource"}),
         "ttl_relative": 7,
         "wait": True,
         "args": {"parse_mode": parse_mode},
     }
+    if root == "viking://resources":
+        await service.runtime_config_manager.patch_account("default", {"acl": {"enabled": True}})
+        request["acl"] = {
+            "acl_mode": "restricted",
+            "entries": [
+                {"principal": "user:default", "level": "manage"},
+                {"principal": "user:reader", "level": "read"},
+            ],
+        }
     response = await asyncio.wait_for(client.post("/api/v1/resources", json=request), 25)
     assert response.status_code == 200, response.text
     result = response.json()["result"]
     uri = result["root_uri"]
+    if "acl" in request:
+        acl = await service.viking_fs.get_acl(uri, ctx=root_ctx())
+        assert acl["acl_mode"] == "restricted"
+        assert acl["direct_entries"] == request["acl"]["entries"]
     response = await client.get("/api/v1/resources/ttl", params={"uri": uri})
     assert response.status_code == 200, response.text
     frozen = response.json()["result"]

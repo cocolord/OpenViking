@@ -765,7 +765,11 @@ class _GrepMixin:
                         ctx=ctx,
                     )
                 except PermissionDeniedError:
-                    if current_depth == 0:
+                    # A denial on the first page means this child subtree is
+                    # no longer visible and can be skipped. Once traversal has
+                    # consumed a page, swallowing the error would misreport a
+                    # partial result as complete.
+                    if current_depth == 0 or offset > 0:
                         raise
                     logger.debug(
                         f"Skipping inaccessible directory during grep: {normalized_current_uri}"

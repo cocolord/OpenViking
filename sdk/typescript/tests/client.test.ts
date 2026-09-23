@@ -452,6 +452,28 @@ describe("OpenVikingClient", () => {
     expect(JSON.parse(String(fetcher.mock.calls[3]![1]?.body))).toMatchObject({ tags: ["env=prod"], include_tags: true });
   });
 
+  it("sends clear tag mode without tags", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => ok({}));
+    const client = new OpenVikingClient({
+      baseUrl: "https://example.com",
+      fetch: fetcher,
+    });
+
+    await client.addResource("https://example.com/demo.md", {
+      tagMode: "clear",
+    });
+    await client.write("resources/demo.md", "updated", { tagMode: "clear" });
+    await client.reindex("resources/demo.md", { tagMode: "clear" });
+
+    for (const call of fetcher.mock.calls) {
+      const body = JSON.parse(String(call[1]?.body));
+      expect(body).not.toHaveProperty("tags");
+      expect(body.tag_mode).toBe("clear");
+    }
+  });
+
   it("supports batch write, byte download, and resource extra", async () => {
     const fetcher = vi
       .fn<typeof fetch>()
@@ -1214,6 +1236,34 @@ describe("OpenVikingClient", () => {
       message: "snapshot",
       branch: "main",
     });
+  });
+
+  it("supports optional observer format query parameters", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(ok({ is_healthy: true }))
+      .mockResolvedValueOnce(ok({ name: "queue" }))
+      .mockResolvedValueOnce(ok({ name: "models" }));
+    const client = new OpenVikingClient({
+      baseUrl: "https://example.com",
+      fetch: fetcher,
+    });
+
+    await expect(client.getStatus()).resolves.toEqual({ is_healthy: true });
+    await expect(client.queueStatus("json")).resolves.toEqual({ name: "queue" });
+    await expect(client.modelsStatus("table")).resolves.toEqual({
+      name: "models",
+    });
+
+    const first = new URL(String(fetcher.mock.calls[0]![0]));
+    const second = new URL(String(fetcher.mock.calls[1]![0]));
+    const third = new URL(String(fetcher.mock.calls[2]![0]));
+    expect(first.pathname).toBe("/api/v1/observer/system");
+    expect(first.searchParams.get("format")).toBeNull();
+    expect(second.pathname).toBe("/api/v1/observer/queue");
+    expect(second.searchParams.get("format")).toBe("json");
+    expect(third.pathname).toBe("/api/v1/observer/models");
+    expect(third.searchParams.get("format")).toBe("table");
   });
 
   it("supports snapshot restore, binary show, log, diff and ignore operations", async () => {

@@ -9,8 +9,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from openviking.pyagfs.exceptions import AGFSAlreadyExistsError
 from openviking.server.identity import RequestContext, Role
 from openviking.service.fs_service import FSService
+from openviking.storage.abstract_overview import body_for_preview
+from openviking.storage.errors import LockAcquisitionError
 from openviking_cli.exceptions import InvalidArgumentError
 from openviking_cli.session.user_id import UserIdentifier
 
@@ -27,7 +30,8 @@ class _FakeVikingFS:
     async def exists(self, uri, ctx=None):
         return self.parent_exists
 
-    async def rm(self, uri, recursive=False, ctx=None):
+    async def rm(self, uri, recursive=False, ctx=None, strict=False):
+        assert strict is False  # Interactive removal retains its existing contract.
         self.rm_calls.append({"uri": uri, "recursive": recursive, "ctx": ctx})
         if self.rm_error:
             raise self.rm_error
@@ -98,6 +102,76 @@ class _FakeMutationCoordinator:
         finally:
             if self.events is not None:
                 self.events.append(("mutation-exit", *uris))
+
+
+class _MkdirPathlockAGFS:
+    def __init__(self):
+        self._lock = asyncio.Lock()
+        self.held = False
+        self.acquire_count = 0
+
+    async def pathlock_acquire_exact(self, _path):
+        if self._lock.locked():
+            raise LockAcquisitionError("exact path is busy")
+        await self._lock.acquire()
+        self.held = True
+        self.acquire_count += 1
+        return {"lease_ref": f"mkdir-{self.acquire_count}"}
+
+    async def pathlock_release(self, _lease):
+        self.held = False
+        self._lock.release()
+
+
+class _MkdirVikingFS:
+    def __init__(self):
+        self.directory_exists = False
+        self.abstract_content = None
+        self._async_agfs = _MkdirPathlockAGFS()
+
+    def _uri_to_path(self, uri, ctx=None):
+        del ctx
+        return f"/local/default/{uri.removeprefix('viking://')}"
+
+    async def mkdir(self, _uri, ctx=None):
+        del ctx
+        if self.directory_exists:
+            raise AGFSAlreadyExistsError("directory already exists")
+        self.directory_exists = True
+
+    async def write_file(self, _uri, content, ctx=None, lease_ref=None):
+        del ctx
+        assert self._async_agfs.held
+        assert lease_ref is not None
+        self.abstract_content = content
+
+
+@pytest.mark.asyncio
+async def test_concurrent_default_mkdir_vectorizes_once(monkeypatch, request_context):
+    viking_fs = _MkdirVikingFS()
+    vectorized = []
+
+    async def record_vectorization(**kwargs):
+        assert viking_fs._async_agfs.held
+        vectorized.append(kwargs["abstract"])
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(
+        "openviking.service.fs_service.vectorize_directory_meta", record_vectorization
+    )
+    service = FSService(viking_fs=viking_fs)
+
+    results = await asyncio.gather(
+        service.mkdir("viking://resources/shared", ctx=request_context),
+        service.mkdir("viking://resources/shared", ctx=request_context),
+        return_exceptions=True,
+    )
+
+    assert sum(result is None for result in results) == 1
+    assert sum(isinstance(result, AGFSAlreadyExistsError) for result in results) == 1
+
+    assert body_for_preview(viking_fs.abstract_content) == "# shared"
+    assert vectorized == ["# shared"]
 
 
 @pytest.mark.asyncio

@@ -1185,10 +1185,14 @@ class AsyncHTTPClient:
         )
         return self._handle_response(response)
 
-    async def mkdir(self, uri: str, description: Optional[str] = None) -> None:
+    async def mkdir(
+        self, uri: str, description: Optional[str] = None, *, acl: Optional[Dict[str, Any]] = None
+    ) -> None:
         payload = {"uri": VikingURI.normalize(uri)}
         if description is not None:
             payload["description"] = description
+        if acl is not None:
+            payload["acl"] = acl
         response = await self._request("POST", "/api/v1/fs/mkdir", json=payload)
         self._handle_response(response)
 
@@ -1821,20 +1825,32 @@ class AsyncHTTPClient:
         )
         return self._handle_response(response)
 
-    async def _get_queue_status(self) -> Dict[str, Any]:
-        response = await self._request("GET", "/api/v1/observer/queue")
+    async def _get_queue_status(
+        self, format: Optional[Literal["table", "json"]] = None
+    ) -> Dict[str, Any]:
+        params = {"format": format} if format is not None else None
+        response = await self._request("GET", "/api/v1/observer/queue", params=params)
         return self._handle_response(response)
 
-    async def _get_vikingdb_status(self) -> Dict[str, Any]:
-        response = await self._request("GET", "/api/v1/observer/vikingdb")
+    async def _get_vikingdb_status(
+        self, format: Optional[Literal["table", "json"]] = None
+    ) -> Dict[str, Any]:
+        params = {"format": format} if format is not None else None
+        response = await self._request("GET", "/api/v1/observer/vikingdb", params=params)
         return self._handle_response(response)
 
-    async def _get_models_status(self) -> Dict[str, Any]:
-        response = await self._request("GET", "/api/v1/observer/models")
+    async def _get_models_status(
+        self, format: Optional[Literal["table", "json"]] = None
+    ) -> Dict[str, Any]:
+        params = {"format": format} if format is not None else None
+        response = await self._request("GET", "/api/v1/observer/models", params=params)
         return self._handle_response(response)
 
-    async def _get_system_status(self) -> Dict[str, Any]:
-        response = await self._request("GET", "/api/v1/observer/system")
+    async def _get_system_status(
+        self, format: Optional[Literal["table", "json"]] = None
+    ) -> Dict[str, Any]:
+        params = {"format": format} if format is not None else None
+        response = await self._request("GET", "/api/v1/observer/system", params=params)
         return self._handle_response(response)
 
     async def admin_create_account(
@@ -2086,8 +2102,25 @@ class AsyncHTTPClient:
         )
         return self._handle_response(response)
 
-    def get_status(self) -> Dict[str, Any]:
-        return run_async(self._get_system_status())
+    def queue_status(
+        self, format: Optional[Literal["table", "json"]] = None
+    ) -> Dict[str, Any]:
+        return run_async(self._get_queue_status(format=format))
+
+    def vikingdb_status(
+        self, format: Optional[Literal["table", "json"]] = None
+    ) -> Dict[str, Any]:
+        return run_async(self._get_vikingdb_status(format=format))
+
+    def models_status(
+        self, format: Optional[Literal["table", "json"]] = None
+    ) -> Dict[str, Any]:
+        return run_async(self._get_models_status(format=format))
+
+    def get_status(
+        self, format: Optional[Literal["table", "json"]] = None
+    ) -> Dict[str, Any]:
+        return run_async(self._get_system_status(format=format))
 
     def is_healthy(self) -> bool:
         return self.observer.is_healthy()
@@ -2532,8 +2565,10 @@ class SyncHTTPClient:
     def attrs(self, uri: str) -> Dict[str, Any]:
         return run_async(self._async_client.attrs(uri))
 
-    def mkdir(self, uri: str, description: Optional[str] = None) -> None:
-        run_async(self._async_client.mkdir(uri, description=description))
+    def mkdir(
+        self, uri: str, description: Optional[str] = None, *, acl: Optional[Dict[str, Any]] = None
+    ) -> None:
+        run_async(self._async_client.mkdir(uri, description=description, acl=acl))
 
     def rm(
         self,
@@ -3024,8 +3059,25 @@ class SyncHTTPClient:
     ) -> Dict[str, Any]:
         return run_async(self._async_client.preflight_openviking_asset(name, repo_url, options))
 
-    def get_status(self) -> Dict[str, Any]:
-        return self._async_client.get_status()
+    def queue_status(
+        self, format: Optional[Literal["table", "json"]] = None
+    ) -> Dict[str, Any]:
+        return self._async_client.queue_status(format=format)
+
+    def vikingdb_status(
+        self, format: Optional[Literal["table", "json"]] = None
+    ) -> Dict[str, Any]:
+        return self._async_client.vikingdb_status(format=format)
+
+    def models_status(
+        self, format: Optional[Literal["table", "json"]] = None
+    ) -> Dict[str, Any]:
+        return self._async_client.models_status(format=format)
+
+    def get_status(
+        self, format: Optional[Literal["table", "json"]] = None
+    ) -> Dict[str, Any]:
+        return self._async_client.get_status(format=format)
 
     def is_healthy(self) -> bool:
         return self._async_client.is_healthy()

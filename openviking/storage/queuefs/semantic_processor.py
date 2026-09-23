@@ -49,7 +49,6 @@ from openviking.storage.abstract_overview import (
     plan_abstract_overview_refresh,
     write_abstract_overview,
 )
-from openviking.storage.acl import CreatorAclGrant
 from openviking.storage.errors import LockAcquisitionError
 from openviking.storage.index_action import FieldPatch
 from openviking.storage.queuefs.named_queue import DequeueHandlerBase
@@ -637,7 +636,6 @@ class SemanticProcessor(DequeueHandlerBase):
                                 ctx=current_ctx,
                                 incremental_update=is_incremental,
                                 target_uri=target_uri,
-                                target_preexisting=msg.target_preexisting,
                                 recursive=msg.recursive,
                                 lock=semantic_lock.lock,
                                 is_code_repo=msg.is_code_repo,
@@ -1905,7 +1903,6 @@ class SemanticProcessor(DequeueHandlerBase):
         overview: str,
         ctx: Optional[RequestContext] = None,
         ingest_options: IngestOptions | None = None,
-        creator_acl_grant: CreatorAclGrant | None = None,
         skill_source_path: str = "",
         scalar_overrides: Optional[Dict[int, Dict[str, Any]]] = None,
         actions: Optional[Dict[int, str]] = None,
@@ -1936,7 +1933,6 @@ class SemanticProcessor(DequeueHandlerBase):
             context_type=context_type,
             ctx=active_ctx,
             ingest_options=ingest_options,
-            creator_acl_grant=creator_acl_grant,
             content_is_body=context_type == "skill",
             **({"meta": skill_meta} if skill_meta is not None else {}),
             scalar_overrides=scalar_overrides,
@@ -2004,7 +2000,6 @@ class SemanticProcessor(DequeueHandlerBase):
         use_summary: bool = False,
         preserve_existing_created_at: bool = False,
         ingest_options: IngestOptions | None = None,
-        creator_acl_grant: CreatorAclGrant | None = None,
         file_md5: Optional[str] = None,
         file_content: Optional[bytes] = None,
         scalar_override: Optional[Dict[str, Any]] = None,
@@ -2024,7 +2019,6 @@ class SemanticProcessor(DequeueHandlerBase):
             use_summary=use_summary,
             preserve_existing_created_at=preserve_existing_created_at,
             ingest_options=ingest_options,
-            creator_acl_grant=creator_acl_grant,
             file_md5=file_md5,
             file_content=file_content,
             scalar_override=scalar_override,
