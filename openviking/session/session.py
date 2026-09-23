@@ -20,8 +20,8 @@ from openviking.core.peer_id import normalize_peer_id, safe_peer_id
 from openviking.core.ttl import hidden_by_ttl
 from openviking.message import Message, Part
 from openviking.message.part import ContextPart, TextPart, ToolPart
-from openviking.pyagfs.exceptions import AGFSClientError, AGFSHTTPError, AGFSNotFoundError
 from openviking.server.config import ToolOutputExternalizationConfig
+from openviking.server.error_mapping import is_storage_not_found as _is_storage_not_found
 from openviking.server.identity import RequestContext, Role
 from openviking.session.auto_commit_policy import AutoCommitPolicy
 from openviking.session.extraction_batch import (
@@ -152,17 +152,6 @@ def _publish_telemetry_summary_best_effort(snapshot: Any) -> None:
 
 class _ArchiveMessagesCorruptError(ValueError):
     """Raised when an archive messages file cannot be deserialized."""
-
-
-def _is_storage_not_found(exc: BaseException) -> bool:
-    if isinstance(exc, AGFSClientError):
-        return isinstance(exc, AGFSNotFoundError) or (
-            isinstance(exc, AGFSHTTPError) and exc.status_code == 404
-        )
-    if isinstance(exc, (FileNotFoundError, NotFoundError)):
-        nested = exc.__cause__ or exc.__context__
-        return nested is None or _is_storage_not_found(nested)
-    return False
 
 
 def _wm_debug(msg: str) -> None:

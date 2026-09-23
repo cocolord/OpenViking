@@ -56,8 +56,9 @@ class _DummyAgfs:
     ],
 )
 @pytest.mark.parametrize("owner", ["user/default", "user/default/peers/assistant"])
+@pytest.mark.parametrize("basename", ["event", ".note"])
 async def test_public_event_write_registers_and_hides_every_supported_file(
-    monkeypatch, entrypoint, owner, extension
+    monkeypatch, entrypoint, owner, basename, extension
 ):
     class Clock(datetime):
         current = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -70,7 +71,7 @@ async def test_public_event_write_registers_and_hides_every_supported_file(
     monkeypatch.setattr(ttl, "datetime", Clock)
     monkeypatch.setattr(ttl, "get_openviking_config", lambda: SimpleNamespace(ttl=config))
     root = f"viking://{owner}/memories/events/2026"
-    uri = root + "/event" + extension
+    uri = root + "/" + basename + extension
     ctx = _default_ctx()
     agfs = _MemoryAGFS()
     fs = VikingFS(agfs=_DummyAgfs())

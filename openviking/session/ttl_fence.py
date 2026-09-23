@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 from openviking.core.ttl import hidden_by_ttl
-from openviking.server.error_mapping import is_not_found_error
+from openviking.server.error_mapping import is_storage_not_found
 from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
 
 
@@ -38,7 +38,7 @@ async def reconcile_session_ttl(
     try:
         metadata = json.loads(await viking_fs.read_file(meta_uri, ctx=ctx, include_expired=True))
     except Exception as exc:
-        if is_not_found_error(exc):
+        if is_storage_not_found(exc):
             return None
         raise
     if not isinstance(metadata, dict):
@@ -62,7 +62,7 @@ async def reconcile_session_ttl(
                     await viking_fs.read_file(f"{uri}/{name}", ctx=ctx, include_expired=True)
                 )
             except Exception as exc:
-                if is_not_found_error(exc):
+                if is_storage_not_found(exc):
                     continue
                 raise
             if not isinstance(marker, dict):
@@ -90,7 +90,7 @@ async def reconcile_session_ttl(
                     path, offset=offset, limit=128, sort_by="name"
                 )
             except Exception as exc:
-                if is_not_found_error(exc):
+                if is_storage_not_found(exc):
                     break
                 raise
             for entry in entries:
@@ -144,7 +144,7 @@ class SessionGenerationFence:
                 include_expired=True,
             )
         except Exception as exc:
-            if is_not_found_error(exc):
+            if is_storage_not_found(exc):
                 return False
             # An unavailable source is not proof that this generation is stale.
             # Let the normal failure/retry path handle storage errors.

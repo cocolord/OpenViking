@@ -952,12 +952,12 @@ async def test_embedding_handler_materialize_content_keeps_inline(monkeypatch):
 
 
 def _ttl_event_embedding_message(
-    generation: str = "generation-1", *, extension: str = ".md"
+    generation: str = "generation-1", *, extension: str = ".md", basename: str = "event"
 ) -> EmbeddingMsg:
     return EmbeddingMsg(
         "embedding text",
         {
-            "uri": "viking://user/default/memories/events/event" + extension,
+            "uri": "viking://user/default/memories/events/" + basename + extension,
             "ttl_generation": generation,
         },
     )
@@ -1025,7 +1025,8 @@ async def test_ttl_event_embedding_skips_when_source_is_missing(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("extension", [".md", ".MD", ".txt", ""])
-async def test_ttl_event_embedding_skips_when_source_is_expired(monkeypatch, extension):
+@pytest.mark.parametrize("basename", ["event", ".note"])
+async def test_ttl_event_embedding_skips_when_source_is_expired(monkeypatch, extension, basename):
     fs = _install_ttl_event_fs(
         monkeypatch,
         content=_ttl_memory_content(
@@ -1037,7 +1038,7 @@ async def test_ttl_event_embedding_skips_when_source_is_expired(monkeypatch, ext
     ctx = RequestContext(user=UserIdentifier("default", "default"), role=Role.ROOT)
 
     result = await handler._write_ttl_vector_if_current(
-        _ttl_event_embedding_message(extension=extension), ctx, write_vector
+        _ttl_event_embedding_message(extension=extension, basename=basename), ctx, write_vector
     )
 
     assert result is None
@@ -1090,11 +1091,12 @@ async def test_ttl_event_embedding_writes_current_generation_under_lock(monkeypa
 @pytest.mark.asyncio
 @pytest.mark.parametrize("extension", [".md", ".MD", ".txt", ""])
 @pytest.mark.parametrize("include_level", [True, False])
+@pytest.mark.parametrize("basename", ["event", ".note"])
 async def test_ttl_event_merge_reads_and_upserts_under_source_lease(
-    monkeypatch, extension, include_level
+    monkeypatch, extension, include_level, basename
 ):
     order = []
-    uri = "viking://user/default/memories/events/event" + extension
+    uri = "viking://user/default/memories/events/" + basename + extension
     fs = _install_ttl_event_fs(
         monkeypatch,
         content=_ttl_memory_content(

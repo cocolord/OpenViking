@@ -11,11 +11,21 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from openviking.pyagfs.exceptions import (
+    AGFSConnectionError,
+    AGFSHTTPError,
+    AGFSNetworkError,
+    AGFSNotFoundError,
+    AGFSTimeoutError,
+)
+from openviking.server.identity import RequestContext, Role
 from openviking.session.ttl_fence import (
     StaleSessionGenerationError,
     session_generation_fence,
 )
+from openviking.storage.viking_fs import VikingFS
 from openviking_cli.exceptions import NotFoundError
+from openviking_cli.session.user_id import UserIdentifier
 
 
 def _fs(metadata):
@@ -60,6 +70,8 @@ async def test_disabled_fence_preserves_legacy_lock_behavior():
         ({"ttl_generation": "g1", "expires_at": "2000-01-01T00:00:00.000Z"}, False),
         (FileNotFoundError("session metadata"), False),
         (NotFoundError("session metadata", "file"), False),
+        (AGFSNotFoundError("session metadata"), False),
+        (AGFSHTTPError("session metadata", status_code=404), False),
     ],
 )
 async def test_is_current_requires_same_live_generation(metadata, expected):
@@ -72,7 +84,19 @@ async def test_is_current_requires_same_live_generation(metadata, expected):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("error", [TimeoutError("AGFS timed out"), ConnectionError("AGFS offline")])
+@pytest.mark.parametrize(
+    "error",
+    [
+        TimeoutError("AGFS timed out"),
+        ConnectionError("AGFS offline"),
+        ConnectionError("DNS name not found"),
+        AGFSNetworkError("endpoint not found"),
+        AGFSTimeoutError("backend not found before timeout"),
+        AGFSConnectionError("host does not exist"),
+        AGFSHTTPError("backend not found", status_code=503),
+        RuntimeError("backend not found"),
+    ],
+)
 async def test_storage_failure_is_not_a_stale_generation_and_releases_lock(error):
     fs = _fs(error)
     fence = session_generation_fence(
@@ -83,6 +107,49 @@ async def test_storage_failure_is_not_a_stale_generation_and_releases_lock(error
         async with fence.lock():
             pytest.fail("unverified work must not enter the write section")
     fs._async_agfs.pathlock_release.assert_awaited_once_with("tree-lease")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["stat", "read"])
+async def test_fence_rejects_a_vikingfs_not_found_wrapper_around_network_failure(operation):
+    fs = VikingFS(agfs=SimpleNamespace())
+    ctx = RequestContext(user=UserIdentifier("acct", "u1"), role=Role.ROOT)
+    error = AGFSNetworkError("endpoint not found")
+    fs._async_agfs.stat = AsyncMock(return_value={"isDir": False})
+    fs._async_agfs.read = AsyncMock()
+    getattr(fs._async_agfs, operation).side_effect = error
+    fence = session_generation_fence(
+        fs, ctx, session_uri="viking://user/u1/sessions/s1", generation="g1"
+    )
+
+    # The legacy VikingFS read API translates the message into NotFoundError.
+    # The generation fence must inspect its cause rather than skip extraction.
+    with pytest.raises(NotFoundError) as raised:
+        await fence.require_current()
+    assert raised.value.__cause__ is error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["stat", "read"])
+@pytest.mark.parametrize(
+    "error",
+    [
+        FileNotFoundError("metadata missing"),
+        AGFSNotFoundError("metadata missing"),
+        AGFSHTTPError("metadata missing", status_code=404),
+    ],
+)
+async def test_fence_accepts_a_vikingfs_wrapper_for_missing_metadata(operation, error):
+    fs = VikingFS(agfs=SimpleNamespace())
+    ctx = RequestContext(user=UserIdentifier("acct", "u1"), role=Role.ROOT)
+    fs._async_agfs.stat = AsyncMock(return_value={"isDir": False})
+    fs._async_agfs.read = AsyncMock()
+    getattr(fs._async_agfs, operation).side_effect = error
+    fence = session_generation_fence(
+        fs, ctx, session_uri="viking://user/u1/sessions/s1", generation="g1"
+    )
+
+    assert await fence.is_current() is False
 
 
 @pytest.mark.asyncio

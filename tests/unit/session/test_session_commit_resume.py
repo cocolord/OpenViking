@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from openviking.message import Message, TextPart, ToolPart
+from openviking.pyagfs.exceptions import AGFSNetworkError, AGFSTimeoutError
 from openviking.service.task_tracker import TaskStatus, TaskTracker, set_task_tracker
 from openviking.session.session import Session
 from openviking.storage.queuefs.session_commit_msg import SessionCommitMsg
@@ -335,7 +336,18 @@ async def test_resume_queued_commit_fails_terminally_for_unreadable_archive(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("persistent", [False, True])
-async def test_phase2_metadata_outage_never_completes_as_stale(monkeypatch, persistent):
+@pytest.mark.parametrize(
+    "error_type,message",
+    [
+        (TimeoutError, "session metadata unavailable"),
+        (AGFSNetworkError, "endpoint not found"),
+        (AGFSTimeoutError, "backend not found before timeout"),
+        (ConnectionError, "DNS name not found"),
+    ],
+)
+async def test_phase2_metadata_outage_never_completes_as_stale(
+    monkeypatch, persistent, error_type, message
+):
     uri = "viking://user/default/sessions/session-1"
     archive = uri + "/history/archive_001"
     storage = _MemoryVikingFS(
@@ -352,7 +364,7 @@ async def test_phase2_metadata_outage_never_completes_as_stale(monkeypatch, pers
         nonlocal attempts
         attempts += 1
         if persistent or attempts == 1:
-            raise TimeoutError("session metadata unavailable")
+            raise error_type(message)
         return await read(uri, **kwargs)
 
     storage.read_file = unreliable_read
@@ -380,13 +392,13 @@ async def test_phase2_metadata_outage_never_completes_as_stale(monkeypatch, pers
     if persistent:
         # Failure-marker fencing is also unavailable: raise so QueueFS cannot
         # acknowledge this delivery and restart recovery can retry it.
-        with pytest.raises(TimeoutError, match="session metadata unavailable"):
+        with pytest.raises(error_type, match=message):
             await extraction
         assert archive + "/.failed.json" not in storage.files
     else:
         await extraction
         failure = json.loads(storage.files[archive + "/.failed.json"])
-        assert failure["error"] == "session metadata unavailable"
+        assert failure["error"] == message
     task = await tracker.get(
         task.task_id, account_id=session.ctx.account_id, user_id=session.ctx.user.user_id
     )

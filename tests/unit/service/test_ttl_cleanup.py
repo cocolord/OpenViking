@@ -153,6 +153,18 @@ def tracker():
             )
             for extension in (".MD", ".txt", ".TXT")
         ],
+        *[
+            (
+                _record(
+                    OBJECT_TYPE_EVENT,
+                    object_uri=EVENT_URI.rsplit("/", 1)[0] + "/" + filename,
+                ),
+                _event_body(),
+                False,
+                "pathlock_acquire_batch",
+            )
+            for filename in (".note.md", ".note.txt")
+        ],
     ],
 )
 async def test_expired_object_is_deleted_strictly_and_registry_removed(

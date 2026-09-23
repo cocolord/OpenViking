@@ -25,6 +25,7 @@ from typing import Any, Mapping, Optional
 from uuid import uuid4
 
 from openviking.core.namespace import uri_parts
+from openviking.storage.internal_names import WEBDAV_RESERVED_FILENAMES, is_storage_internal_name
 from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
 from openviking_cli.utils.config import TTLConfig, TTLScope, get_openviking_config
 
@@ -72,7 +73,8 @@ def ttl_object_for_uri(uri: str, *, is_dir: bool = False) -> Optional[tuple[str,
     A session's root metadata controls its complete subtree. Event files may
     have any extension (or none), just like public content writes. Callers
     walking the filesystem must identify directories with ``is_dir``; event
-    containers and generated dot-files are not independently expiring objects.
+    containers and reserved system files are not independently expiring objects.
+    User-authored dot-files follow the same TTL rules as other event files.
     """
     scope = ttl_scope_for_uri(uri)
     if scope is None:
@@ -86,7 +88,12 @@ def ttl_object_for_uri(uri: str, *, is_dir: bool = False) -> Optional[tuple[str,
             return None
         return OBJECT_TYPE_SESSION, "viking://" + "/".join(parts[:4])
     event_root_depth = 6 if scope == "peer_events" else 4
-    if is_dir or len(parts) <= event_root_depth or parts[-1].startswith("."):
+    if (
+        is_dir
+        or len(parts) <= event_root_depth
+        or parts[-1] in WEBDAV_RESERVED_FILENAMES
+        or is_storage_internal_name(parts[-1])
+    ):
         return None
     return OBJECT_TYPE_EVENT, "viking://" + "/".join(parts)
 
