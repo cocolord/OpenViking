@@ -74,8 +74,7 @@ class DummyStorage:
         level=None,
         limit: int = 10,
         offset: int = 0,
-        events_time_decay_weight: float = 0.0,
-        events_time_decay_protection: str = "0",
+        events_time_decay_protection: str | None = None,
     ):
         self.search_calls.append(
             {
@@ -88,7 +87,6 @@ class DummyStorage:
                 "level": level,
                 "limit": limit,
                 "offset": offset,
-                "events_time_decay_weight": events_time_decay_weight,
                 "events_time_decay_protection": events_time_decay_protection,
             }
         )
@@ -230,7 +228,7 @@ class ThinkingEventStorage(DummyStorage):
         if parent_uri != "viking://user/user1/memories/events":
             return []
         extra = {"_origin_score": 0.2}
-        if self.time_score is not None and kwargs.get("events_time_decay_weight") == 0.25:
+        if self.time_score is not None and kwargs.get("events_time_decay_protection") is not None:
             extra["_time_score"] = self.time_score
         return [
             _result(
@@ -773,8 +771,8 @@ async def test_quick_mode_returns_time_decay_scores():
         async def search_in_tenant(self, *args, **kwargs):
             self.search_calls.append(dict(kwargs))
             result = dict(self.results[0])
-            if kwargs.get("events_time_decay_weight") == 0.25:
-                result.update(_score=0.75, _origin_score=0.4, _time_score=1.0)
+            if kwargs.get("events_time_decay_protection") == "1d":
+                result.update(_score=0.4, _origin_score=0.4, _time_score=1.0)
             return [result]
 
     storage = DecayAwareQuickStorage(
@@ -793,11 +791,10 @@ async def test_quick_mode_returns_time_decay_scores():
         ctx=_ctx(),
         limit=1,
         mode=RetrieverMode.QUICK,
-        events_time_decay_weight=0.25,
         events_time_decay_protection="1d",
     )
 
-    assert result.matched_contexts[0].score == pytest.approx(0.75)
+    assert result.matched_contexts[0].score == pytest.approx(0.4)
     assert result.matched_contexts[0].origin_score == pytest.approx(0.4)
     assert result.matched_contexts[0].time_score == pytest.approx(1.0)
 
@@ -809,15 +806,15 @@ async def test_thinking_global_leaf_prefetch_applies_time_decay():
             self.search_calls.append(dict(kwargs))
             if kwargs.get("level") == [0, 1]:
                 return []
-            if kwargs.get("events_time_decay_weight") != 0.8:
+            if kwargs.get("events_time_decay_protection") != "0":
                 return []
             return [
                 _result(
                     "viking://user/user1/memories/events/old",
-                    0.18,
+                    0.45,
                     context_type="memory",
                     _origin_score=0.9,
-                    _time_score=0.0,
+                    _time_score=0.5,
                 )
             ]
 
@@ -839,19 +836,19 @@ async def test_thinking_global_leaf_prefetch_applies_time_decay():
         ctx=_ctx(),
         limit=1,
         mode=RetrieverMode.THINKING,
-        events_time_decay_weight=0.8,
+        events_time_decay_protection="0",
     )
 
-    assert result.matched_contexts[0].score == pytest.approx(0.12)
+    assert result.matched_contexts[0].score == pytest.approx(0.3)
     assert result.matched_contexts[0].origin_score == pytest.approx(0.6)
-    assert result.matched_contexts[0].time_score == pytest.approx(0.0)
+    assert result.matched_contexts[0].time_score == pytest.approx(0.5)
 
     leaf_call = next(call for call in storage.search_calls if call.get("level") == [2])
     assert leaf_call["for_rerank"] is True
     origins = [
         call["request_now"]
         for call in storage.search_calls + storage.child_search_calls
-        if call.get("events_time_decay_weight")
+        if call.get("events_time_decay_protection") is not None
     ]
     assert origins and origins[0] is not None
     assert all(origin == origins[0] for origin in origins)
@@ -876,14 +873,11 @@ async def test_thinking_time_decay_fuses_after_rerank_and_propagation():
         ctx=_ctx(),
         limit=1,
         mode=RetrieverMode.THINKING,
-        events_time_decay_weight=0.25,
         events_time_decay_protection="2d",
     )
 
     propagated_rerank_score = 0.25 * 0.8 + 0.75 * 0.4
-    expected = fuse_time_decay_scores(
-        origin_score=propagated_rerank_score, addition_score=0.9, weight=0.25
-    )
+    expected = fuse_time_decay_scores(origin_score=propagated_rerank_score, addition_score=0.9)
     assert result.matched_contexts[0].score == pytest.approx(expected)
     assert result.matched_contexts[0].origin_score == pytest.approx(propagated_rerank_score)
     assert result.matched_contexts[0].time_score == pytest.approx(0.9)
@@ -903,7 +897,7 @@ async def test_thinking_missing_event_time_keeps_legacy_hotness():
         ctx=_ctx(),
         limit=1,
         mode=RetrieverMode.THINKING,
-        events_time_decay_weight=0.25,
+        events_time_decay_protection="0",
     )
 
     assert result.matched_contexts[0].score == pytest.approx(0.2)

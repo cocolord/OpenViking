@@ -95,25 +95,22 @@ async def test_search_omits_unset_optional_fields():
         "filter",
         "context_type",
         "tags",
-        "events_time_decay_weight",
         "events_time_decay_protection",
     ):
         assert dropped not in payload
 
 
-async def test_search_keeps_explicit_time_decay_fields():
+async def test_search_keeps_explicit_time_decay_protection():
     client, fake = _client_with_fake()
 
     await client.search(
         "hello",
         options={
-            "events_time_decay_weight": 0.25,
             "events_time_decay_protection": "2d",
         },
     )
 
     payload = fake.calls[-1]["json"]
-    assert payload["events_time_decay_weight"] == 0.25
     assert payload["events_time_decay_protection"] == "2d"
 
 

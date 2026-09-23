@@ -263,7 +263,6 @@ type ReindexOptions struct {
 
 // FindOptions controls Find.
 type FindOptions struct {
-	EventsTimeDecayWeight     *float64
 	EventsTimeDecayProtection string
 	TargetURI                 any
 	Image                     string
@@ -285,7 +284,6 @@ type FindOptions struct {
 
 // SearchOptions controls Search.
 type SearchOptions struct {
-	EventsTimeDecayWeight     *float64
 	EventsTimeDecayProtection string
 	TargetURI                 any
 	Image                     string

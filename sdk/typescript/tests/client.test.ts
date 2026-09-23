@@ -48,7 +48,6 @@ describe("OpenVikingClient", () => {
     await client.find("hello", {
       targetUri: "viking://resources",
       limit: 5,
-      eventsTimeDecayWeight: 0.25,
       eventsTimeDecayProtection: "2d",
     });
     const [url, init] = fetcher.mock.calls[0]!;
@@ -60,7 +59,6 @@ describe("OpenVikingClient", () => {
       query: "hello",
       target_uri: "viking://resources",
       limit: 5,
-      events_time_decay_weight: 0.25,
       events_time_decay_protection: "2d",
     });
   });

@@ -27,7 +27,6 @@ func (c *Client) Find(ctx context.Context, queryText string, opts *FindOptions) 
 	}
 	payload["limit"] = limit
 	setString(payload, "image_url", imageURL)
-	setAny(payload, "events_time_decay_weight", opts.EventsTimeDecayWeight)
 	setString(payload, "events_time_decay_protection", opts.EventsTimeDecayProtection)
 	setAny(payload, "score_threshold", opts.ScoreThreshold)
 	setAny(payload, "filter", opts.Filter)
@@ -75,7 +74,6 @@ func (c *Client) Search(ctx context.Context, queryText string, opts *SearchOptio
 	payload["limit"] = limit
 	setString(payload, "image_url", imageURL)
 	setString(payload, "session_id", opts.SessionID)
-	setAny(payload, "events_time_decay_weight", opts.EventsTimeDecayWeight)
 	setString(payload, "events_time_decay_protection", opts.EventsTimeDecayProtection)
 	setAny(payload, "score_threshold", opts.ScoreThreshold)
 	setAny(payload, "filter", opts.Filter)

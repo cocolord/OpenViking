@@ -444,8 +444,7 @@ class VikingDBManagerProxy:
         level: Optional[List[int]] = None,
         limit: int = 10,
         offset: int = 0,
-        events_time_decay_weight: float = 0.0,
-        events_time_decay_protection: str = "0",
+        events_time_decay_protection: Optional[str] = None,
         request_now: Optional[datetime] = None,
         for_rerank: bool = False,
     ) -> List[Dict[str, Any]]:
@@ -459,9 +458,8 @@ class VikingDBManagerProxy:
             "limit": limit,
             "offset": offset,
         }
-        if events_time_decay_weight != 0.0:
+        if events_time_decay_protection is not None:
             kwargs.update(
-                events_time_decay_weight=events_time_decay_weight,
                 events_time_decay_protection=events_time_decay_protection,
                 request_now=request_now,
                 for_rerank=for_rerank,
@@ -496,8 +494,7 @@ class VikingDBManagerProxy:
         target_directories: Optional[List[str]] = None,
         extra_filter: Optional[FilterExpr | Dict[str, Any]] = None,
         limit: int = 10,
-        events_time_decay_weight: float = 0.0,
-        events_time_decay_protection: str = "0",
+        events_time_decay_protection: Optional[str] = None,
         request_now: Optional[datetime] = None,
     ) -> List[Dict[str, Any]]:
         kwargs: Dict[str, Any] = {
@@ -509,9 +506,8 @@ class VikingDBManagerProxy:
             "extra_filter": extra_filter,
             "limit": limit,
         }
-        if events_time_decay_weight != 0.0:
+        if events_time_decay_protection is not None:
             kwargs.update(
-                events_time_decay_weight=events_time_decay_weight,
                 events_time_decay_protection=events_time_decay_protection,
                 request_now=request_now,
             )

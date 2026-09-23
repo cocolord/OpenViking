@@ -927,6 +927,7 @@ class MemoryUpdater:
         self._distribute_links_to_operations(operations)
 
         # Apply unified operations - _apply_edit returns True if edited, False if written
+        uri_memory_type_map = {}
         for resolved_op in applicable_upserts:
             try:
                 await self._apply_upsert(
@@ -936,12 +937,10 @@ class MemoryUpdater:
                     lease_ref=self._transaction_handle,
                 )
                 # Add all uris to result (uris is List[str])
-                if resolved_op.is_edit():
-                    for uri in resolved_op.uris:
-                        result.add_edited(uri)
-                else:
-                    for uri in resolved_op.uris:
-                        result.add_written(uri)
+                add_result = result.add_edited if resolved_op.is_edit() else result.add_written
+                for uri in resolved_op.uris:
+                    add_result(uri)
+                    uri_memory_type_map[uri] = resolved_op.memory_type
             except Exception as e:
                 tracer.error(
                     f"Failed to apply operation: op_type={type(resolved_op).__name__}, uris={resolved_op.uris}",
@@ -998,13 +997,15 @@ class MemoryUpdater:
         await self._sync_resource_refs_for_result(result, ctx, lease_ref=self._transaction_handle)
 
         # Vectorize written and edited memories
-        uri_memory_type_map = {}
-        for op in operations.upsert_operations:
-            for uri in op.uris:
-                uri_memory_type_map[uri] = op.memory_type
         # Merge caller-supplied transient tags with per-operation search_tags
         # (e.g. event-memory custom scalars) so both reach vectorization.
         effective_search_tags_by_uri = _collect_search_tags_by_uri(operations, search_tags_by_uri)
+        for uri in result.written_uris + result.edited_uris:
+            memory_type = uri_memory_type_map.get(uri)
+            if memory_type:
+                effective_search_tags_by_uri[uri] = merge_search_tags(
+                    effective_search_tags_by_uri.get(uri), [f"memory_type={memory_type}"]
+                )
         await self._vectorize_memories(
             result,
             ctx,
@@ -1512,15 +1513,6 @@ class MemoryUpdater:
                             embedding_msg.context_data["_upsert_options"] = {
                                 "search_tag_mode": "append"
                             }
-                    memory_type = memory_type or self.memory_type_from_uri(uri)
-                    if memory_type:
-                        embedding_msg.context_data["search_tags"] = merge_search_tags(
-                            embedding_msg.context_data.get("search_tags"),
-                            [f"memory_type={memory_type}"],
-                        )
-                        embedding_msg.context_data.setdefault(
-                            "_upsert_options", {"search_tag_mode": "append"}
-                        )
                     if embedding_msg.telemetry_id:
                         request_wait_tracker.register_embedding_root(
                             embedding_msg.telemetry_id, embedding_msg.id

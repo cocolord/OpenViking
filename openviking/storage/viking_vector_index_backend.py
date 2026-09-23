@@ -46,8 +46,8 @@ from openviking.utils.tags import merge_search_tags, preserve_memory_type_tag
 from openviking.utils.time_decay import (
     build_time_decay_fusion_spec,
     build_time_decay_post_process_ops,
+    parse_duration_ms,
     time_decay_candidate_limit,
-    validate_time_decay_weight,
 )
 from openviking.utils.time_utils import get_current_timestamp
 from openviking_cli.exceptions import InvalidArgumentError
@@ -1681,8 +1681,7 @@ class VikingVectorIndexBackend:
         level: Optional[List[int]] = None,
         limit: int = 10,
         offset: int = 0,
-        events_time_decay_weight: float = 0.0,
-        events_time_decay_protection: str = "0",
+        events_time_decay_protection: Optional[str] = None,
         request_now: Optional[datetime] = None,
         for_rerank: bool = False,
     ) -> List[Dict[str, Any]]:
@@ -1695,7 +1694,7 @@ class VikingVectorIndexBackend:
             level=level,
             acl_enabled=acl_enabled,
         )
-        if events_time_decay_weight == 0.0:
+        if events_time_decay_protection is None:
             return await self.search(
                 query_vector=query_vector,
                 sparse_query_vector=sparse_query_vector,
@@ -1706,7 +1705,9 @@ class VikingVectorIndexBackend:
                 ctx=ctx,
             )
 
-        weight = validate_time_decay_weight(events_time_decay_weight)
+        parse_duration_ms(
+            events_time_decay_protection, parameter_name="events_time_decay_protection"
+        )
         resolved_targets = [
             resolve_uri(target).uri for target in (target_directories or []) if target
         ]
@@ -1731,7 +1732,6 @@ class VikingVectorIndexBackend:
             level=level,
             limit=limit,
             offset=offset,
-            weight=weight,
             events_time_decay_protection=events_time_decay_protection,
             request_now=request_now,
             defer_fusion=for_rerank,
@@ -1786,8 +1786,7 @@ class VikingVectorIndexBackend:
         target_directories: Optional[List[str]] = None,
         extra_filter: Optional[FilterExpr | Dict[str, Any]] = None,
         limit: int = 10,
-        events_time_decay_weight: float = 0.0,
-        events_time_decay_protection: str = "0",
+        events_time_decay_protection: Optional[str] = None,
         request_now: Optional[datetime] = None,
     ) -> List[Dict[str, Any]]:
         # TODO：Better Alternative to Current Temporary Fix
@@ -1817,7 +1816,7 @@ class VikingVectorIndexBackend:
                 acl_enabled=acl_enabled,
             ),
         )
-        if events_time_decay_weight == 0.0:
+        if events_time_decay_protection is None:
             return await self.search(
                 query_vector=query_vector,
                 sparse_query_vector=sparse_query_vector,
@@ -1827,7 +1826,9 @@ class VikingVectorIndexBackend:
                 ctx=ctx,
             )
 
-        weight = validate_time_decay_weight(events_time_decay_weight)
+        parse_duration_ms(
+            events_time_decay_protection, parameter_name="events_time_decay_protection"
+        )
         if context_type not in (None, "memory") or not self._is_event_uri(parent_uri):
             return await self._search_retrieval_scope(
                 ctx, query_vector, sparse_query_vector, merged_filter, limit
@@ -1842,7 +1843,6 @@ class VikingVectorIndexBackend:
             level=None,
             limit=limit,
             offset=0,
-            weight=weight,
             events_time_decay_protection=events_time_decay_protection,
             request_now=request_now,
             defer_fusion=True,
@@ -1859,7 +1859,6 @@ class VikingVectorIndexBackend:
         level: Optional[List[int]],
         limit: int,
         offset: int,
-        weight: float,
         events_time_decay_protection: str,
         request_now: Optional[datetime],
         defer_fusion: bool = False,
@@ -1893,7 +1892,6 @@ class VikingVectorIndexBackend:
             ),
         )
         spec = build_time_decay_fusion_spec(
-            weight=weight,
             protection=events_time_decay_protection,
             origin=request_now,
         )
@@ -1901,7 +1899,7 @@ class VikingVectorIndexBackend:
         advance = (
             {
                 "post_process_ops": build_time_decay_post_process_ops(
-                    weight=weight, protection=events_time_decay_protection, origin=request_now
+                    protection=events_time_decay_protection, origin=request_now
                 ),
                 "post_process_input_limit": candidate_limit,
             }

@@ -823,13 +823,11 @@ async def test_semantic_retrieval_forwards_event_time_decay_options(method_name)
     await getattr(client, method_name)(
         "hello",
         options={
-            "events_time_decay_weight": 0.25,
             "events_time_decay_protection": "2d",
         },
     )
 
     payload = client._request.await_args.kwargs["json"]
-    assert payload["events_time_decay_weight"] == 0.25
     assert payload["events_time_decay_protection"] == "2d"
 
 

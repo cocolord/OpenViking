@@ -335,8 +335,7 @@ async def search(
     rewrite: Literal["off", "auto"] = "off",
     rewrite_max_bullets: Annotated[int, Field(ge=1, le=20)] = 6,
     read_content: bool = False,
-    events_time_decay_weight: Annotated[float, Field(strict=True, ge=0.0, lt=1.0)] = 0.0,
-    events_time_decay_protection: str = "0",
+    events_time_decay_protection: Optional[str] = None,
 ) -> str:
     """Deep semantic retrieval with optional session context and intent analysis.
 
@@ -350,7 +349,7 @@ async def search(
     ctx = _get_ctx()
     context_filter = _resolve_context_type_filter(context_type)
     if mode == "context":
-        if events_time_decay_weight != 0.0 or events_time_decay_protection != "0":
+        if events_time_decay_protection is not None:
             raise InvalidArgumentError("Event time decay is only supported in mode='list'")
         if read_content:
             raise InvalidArgumentError("read_content is only supported in mode='list'")
@@ -448,7 +447,6 @@ async def search(
         score_threshold=0.35 if min_score is None else min_score,
         filter=context_filter,
         level=level,
-        events_time_decay_weight=events_time_decay_weight,
         events_time_decay_protection=events_time_decay_protection,
     )
     return await _format_search_result(result, service=service, ctx=ctx, read_content=read_content)

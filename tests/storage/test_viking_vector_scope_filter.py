@@ -101,7 +101,7 @@ async def test_cloud_event_scope_uses_one_post_process_query():
         target_directories=["viking://user/alice/peers/assistant/memories/events"],
         level=[2],
         limit=10,
-        events_time_decay_weight=0.25,
+        events_time_decay_protection="0",
         request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
     )
 
@@ -109,7 +109,7 @@ async def test_cloud_event_scope_uses_one_post_process_query():
     assert calls[0]["limit"] == 10
     assert calls[0]["return_detail_info"] is True
     assert calls[0]["advance"]["post_process_input_limit"] == 30
-    assert calls[0]["advance"]["post_process_ops"][0]["addition_score_weight"] == 0.25
+    assert calls[0]["advance"]["post_process_ops"][0]["fusion_by"] == "multiply"
 
 
 @pytest.mark.asyncio
@@ -130,7 +130,7 @@ async def test_cloud_mixed_scope_splits_event_and_non_event_queries():
         context_type="memory",
         target_directories=["viking://user/alice/memories"],
         limit=10,
-        events_time_decay_weight=0.25,
+        events_time_decay_protection="0",
         request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
     )
 
@@ -175,7 +175,7 @@ async def test_cloud_mixed_rerank_prefetch_keeps_one_origin_score_window():
         context_type="memory",
         target_directories=["viking://user/alice/memories"],
         limit=1,
-        events_time_decay_weight=0.25,
+        events_time_decay_protection="0",
         for_rerank=True,
         request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
     )
@@ -199,7 +199,7 @@ async def test_cloud_default_user_scope_splits_tagged_events_without_a_peer():
         query_vector=[1.0],
         context_type="memory",
         limit=10,
-        events_time_decay_weight=0.25,
+        events_time_decay_protection="0",
         request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
     )
 
@@ -575,7 +575,7 @@ async def test_search_by_random_reuses_account_filter_for_raw_dsl():
 
 
 @pytest.mark.asyncio
-async def test_zero_decay_weight_keeps_the_original_single_search_call():
+async def test_null_decay_protection_keeps_the_original_single_search_call():
     backend = object.__new__(VikingVectorIndexBackend)
     backend.acl_manager = None
     calls = []
@@ -591,7 +591,6 @@ async def test_zero_decay_weight_keeps_the_original_single_search_call():
         context_type="memory",
         limit=7,
         offset=2,
-        events_time_decay_weight=0.0,
     )
 
     assert results == [{"uri": "viking://resources/doc", "_score": 0.8}]
@@ -637,21 +636,21 @@ async def test_decay_fuses_legacy_user_and_peer_events(backend_type):
         query_vector=[1.0],
         context_type="memory",
         limit=3,
-        events_time_decay_weight=0.5,
+        events_time_decay_protection="0",
         request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
     )
 
     assert len(calls) == 2
     assert calls[0]["limit"] == 9
     assert [item["uri"] for item in results] == [
-        "viking://user/alice/peers/peer-a/memories/events/recent",
         "viking://user/alice/memories/preferences/pref.md",
+        "viking://user/alice/peers/peer-a/memories/events/recent",
         "viking://user/alice/memories/events/old",
     ]
-    assert results[0]["_origin_score"] == pytest.approx(0.6)
-    assert results[0]["_time_score"] == pytest.approx(1.0)
-    assert "_origin_score" not in results[1]
-    assert "_time_score" not in results[1]
+    assert "_origin_score" not in results[0]
+    assert "_time_score" not in results[0]
+    assert results[1]["_origin_score"] == pytest.approx(0.6)
+    assert results[1]["_time_score"] == pytest.approx(1.0)
     assert results[2]["_time_score"] == pytest.approx(0.5)
 
 
@@ -688,7 +687,7 @@ async def test_decay_rerank_prefetch_keeps_expanded_origin_candidates():
         target_directories=["viking://user/alice"],
         level=[2],
         limit=1,
-        events_time_decay_weight=0.8,
+        events_time_decay_protection="0",
         for_rerank=True,
         request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
     )
@@ -722,13 +721,13 @@ async def test_decay_applies_to_a_peer_only_target():
         context_type="memory",
         target_directories=["viking://user/alice/peers/peer-a/memories/events"],
         level=[2],
-        events_time_decay_weight=0.25,
+        events_time_decay_protection="0",
         request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
     )
 
     assert len(calls) == 1
     assert calls[0]["limit"] == 30
-    assert results[0]["_score"] == pytest.approx(0.4)
+    assert results[0]["_score"] == pytest.approx(0.2)
     assert results[0]["_origin_score"] == pytest.approx(0.2)
     assert results[0]["_time_score"] == pytest.approx(1.0)
 
@@ -752,7 +751,7 @@ async def test_decay_applies_under_bare_user_target():
         target_directories=["viking://user"],
         level=[2],
         limit=2,
-        events_time_decay_weight=0.25,
+        events_time_decay_protection="0",
     )
 
     assert len(calls) == 2
@@ -784,7 +783,7 @@ async def test_decay_applies_to_children_of_a_peer_event_directory():
         query_vector=[1.0],
         context_type="memory",
         limit=2,
-        events_time_decay_weight=0.25,
+        events_time_decay_protection="0",
         request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
     )
 
@@ -832,7 +831,7 @@ async def test_tagged_events_use_the_same_split_and_scores_across_backends(
         event = dict(new_event)
         if kwargs.get("advance"):
             # The cloud adapter returns the already fused score and explanations.
-            event.update(_score=0.92, _origin_score=0.2, _time_score=1.0)
+            event.update(_score=0.2, _origin_score=0.2, _time_score=1.0)
         return [event]
 
     backend.search = fake_search
@@ -843,7 +842,7 @@ async def test_tagged_events_use_the_same_split_and_scores_across_backends(
         context_type="memory",
         extra_filter=Eq("search_tags", "team=search"),
         limit=2,
-        events_time_decay_weight=0.9,
+        events_time_decay_protection="0",
         request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
         for_rerank=for_rerank,
     )
@@ -859,12 +858,12 @@ async def test_tagged_events_use_the_same_split_and_scores_across_backends(
         assert results[1]["_time_score"] == pytest.approx(0.5)
         assert results[2]["_time_score"] == pytest.approx(1.0)
     else:
-        assert [result["uri"] for result in results] == [new_event["uri"], preference["uri"]]
-        assert [result["_score"] for result in results] == pytest.approx([0.92, 0.75])
+        assert [result["uri"] for result in results] == [preference["uri"], old_event["uri"]]
+        assert [result["_score"] for result in results] == pytest.approx([0.75, 0.3])
 
 
 @pytest.mark.asyncio
-async def test_local_tag_split_recalls_events_outside_the_mixed_candidate_window(tmp_path):
+async def test_local_tag_split_does_not_boost_fresh_events(tmp_path):
     backend = VikingVectorIndexBackend(
         config=VectorDBBackendConfig(
             backend="local", name="context", dimension=4, path=str(tmp_path / "vectors")
@@ -925,10 +924,10 @@ async def test_local_tag_split_recalls_events_outside_the_mixed_candidate_window
         assert "/memories/preferences/" in original[0]["uri"]
         decayed = await backend.search_in_tenant(
             **options,
-            events_time_decay_weight=0.9,
+            events_time_decay_protection="0",
             request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
         )
-        assert decayed[0]["uri"] == event_uri
+        assert "/memories/preferences/" in decayed[0]["uri"]
         replaced = await backend.update_search_tags(
             event_uri, ["team=search"], mode="replace", ctx=ctx
         )
@@ -949,17 +948,15 @@ async def test_local_tag_split_recalls_events_outside_the_mixed_candidate_window
             ctx=ctx,
         )
         decayed = await backend.search_in_tenant(
-            **options,
-            offset=1,
-            events_time_decay_weight=0.9,
+            **{**options, "limit": 10},
+            events_time_decay_protection="0",
             request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
         )
-        # Both the untagged legacy event and the newly tagged event survive;
-        # the new event beats every preference despite its lower semantic score.
-        assert decayed[0]["uri"] == event_uri
+        # Tagged and untagged events are both eligible, without boosting a fresh event.
+        assert {event_uri, legacy_uri} <= {item["uri"] for item in decayed}
         first = await backend.search_in_tenant(
             **options,
-            events_time_decay_weight=0.9,
+            events_time_decay_protection="0",
             request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
         )
         assert first[0]["uri"] == legacy_uri

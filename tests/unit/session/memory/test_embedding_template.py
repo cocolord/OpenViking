@@ -103,9 +103,32 @@ class TestContentTemplateRendering:
 
 class TestEmbeddingTextConstruction:
     @pytest.mark.asyncio
+    async def test_direct_refresh_with_peer_named_memories_does_not_replace_type_tag(self):
+        uri = "viking://user/alice/peers/memories/memories/events/event.md"
+        viking_fs = Mock(read_file=AsyncMock(return_value="# Event body"))
+        vikingdb = Mock(has_queue_manager=True)
+        vikingdb.enqueue_embedding_msg = AsyncMock(return_value=True)
+
+        with patch(
+            "openviking.session.memory.memory_type_registry.get_default_registry",
+            return_value=MemoryTypeRegistry(load_schemas=False),
+        ):
+            refreshed = await MemoryUpdater.refresh_file_embedding(
+                viking_fs=viking_fs,
+                vikingdb=vikingdb,
+                uri=uri,
+                memory_type="memories",
+                ctx=SimpleNamespace(user=None, account_id="default"),
+            )
+
+        assert refreshed
+        message = vikingdb.enqueue_embedding_msg.await_args.args[0]
+        assert "search_tags" not in message.context_data
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("edited", [False, True])
-    @pytest.mark.parametrize("peer_path", ["", "peers/peer-a/"])
-    async def test_new_and_updated_memories_get_a_system_type_tag(self, edited, peer_path):
+    @pytest.mark.parametrize("peer_path", ["", "peers/memories/"])
+    async def test_direct_file_vectorization_does_not_infer_a_type_tag(self, edited, peer_path):
         uri = f"viking://user/alice/{peer_path}memories/events/event.md"
         updater = MemoryUpdater(registry=MemoryTypeRegistry(load_schemas=False), vikingdb=Mock())
         updater._viking_fs = Mock(read_file=AsyncMock(return_value="# Event body"))
@@ -118,17 +141,13 @@ class TestEmbeddingTextConstruction:
                 result,
                 SimpleNamespace(user=None, account_id="default"),
                 uri_memory_type_map={} if edited else {uri: "events"},
-                ingest_options=IngestOptions(
-                    search_tags=["team=search", "memory_type=preferences"],
-                    search_tag_mode="replace",
-                ),
             )
             == 1
         )
 
         message = updater._vikingdb.enqueue_embedding_msg.await_args.args[0]
-        assert message.context_data["search_tags"] == ["team=search", "memory_type=events"]
-        assert message.context_data["_upsert_options"] == {"search_tag_mode": "replace"}
+        assert "search_tags" not in message.context_data
+        assert "_upsert_options" not in message.context_data
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -174,7 +193,7 @@ class TestEmbeddingTextConstruction:
             )
 
         embedding_msg = updater._vikingdb.enqueue_embedding_msg.await_args.args[0]
-        assert embedding_msg.context_data["search_tags"] == [*tags, "memory_type=trajectories"]
+        assert embedding_msg.context_data["search_tags"] == tags
         assert embedding_msg.context_data["_upsert_options"] == {"search_tag_mode": mode}
 
     @pytest.mark.asyncio
@@ -221,10 +240,7 @@ class TestEmbeddingTextConstruction:
             )
 
         embedding_msg = updater._vikingdb.enqueue_embedding_msg.await_args.args[0]
-        assert embedding_msg.context_data["search_tags"] == [
-            experience_source_tag(experience_uri),
-            "memory_type=trajectories",
-        ]
+        assert embedding_msg.context_data["search_tags"] == [experience_source_tag(experience_uri)]
         assert embedding_msg.context_data["_upsert_options"] == {"search_tag_mode": "append"}
 
     @pytest.mark.asyncio

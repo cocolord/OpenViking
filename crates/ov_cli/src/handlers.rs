@@ -1490,7 +1490,6 @@ pub async fn handle_find(
     context_type: Option<Vec<String>>,
     tags: Option<Vec<String>>,
     read_content: bool,
-    events_time_decay_weight: Option<f64>,
     events_time_decay_protection: Option<String>,
     ctx: CliContext,
 ) -> Result<()> {
@@ -1526,9 +1525,6 @@ pub async fn handle_find(
     if read_content {
         params.push("--read-content".to_string());
     }
-    if let Some(weight) = events_time_decay_weight {
-        params.push(format!("--events-time-decay-weight {}", weight));
-    }
     if let Some(ref protection) = events_time_decay_protection {
         params.push(format!("--events-time-decay-protection {}", protection));
     }
@@ -1549,7 +1545,6 @@ pub async fn handle_find(
         context_type,
         tags,
         read_content,
-        events_time_decay_weight,
         events_time_decay_protection,
         ctx.output_format,
         ctx.compact,
@@ -1570,7 +1565,6 @@ pub async fn handle_search(
     context_type: Option<Vec<String>>,
     tags: Option<Vec<String>>,
     read_content: bool,
-    events_time_decay_weight: Option<f64>,
     events_time_decay_protection: Option<String>,
     ctx: CliContext,
 ) -> Result<()> {
@@ -1609,9 +1603,6 @@ pub async fn handle_search(
     if read_content {
         params.push("--read-content".to_string());
     }
-    if let Some(weight) = events_time_decay_weight {
-        params.push(format!("--events-time-decay-weight {}", weight));
-    }
     if let Some(ref protection) = events_time_decay_protection {
         params.push(format!("--events-time-decay-protection {}", protection));
     }
@@ -1633,7 +1624,6 @@ pub async fn handle_search(
         context_type,
         tags,
         read_content,
-        events_time_decay_weight,
         events_time_decay_protection,
         ctx.output_format,
         ctx.compact,

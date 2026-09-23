@@ -394,8 +394,7 @@ The `search()` method adds session context understanding and intent analysis cap
 | target_uri | str \| List[str] | No | "" | Limit search to specific URI prefix |
 | session | Session | No | None | Session for context-aware search (SDK) |
 | session_id | str | No | None | Session ID for context-aware search (HTTP) |
-| events_time_decay_weight | float | No | 0.0 | Weight of the event time score in `[0, 1)`; applies to user and peer event L2 results. Zero preserves the original retrieval behavior |
-| events_time_decay_protection | str | No | "0" | No-decay protection period: `0` or a non-negative integer `Xm`/`Xh`/`Xd`; used only when the weight is positive |
+| events_time_decay_protection | str \| null | No | null | Omit or pass `null` to disable decay. Pass `"0"` to decay immediately, or a duration such as `"7d"` to preserve the original score during that period and decay afterward. Supports non-negative integer `Xm`/`Xh`/`Xd` |
 | context_type | str \| List[str] | No | None | Limit results to one or more `ContextType` values: `memory`, `resource`, or `skill` |
 | tags | List[str] | No | None | Explicit retrieval tags in strict `k=v` form. Multiple tags are combined with AND; a result must contain every requested tag |
 | node_limit | int | No | None | Optional HTTP alias; overrides `limit` when provided |
@@ -411,9 +410,9 @@ The `search()` method adds session context understanding and intent analysis cap
 
 `search()` uses the same target resolution and explicit tag filtering rules as `find()`, including the peer collection filter selected by `X-OpenViking-Actor-Peer` or SDK `actor_peer_id`. When `image_url` is provided, `search()` uses direct image retrieval and skips session query planning.
 
-Event time decay applies to semantic `search()` and `find()` results at L2 under both `viking://user/{user_id}/memories/events/` and `viking://user/{user_id}/peers/{peer_id}/memories/events/`. It does not affect other memory types, L0/L1, query-less filter-only `find()`, `recall`, `grep`, or `glob`. Enabled event results use `score = origin_score * (1 - weight) + time_score * weight` and expose `origin_score` and `time_score`; the CLI labels these as semantic, time, and final scores. Time is read from the existing indexed `updated_at` field; no reindex or timestamp rewrite is required. A missing or invalid value keeps the original score and returns `time_score` as `null`. The curve is owned by the server; callers only provide the per-request weight and protection period. No `ov.conf` or `ovcli.conf` change is required.
+Event time decay applies to semantic `search()` and `find()` results at L2 under both `viking://user/{user_id}/memories/events/` and `viking://user/{user_id}/peers/{peer_id}/memories/events/`. It does not affect other memory types, L0/L1, query-less filter-only `find()`, `recall`, `grep`, or `glob`. Enabled event results use `score = origin_score * time_score` and expose `origin_score` and `time_score`; the CLI labels these as semantic, time, and final scores. Inside the protection period `time_score` is 1, so the original score is unchanged. Time is read from the existing indexed `updated_at` field; no reindex or timestamp rewrite is required. A missing or invalid value keeps the original score and returns `time_score` as `null`. The curve is owned by the server; callers only provide the per-request protection period. No `ov.conf` or `ovcli.conf` change is required.
 
-New and updated memories automatically receive a `memory_type=<type>` search tag. With decay enabled, both local and cloud backends recall tagged event L2 memories separately and merge them with the remaining results, without requiring a peer ID. Existing data is not backfilled; untagged events retain URI-based classification and decay in the compatibility recall path.
+New and updated memories produced by memory extraction automatically receive a `memory_type=<type>` search tag. With decay enabled, both local and cloud backends recall tagged event L2 memories separately and merge them with the remaining results, without requiring a peer ID. Existing data is not backfilled; untagged events retain URI-based classification and decay in the compatibility recall path.
 
 #### 3. Usage Examples
 
@@ -433,7 +432,6 @@ curl -X POST http://localhost:1933/api/v1/search/search \
         "context_type": "memory",
         "since": "2h",
         "time_field": "updated_at",
-        "events_time_decay_weight": 0.2,
         "events_time_decay_protection": "1d",
         "limit": 10
     }'

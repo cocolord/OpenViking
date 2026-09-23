@@ -31,20 +31,6 @@ _DURATION_MULTIPLIERS_MS = {
 }
 
 
-def validate_time_decay_weight(value: Any) -> float:
-    """Validate the public event time-decay weight."""
-    if isinstance(value, bool) or not isinstance(value, Real):
-        raise ValueError("events_time_decay_weight must be a finite number in [0, 1)")
-    weight = float(value)
-    if not math.isfinite(weight) or weight < 0.0 or weight >= 1.0:
-        raise ValueError("events_time_decay_weight must be a finite number in [0, 1)")
-    return weight
-
-
-def _blend_scores(origin_score: float, addition_score: float, weight: float) -> float:
-    return (1.0 - weight) * origin_score + weight * addition_score
-
-
 def parse_duration_ms(value: Any, *, parameter_name: str = "duration") -> int:
     """Parse ``0`` or a non-negative integer duration with m/h/d units."""
     if not isinstance(value, str) or not _DURATION_RE.fullmatch(value):
@@ -80,7 +66,6 @@ def _datetime_to_epoch_ms(value: Any) -> float:
 class TimeDecayFusionSpec:
     """Compiled score-fusion parameters for event time decay."""
 
-    weight: float
     field: str
     origin_ms: float
     offset_ms: int
@@ -90,7 +75,6 @@ class TimeDecayFusionSpec:
 
     def __post_init__(self) -> None:
         # Validate and compile request constants once, outside the candidate loop.
-        validate_time_decay_weight(self.weight)
         if self.scale_ms <= 0:
             raise ValueError("time-decay scale must be greater than zero")
         if not 0.0 < self.decay < 1.0:
@@ -104,7 +88,7 @@ class TimeDecayFusionSpec:
             0.0, abs(_datetime_to_epoch_ms(source_time) - self.origin_ms) - self.offset_ms
         )
         addition_score = math.exp(self._decay_rate * distance_ms)
-        final_score = _blend_scores(origin_score, addition_score, self.weight)
+        final_score = origin_score * addition_score
         return final_score, addition_score
 
     def fuse_optional(self, origin_score: float, source_time: Any) -> tuple[float, Optional[float]]:
@@ -115,22 +99,19 @@ class TimeDecayFusionSpec:
             return origin_score, None
 
 
-def fuse_time_decay_scores(*, origin_score: float, addition_score: float, weight: float) -> float:
-    """Blend semantic and time scores directly, as defined by the PRD."""
-    checked_weight = validate_time_decay_weight(weight)
-    return _blend_scores(origin_score, addition_score, checked_weight)
+def fuse_time_decay_scores(*, origin_score: float, addition_score: float) -> float:
+    """Multiply the semantic score by the time score."""
+    return origin_score * addition_score
 
 
 def build_time_decay_fusion_spec(
     *,
-    weight: float,
     protection: str,
     origin: Optional[datetime] = None,
     field: str = "updated_at",
 ) -> TimeDecayFusionSpec:
     """Compile the fixed event time-decay curve for one retrieval request."""
     return TimeDecayFusionSpec(
-        weight=validate_time_decay_weight(weight),
         field=field,
         origin_ms=origin or datetime.now(timezone.utc),
         offset_ms=parse_duration_ms(protection, parameter_name="events_time_decay_protection"),
@@ -141,16 +122,11 @@ def build_time_decay_fusion_spec(
 
 def build_time_decay_post_process_ops(
     *,
-    weight: float,
     protection: str,
     origin: Optional[datetime] = None,
     field: str = "updated_at",
 ) -> list[dict[str, Any]]:
     """Build the fixed VikingDB score-fusion operator for event results."""
-    checked_weight = validate_time_decay_weight(weight)
-    if checked_weight == 0.0:
-        return []
-
     protection_ms = parse_duration_ms(protection, parameter_name="events_time_decay_protection")
     addition = {
         "factor": 1,
@@ -169,8 +145,7 @@ def build_time_decay_post_process_ops(
     return [
         {
             "op": "score_fusion",
-            "fusion_by": "add",
-            "addition_score_weight": checked_weight,
+            "fusion_by": "multiply",
             "normalize_for_origin_score": {"enable": False},
             "normalize_for_addition_score": {"enable": False},
             "addition_score": [addition],

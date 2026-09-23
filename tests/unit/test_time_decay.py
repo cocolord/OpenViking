@@ -12,7 +12,6 @@ from openviking.utils.time_decay import (
     fuse_time_decay_scores,
     parse_duration_ms,
     time_decay_candidate_limit,
-    validate_time_decay_weight,
 )
 
 
@@ -40,25 +39,22 @@ def test_parse_duration_ms_rejects_invalid_values(value):
         parse_duration_ms(value)
 
 
-@pytest.mark.parametrize("value", [float("nan"), float("inf"), -0.1, 1.0, True, "0.5"])
-def test_validate_time_decay_weight_rejects_invalid_values(value):
-    with pytest.raises(ValueError):
-        validate_time_decay_weight(value)
-
-
 def test_enabled_decay_uses_the_server_owned_curve():
     origin = datetime(2026, 1, 8, tzinfo=timezone.utc)
-    spec = build_time_decay_fusion_spec(weight=0.2, protection="1d", origin=origin)
+    spec = build_time_decay_fusion_spec(protection="1d", origin=origin)
 
     fused, addition = spec.fuse(0.8, "2025-12-31T00:00:00.000Z")
     assert addition == pytest.approx(0.5)
-    assert fused == pytest.approx(0.8 * 0.8 + 0.2 * 0.5)
+    assert fused == pytest.approx(0.8 * 0.5)
+
+    protected, protected_time = spec.fuse(0.8, "2026-01-07T12:00:00.000Z")
+    assert protected == pytest.approx(0.8)
+    assert protected_time == pytest.approx(1.0)
 
 
 @pytest.mark.parametrize("protection", ["0", "0m", "0h", "0d"])
 def test_builder_accepts_zero_protection_duration(protection):
     spec = build_time_decay_fusion_spec(
-        weight=0.2,
         protection=protection,
         origin=datetime(2026, 1, 8, tzinfo=timezone.utc),
     )
@@ -70,9 +66,11 @@ def test_builder_accepts_zero_protection_duration(protection):
 def test_post_process_omits_zero_offset(protection):
     origin = datetime(2026, 1, 8, tzinfo=timezone.utc)
 
-    ops = build_time_decay_post_process_ops(weight=0.25, protection=protection, origin=origin)
+    ops = build_time_decay_post_process_ops(protection=protection, origin=origin)
 
     addition = ops[0]["addition_score"][0]
+    assert ops[0]["fusion_by"] == "multiply"
+    assert "addition_score_weight" not in ops[0]
     assert "offset" not in addition
     assert addition == {
         "factor": 1,
@@ -85,20 +83,13 @@ def test_post_process_omits_zero_offset(protection):
     }
 
 
-def test_zero_weight_does_not_parse_post_process_protection():
-    assert build_time_decay_post_process_ops(weight=0, protection="invalid") == []
-
-
-def test_direct_score_fusion_matches_prd_formula():
-    assert fuse_time_decay_scores(
-        origin_score=0.8, addition_score=0.5, weight=0.2
-    ) == pytest.approx(0.74)
+def test_direct_score_fusion_multiplies():
+    assert fuse_time_decay_scores(origin_score=0.8, addition_score=0.5) == pytest.approx(0.4)
 
 
 @pytest.mark.parametrize("source_time", [None, "", "not-a-time", float("nan")])
 def test_missing_or_invalid_time_keeps_origin_score(source_time):
     spec = TimeDecayFusionSpec(
-        weight=0.8,
         field="updated_at",
         origin_ms=1_000.0,
         offset_ms=0,

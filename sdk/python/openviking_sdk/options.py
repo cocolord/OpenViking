@@ -27,8 +27,7 @@ class FindOptions(_ExtraOptions, total=False):
     level: Level
     read_content: bool
     telemetry: Any
-    events_time_decay_weight: float
-    events_time_decay_protection: str
+    events_time_decay_protection: Optional[str]
 
 
 class SearchOptions(FindOptions, total=False):

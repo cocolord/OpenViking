@@ -127,9 +127,6 @@ func TestFindSendsHeadersQueryAndBody(t *testing.T) {
 		if got := body["time_field"]; got != "created_at" {
 			t.Fatalf("time_field = %#v", got)
 		}
-		if got := body["events_time_decay_weight"]; got != 0.25 {
-			t.Fatalf("events_time_decay_weight = %#v", got)
-		}
 		if got := body["events_time_decay_protection"]; got != "2d" {
 			t.Fatalf("events_time_decay_protection = %#v", got)
 		}
@@ -149,7 +146,6 @@ func TestFindSendsHeadersQueryAndBody(t *testing.T) {
 	}))
 	defer closeServer()
 
-	weight := 0.25
 	result, err := client.Find(context.Background(), "auth", &FindOptions{
 		TargetURI:                 "resources/docs",
 		Limit:                     5,
@@ -159,7 +155,6 @@ func TestFindSendsHeadersQueryAndBody(t *testing.T) {
 		TimeField:                 "created_at",
 		Level:                     []int{0, 2},
 		Tags:                      []string{"topic=docs", "kind=api"},
-		EventsTimeDecayWeight:     &weight,
 		EventsTimeDecayProtection: "2d",
 	})
 	if err != nil {

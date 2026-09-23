@@ -151,8 +151,7 @@ export interface FindOptions {
   tags?: string[];
   includeProvenance?: boolean;
   readContent?: boolean;
-  eventsTimeDecayWeight?: number;
-  eventsTimeDecayProtection?: string;
+  eventsTimeDecayProtection?: string | null;
   extra?: JsonObject;
 }
 /** Session-aware semantic retrieval options. */

@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, Union
 
 from fastapi import APIRouter, Depends
 from fastapi import Response as FastAPIResponse
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from openviking.core.path_variables import resolve_path_variables
 from openviking.core.uri_validation import validate_request_viking_uri
@@ -139,25 +139,17 @@ class FindRequest(BaseModel):
     level: Optional[Union[int, str, List[int]]] = None
     read_content: bool = False
     telemetry: TelemetryRequest = False
-    events_time_decay_weight: float = Field(default=0.0, ge=0.0, lt=1.0)
-    events_time_decay_protection: str = "0"
-
-    @field_validator("events_time_decay_weight", mode="before")
-    @classmethod
-    def _reject_boolean_time_decay_weight(cls, value: Any) -> Any:
-        if isinstance(value, bool):
-            raise ValueError("events_time_decay_weight must be a number, not a boolean")
-        return value
+    events_time_decay_protection: Optional[str] = None
 
     @model_validator(mode="after")
     def _validate_time_decay(self) -> "FindRequest":
-        if self.events_time_decay_weight > 0.0:
+        if self.events_time_decay_protection is not None:
             parse_duration_ms(
                 self.events_time_decay_protection,
                 parameter_name="events_time_decay_protection",
             )
             if not self.query.strip() and not self.image_url:
-                raise ValueError("events_time_decay_weight requires a semantic query or image")
+                raise ValueError("events_time_decay_protection requires a semantic query or image")
         return self
 
 
@@ -244,8 +236,7 @@ class SearchRequest(BaseModel):
     level: Optional[Union[int, str, List[int]]] = None
     read_content: bool = False
     telemetry: TelemetryRequest = False
-    events_time_decay_weight: float = Field(default=0.0, ge=0.0, lt=1.0)
-    events_time_decay_protection: str = "0"
+    events_time_decay_protection: Optional[str] = None
 
     mode: Literal["list", "context"] = "list"
 
@@ -261,20 +252,13 @@ class SearchRequest(BaseModel):
     rewrite: Union[bool, Literal["auto"]] = False
     rewrite_max_bullets: int = Field(default=6, ge=1, le=20)
 
-    @field_validator("events_time_decay_weight", mode="before")
-    @classmethod
-    def _reject_boolean_time_decay_weight(cls, value: Any) -> Any:
-        if isinstance(value, bool):
-            raise ValueError("events_time_decay_weight must be a number, not a boolean")
-        return value
-
     @model_validator(mode="after")
     def _validate_mode(self) -> "SearchRequest":
         if self.mode == "list":
             error = context_only_fields_error(self.model_fields_set)
             if error:
                 raise ValueError(error)
-            if self.events_time_decay_weight > 0.0:
+            if self.events_time_decay_protection is not None:
                 parse_duration_ms(
                     self.events_time_decay_protection,
                     parameter_name="events_time_decay_protection",
@@ -283,15 +267,8 @@ class SearchRequest(BaseModel):
 
         if self.read_content:
             raise ValueError("read_content is only supported in mode='list'")
-        decay_fields = {
-            "events_time_decay_weight",
-            "events_time_decay_protection",
-        } & self.model_fields_set
-        if decay_fields:
-            raise ValueError(
-                "events_time_decay_weight and events_time_decay_protection are only "
-                "supported in mode='list'"
-            )
+        if self.events_time_decay_protection is not None:
+            raise ValueError("events_time_decay_protection is only supported in mode='list'")
         if self.target_uri:
             raise ValueError("target_uri is not supported in mode='context'")
         _reject_unknown_quota_and_detail(self.quotas, self.detail)
@@ -419,7 +396,6 @@ async def find(
             filter=effective_filter,
             level=_resolve_levels(request.level) or None,
             image_url=resolved_image_url,
-            events_time_decay_weight=request.events_time_decay_weight,
             events_time_decay_protection=request.events_time_decay_protection,
         ),
     )
@@ -535,7 +511,6 @@ async def search(
             filter=effective_filter,
             level=_resolve_levels(request.level) or None,
             image_url=resolved_image_url,
-            events_time_decay_weight=request.events_time_decay_weight,
             events_time_decay_protection=request.events_time_decay_protection,
         )
 
