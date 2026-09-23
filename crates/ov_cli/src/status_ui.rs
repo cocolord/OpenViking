@@ -647,9 +647,15 @@ fn retrieval_summary(status: Option<&str>) -> String {
     };
     let queries = metric_value(status, "Total Queries");
     let zero_rate = metric_value(status, "Zero-Result Rate");
+    let window = metric_value(status, "Window");
     match (queries, zero_rate) {
         (Some(queries), Some(zero_rate)) => {
-            format!("{queries} queries, {zero_rate} zero-result rate")
+            let scope = if window.is_some() {
+                " internal queries since collector start"
+            } else {
+                " queries"
+            };
+            format!("{queries}{scope}, {zero_rate} zero-result rate")
         }
         _ => "unknown".to_string(),
     }
@@ -886,6 +892,15 @@ mod tests {
         assert!(rendered.contains("Pending       unknown"));
         assert!(rendered.contains("queue          healthy    unknown"));
         assert!(rendered.contains("models         unknown    unknown"));
+    }
+
+    #[test]
+    fn retrieval_summary_names_internal_window() {
+        let status = "| Window | Since collector start |\n| Total Queries | 3 |\n| Zero-Result Rate | 33.3% |";
+        assert_eq!(
+            super::retrieval_summary(Some(status)),
+            "3 internal queries since collector start, 33.3% zero-result rate"
+        );
     }
 
     #[test]

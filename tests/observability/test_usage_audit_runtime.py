@@ -166,7 +166,11 @@ async def test_search_http_results_persist_without_counting_internal_queries(
     # Read the persisted public projection after shutdown, not just its event payload.
     with sqlite3.connect(db_path) as connection:
         rows = connection.execute(
-            "SELECT operation, status, SUM(request_count), SUM(result_count) "
+            "SELECT operation, status, SUM(request_count), SUM(result_count), "
+            "SUM(observed_request_count), SUM(zero_result_count) "
             "FROM usage_retrieval_hourly GROUP BY operation, status ORDER BY status"
         ).fetchall()
-    assert rows == [(operation, "error", 1, 0), (operation, "success", 3, 6)]
+    assert rows == [
+        (operation, "error", 1, 0, 0, 0),
+        (operation, "success", 3, 6, 3, 1),
+    ]

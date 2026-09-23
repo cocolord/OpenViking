@@ -301,6 +301,10 @@ The public SDKs and CLI do not currently expose a lock-specific observer method.
 #### 1. API Implementation Overview
 
 Get retrieval quality metrics.
+The status table labels its scope with `Window` and `Window Start (UTC)`;
+`Total Queries` is the zero-result rate's sample size. These in-process
+retrieval counters restart with the collector and have a different denominator
+from the persisted, per-user HTTP `find/search` zero-result rate in Usage Audit.
 
 **Code Entry Points**:
 - `openviking/server/routers/observer.py:observer_retrieval` - HTTP route

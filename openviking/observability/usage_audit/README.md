@@ -126,8 +126,17 @@ store backend，而不是让多个实例各写各的本地 SQLite。
 可能触发多个内部检索并去重、截断，因此不能直接与进程启动以来的 retrieval observer
 计数对齐。现有统计范围仍为上表两个端点，不包含 MCP 或已弃用的 `/recall`。
 
-结果总数不是零结果请求数，仅凭 `request_count` 和 `result_count` 无法还原零结果率。
-修复前已有桶中的结果数仍为历史零值，不会回填。
+结果总数不是零结果请求数。新增的 `observed_request_count` 只累计带有效最终返回条数的
+成功 HTTP 请求，`zero_result_count` 是其中返回 0 条的请求数；零结果率为两者之比，
+样本数为 0 时返回 `null`，界面显示“—”。失败请求和没有结果数的旧事件都不进入样本。
+这两个计数与 `result_count` 均按现有用户时区的“今日”窗口读取。
+
+v4/v5 SQLite 升级到 v6 时保留现有小时桶和请求审计，将旧桶的两个新计数置为 0。
+旧桶没有逐次返回条数，请求审计也未记录它，无法从总请求数和总结果数准确回填历史零结果数；
+同一小时内新旧请求混合时，界面只用有结果数的请求计算零结果率。
+修复前已有桶中的 `result_count` 历史零值同样无法准确回填。
+retrieval observer 统计内部检索调用，自检索统计器初始化起累计；它的分母、时间窗口和
+HTTP 零结果率不同，不能把两者的百分比直接相减作为一致性检查。
 
 ### 上下文提交热力图
 
@@ -246,7 +255,10 @@ GET /api/v1/console/dashboard/summary
     "today_retrievals": {
       "find": 10,
       "search": 4,
-      "total": 14
+      "total": 14,
+      "observed_request_count": 8,
+      "zero_result_count": 1,
+      "zero_result_rate": 0.125
     }
   }
 }

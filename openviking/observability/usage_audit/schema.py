@@ -8,10 +8,10 @@ serve any region. Token and retrieval rollups are hour-grained so cross-tz
 "today" queries can slice at user-local day boundaries.
 """
 
-# Stored on the `_schema_meta` row. Version 4 has an explicit additive migration;
+# Stored on the `_schema_meta` row. Versions 4 and 5 have additive migrations;
 # unhandled newer transitions fail closed, while older incompatible snapshots
 # continue to use the reset path.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS _schema_meta (
@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS usage_retrieval_hourly (
     status TEXT NOT NULL,
     request_count INTEGER NOT NULL DEFAULT 0,
     result_count INTEGER NOT NULL DEFAULT 0,
+    observed_request_count INTEGER NOT NULL DEFAULT 0,
+    zero_result_count INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (
         account_id, user_id, date_utc, hour_utc, operation, status

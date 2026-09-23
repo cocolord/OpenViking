@@ -198,6 +198,20 @@ def _create_v4_usage_audit_db(db_path) -> None:
         conn.close()
 
 
+def _create_v5_usage_audit_db(db_path) -> None:
+    """Represent a populated database from before known-result sampling."""
+    _create_v4_usage_audit_db(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        for name in ("error_code", "error_message", "error_details"):
+            conn.execute(f"ALTER TABLE request_audit ADD COLUMN {name} TEXT")
+        conn.execute("UPDATE usage_retrieval_hourly SET result_count = 7")
+        conn.execute("UPDATE _schema_meta SET value = '5' WHERE key = 'version'")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 @pytest.mark.asyncio
 async def test_sqlite_usage_audit_store_aggregates_dashboard_data(tmp_path):
     store = SQLiteUsageAuditStore(tmp_path / "usage.sqlite3")
@@ -241,6 +255,7 @@ async def test_sqlite_usage_audit_store_aggregates_dashboard_data(tmp_path):
                         "route": "/api/v1/search/find",
                         "status": "200",
                         "duration_seconds": 0.1,
+                        "result_count": 3,
                     },
                 ),
                 _event(
@@ -251,6 +266,7 @@ async def test_sqlite_usage_audit_store_aggregates_dashboard_data(tmp_path):
                         "route": "/api/v1/search/search",
                         "status": "200",
                         "duration_seconds": 0.1,
+                        "result_count": 0,
                     },
                     user_id="user-2",
                 ),
@@ -330,6 +346,9 @@ async def test_sqlite_usage_audit_store_aggregates_dashboard_data(tmp_path):
             "find": 1,
             "search": 1,
             "total": 2,
+            "observed_request_count": 2,
+            "zero_result_count": 1,
+            "zero_result_rate": 0.5,
         }
         assert await store.get_today_retrievals(
             account_id="acct-1", user_id="user-1", user_date="2026-05-12", tz=UTC
@@ -337,6 +356,9 @@ async def test_sqlite_usage_audit_store_aggregates_dashboard_data(tmp_path):
             "find": 1,
             "search": 0,
             "total": 1,
+            "observed_request_count": 1,
+            "zero_result_count": 0,
+            "zero_result_rate": 0.0,
         }
         commits = await store.get_context_commit_heatmap(
             account_id="acct-1",
@@ -444,7 +466,7 @@ async def test_sqlite_usage_audit_store_resets_incompatible_legacy_schema(tmp_pa
         assert "hour_utc" in context_columns
         assert "hour_bucket" not in context_columns
         version = conn.execute("SELECT value FROM _schema_meta WHERE key = 'version'").fetchone()
-        assert version == ("5",)
+        assert version == ("6",)
     finally:
         conn.close()
 
@@ -481,6 +503,8 @@ async def test_sqlite_usage_audit_store_migrates_v4_without_losing_rows(tmp_path
 
         assert tokens["vlm_input"] == 11
         assert retrievals["find"] == 2
+        assert retrievals["observed_request_count"] == 0
+        assert retrievals["zero_result_rate"] is None
         assert any(row["session_commit"] == 3 for row in commits)
         assert before["items"][0]["request_id"] == "v4-request"
         assert before["items"][0]["error_code"] is None
@@ -521,9 +545,68 @@ async def test_sqlite_usage_audit_store_migrates_v4_without_losing_rows(tmp_path
         columns = {row[1] for row in conn.execute("PRAGMA table_info(request_audit)")}
         assert {"error_code", "error_message", "error_details"} <= columns
         version = conn.execute("SELECT value FROM _schema_meta WHERE key = 'version'").fetchone()
-        assert version == ("5",)
+        assert version == ("6",)
     finally:
         conn.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_usage_audit_store_migrates_v5_without_inventing_zero_results(tmp_path):
+    db_path = tmp_path / "usage.sqlite3"
+    _create_v5_usage_audit_db(db_path)
+
+    store = SQLiteUsageAuditStore(db_path)
+    await store.initialize()
+    try:
+        before = await store.get_today_retrievals(
+            account_id="acct-1", user_id="user-1", user_date="2026-05-12", tz=UTC
+        )
+        assert before == {
+            "find": 2,
+            "search": 0,
+            "total": 2,
+            "observed_request_count": 0,
+            "zero_result_count": 0,
+            "zero_result_rate": None,
+        }
+
+        await store.record_batch(
+            [
+                _event(
+                    "http.request",
+                    {
+                        "method": "POST",
+                        "route": "/api/v1/search/find",
+                        "status": "200",
+                        "duration_seconds": 0.01,
+                        "result_count": 0,
+                    },
+                )
+            ]
+        )
+        after = await store.get_today_retrievals(
+            account_id="acct-1", user_id="user-1", user_date="2026-05-12", tz=UTC
+        )
+        assert after == {
+            "find": 3,
+            "search": 0,
+            "total": 3,
+            "observed_request_count": 1,
+            "zero_result_count": 1,
+            "zero_result_rate": 1.0,
+        }
+    finally:
+        await store.close()
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT request_count, result_count, observed_request_count, zero_result_count "
+            "FROM usage_retrieval_hourly WHERE operation = 'find'"
+        ).fetchone()
+        assert row == (3, 7, 1, 1)
+        assert conn.execute(
+            "SELECT value FROM _schema_meta WHERE key = 'version'"
+        ).fetchone() == ("6",)
 
 
 @pytest.mark.asyncio
@@ -537,20 +620,20 @@ async def test_sqlite_usage_audit_store_rejects_unhandled_future_migration_witho
     await store.initialize()
     await store.close()
 
-    monkeypatch.setattr(sqlite_store_module, "SCHEMA_VERSION", 6)
+    monkeypatch.setattr(sqlite_store_module, "SCHEMA_VERSION", 7)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
         with pytest.raises(
             RuntimeError,
-            match="No usage/audit schema migration path from version 5 to 6",
+            match="No usage/audit schema migration path from version 6 to 7",
         ):
             SQLiteUsageAuditStore._migrate_legacy_sync(conn)
 
         assert conn.execute("SELECT COUNT(*) FROM request_audit").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM usage_token_hourly").fetchone()[0] == 1
         version = conn.execute("SELECT value FROM _schema_meta WHERE key = 'version'").fetchone()
-        assert version[0] == "5"
+        assert version[0] == "6"
     finally:
         conn.close()
 

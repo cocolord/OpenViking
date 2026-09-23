@@ -38,9 +38,16 @@ class RetrievalObserver(BaseObserver):
         stats = self._get_collector().snapshot()
 
         if stats.total_queries == 0:
-            return "No retrieval queries recorded."
+            window = [
+                {"Metric": "Window", "Value": "Since collector start"},
+                {"Metric": "Window Start (UTC)", "Value": stats.window_start_utc.isoformat()},
+                {"Metric": "Total Queries", "Value": 0},
+            ]
+            return f"{tabulate(window, headers='keys', tablefmt='pretty')}\nNo retrieval queries recorded."
 
         summary = [
+            {"Metric": "Window", "Value": "Since collector start"},
+            {"Metric": "Window Start (UTC)", "Value": stats.window_start_utc.isoformat()},
             {"Metric": "Total Queries", "Value": stats.total_queries},
             {"Metric": "Total Results", "Value": stats.total_results},
             {"Metric": "Avg Results/Query", "Value": f"{stats.avg_results_per_query:.1f}"},

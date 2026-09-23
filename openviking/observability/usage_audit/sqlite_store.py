@@ -72,7 +72,7 @@ class SQLiteUsageAuditStore:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA foreign_keys=ON")
-        # Preserve the compatible v4 layout through its additive migration.
+        # Preserve compatible hourly layouts through additive migrations.
         # Unknown newer transitions fail closed; older daily/local layouts
         # remain incompatible and use the reset path.
         self._migrate_legacy_sync(conn)
@@ -97,8 +97,13 @@ class SQLiteUsageAuditStore:
             )
         if current == SCHEMA_VERSION:
             return
-        if current == 4 and SCHEMA_VERSION == 5:
+        if current == 4:
             SQLiteUsageAuditStore._migrate_v4_to_v5_sync(conn)
+            current = 5
+        if current == 5 and SCHEMA_VERSION >= 6:
+            SQLiteUsageAuditStore._migrate_v5_to_v6_sync(conn)
+            current = 6
+        if current == SCHEMA_VERSION:
             return
         if current >= 4:
             raise RuntimeError(
@@ -121,6 +126,30 @@ class SQLiteUsageAuditStore:
             for name in ("error_code", "error_message", "error_details"):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE request_audit ADD COLUMN {name} TEXT")
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+    @staticmethod
+    def _migrate_v5_to_v6_sync(conn: sqlite3.Connection) -> None:
+        """Track only known-result requests; existing hourly rows remain unknown."""
+        table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'usage_retrieval_hourly'"
+        ).fetchone()
+        if table is None:
+            return
+        columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(usage_retrieval_hourly)")
+        }
+        conn.execute("BEGIN")
+        try:
+            for name in ("observed_request_count", "zero_result_count"):
+                if name not in columns:
+                    conn.execute(
+                        f"ALTER TABLE usage_retrieval_hourly "
+                        f"ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0"
+                    )
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
@@ -210,25 +239,30 @@ class SQLiteUsageAuditStore:
         )
 
     @staticmethod
-    def _write_retrieval_rows(conn, rows: dict[tuple, tuple[int, int]], updated_at: str) -> None:
+    def _write_retrieval_rows(
+        conn, rows: dict[tuple, tuple[int, int, int, int]], updated_at: str
+    ) -> None:
         conn.executemany(
             """
             INSERT INTO usage_retrieval_hourly (
                 account_id, user_id, date_utc, hour_utc,
-                operation, status, request_count, result_count, updated_at
+                operation, status, request_count, result_count,
+                observed_request_count, zero_result_count, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (
                 account_id, user_id, date_utc, hour_utc, operation, status
             )
             DO UPDATE SET
                 request_count = request_count + excluded.request_count,
                 result_count = result_count + excluded.result_count,
+                observed_request_count = observed_request_count + excluded.observed_request_count,
+                zero_result_count = zero_result_count + excluded.zero_result_count,
                 updated_at = excluded.updated_at
             """,
             [
-                (*key, count, result_count, updated_at)
-                for key, (count, result_count) in rows.items()
+                (*key, count, result_count, observed_count, zero_count, updated_at)
+                for key, (count, result_count, observed_count, zero_count) in rows.items()
             ],
         )
 
@@ -405,7 +439,7 @@ class SQLiteUsageAuditStore:
         user_date: str,
         tz: tzinfo,
         user_id: str | None = None,
-    ) -> dict[str, int]:
+    ) -> dict[str, int | float | None]:
         async with self._lock:
             return await asyncio.to_thread(
                 self._get_today_retrievals_sync, account_id, user_date, tz, user_id
@@ -413,18 +447,27 @@ class SQLiteUsageAuditStore:
 
     def _get_today_retrievals_sync(
         self, account_id: str, user_date: str, tz: tzinfo, user_id: str | None
-    ) -> dict[str, int]:
+    ) -> dict[str, int | float | None]:
         assert self._conn is not None
         day = date.fromisoformat(user_date)
         utc_start, utc_end = _user_day_window_utc(day, tz)
-        result = {"find": 0, "search": 0}
-        for operation, total in self._fetch_hourly_retrieval_rows(
+        request_counts = {"find": 0, "search": 0}
+        observed_count = 0
+        zero_count = 0
+        for operation, total, observed, zero in self._fetch_hourly_retrieval_rows(
             account_id, utc_start, utc_end, user_id=user_id
         ):
-            if operation in result:
-                result[operation] += total
-        result["total"] = sum(result.values())
-        return result
+            if operation in request_counts:
+                request_counts[operation] += total
+                observed_count += observed
+                zero_count += zero
+        return {
+            **request_counts,
+            "total": sum(request_counts.values()),
+            "observed_request_count": observed_count,
+            "zero_result_count": zero_count,
+            "zero_result_rate": round(zero_count / observed_count, 4) if observed_count else None,
+        }
 
     async def get_token_series(
         self,
@@ -628,15 +671,18 @@ class SQLiteUsageAuditStore:
         utc_end: datetime,
         *,
         user_id: str | None = None,
-    ) -> list[tuple[str, int]]:
-        """Return [(operation, total_request_count)] for successful retrievals."""
+    ) -> list[tuple[str, int, int, int]]:
+        """Return successful retrieval requests and known-result sample counts."""
         assert self._conn is not None
         utc_start_d = utc_start.date().isoformat()
         utc_end_d = utc_end.date().isoformat()
         user_filter, user_params = self._user_scope_sql(user_id)
         cur = self._conn.execute(
             """
-            SELECT operation, SUM(request_count) AS total
+            SELECT operation,
+                   SUM(request_count) AS total,
+                   SUM(observed_request_count) AS observed,
+                   SUM(zero_result_count) AS zero_results
             FROM usage_retrieval_hourly
             WHERE account_id = ?
               {user_filter}
@@ -656,7 +702,15 @@ class SQLiteUsageAuditStore:
                 utc_end.hour,
             ),
         )
-        return [(str(row["operation"]), int(row["total"] or 0)) for row in cur.fetchall()]
+        return [
+            (
+                str(row["operation"]),
+                int(row["total"] or 0),
+                int(row["observed"] or 0),
+                int(row["zero_results"] or 0),
+            )
+            for row in cur.fetchall()
+        ]
 
     @staticmethod
     def _user_scope_sql(user_id: str | None) -> tuple[str, tuple[str, ...]]:

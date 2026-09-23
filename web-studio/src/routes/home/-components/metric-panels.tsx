@@ -238,6 +238,12 @@ export function TodayRetrievalsPanel({
   t: HomeT
 }) {
   const total = asNumber(data?.total)
+  const observedCount = asNumber(data?.observed_request_count)
+  const zeroCount = asNumber(data?.zero_result_count)
+  const zeroRate =
+    observedCount > 0 && typeof data?.zero_result_rate === 'number'
+      ? `${(data.zero_result_rate * 100).toFixed(1)}%`
+      : '—'
   return (
     <MetricPanel
       description={t('todayRetrievals.description')}
@@ -260,6 +266,14 @@ export function TodayRetrievalsPanel({
           <DetailRow
             label={t('todayRetrievals.search')}
             value={formatNumber(data?.search)}
+          />
+          <DetailRow
+            label={t('todayRetrievals.zeroResultRate')}
+            value={zeroRate}
+          />
+          <DetailRow
+            label={t('todayRetrievals.zeroResultSample')}
+            value={`${formatNumber(zeroCount)} / ${formatNumber(observedCount)}`}
           />
         </>
       )}

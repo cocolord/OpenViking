@@ -9,6 +9,7 @@ via the observer API.
 
 import threading
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Dict
 
 
@@ -16,10 +17,12 @@ from typing import Dict
 class RetrievalStats:
     """Accumulated retrieval statistics.
 
-    All counters are monotonically increasing within a server lifetime.
+    All counters are monotonically increasing since collector initialization
+    (or its last explicit reset).
     The observer reads them to compute rates and averages.
     """
 
+    window_start_utc: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     total_queries: int = 0
     total_results: int = 0
     zero_result_queries: int = 0
@@ -59,6 +62,7 @@ class RetrievalStats:
     def to_dict(self) -> dict:
         """Serialize stats for API responses."""
         return {
+            "window_start_utc": self.window_start_utc.isoformat(),
             "total_queries": self.total_queries,
             "total_results": self.total_results,
             "zero_result_queries": self.zero_result_queries,

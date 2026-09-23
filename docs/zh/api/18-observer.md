@@ -301,6 +301,9 @@ curl -X GET http://localhost:1933/api/v1/observer/lock \
 #### 1. API 实现介绍
 
 获取检索质量指标。
+状态表中的 `Window` 和 `Window Start (UTC)` 标明统计范围；`Total Queries`
+是零结果率的样本数。这些计数来自进程内的检索统计器，重启或显式重置后重新累计，
+与 Usage Audit 中按用户和日期持久化的 HTTP `find/search` 零结果率不是同一口径。
 
 **代码入口**:
 - `openviking/server/routers/observer.py:observer_retrieval` - HTTP 路由

@@ -124,8 +124,37 @@ it('renders successful zero measurements after the response completes', async ()
       expect(
         within(panel).getByText('0', { selector: '.text-4xl span' }),
       ).toBeTruthy()
-      expect(within(panel).queryByText('—')).toBeNull()
+      if (title === 'todayRetrievals.title') {
+        expect(within(panel).getByText('—')).toBeTruthy()
+      } else {
+        expect(within(panel).queryByText('—')).toBeNull()
+      }
     }
+  } finally {
+    close()
+  }
+})
+
+it('shows the zero-result rate with its known-result sample size', async () => {
+  state.summary.mockResolvedValue({
+    context_counts: { total: 0 },
+    today_tokens: { total: 0 },
+    today_retrievals: {
+      find: 2,
+      search: 1,
+      total: 3,
+      observed_request_count: 2,
+      zero_result_count: 1,
+      zero_result_rate: 0.5,
+    },
+  })
+  const close = await renderHome()
+  try {
+    const panel = screen
+      .getByRole('heading', { name: 'todayRetrievals.title' })
+      .closest('section')!
+    await waitFor(() => expect(within(panel).getByText('50.0%')).toBeTruthy())
+    expect(within(panel).getByText('1 / 2')).toBeTruthy()
   } finally {
     close()
   }

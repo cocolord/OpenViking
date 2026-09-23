@@ -46,8 +46,8 @@ class UsageAuditStore(Protocol):
         user_date: str,
         tz: tzinfo,
         user_id: str | None = None,
-    ) -> dict[str, int]:
-        """Return successful find/search counts for one account/user scope and date."""
+    ) -> dict[str, int | float | None]:
+        """Return successful find/search counts and known-result zero-rate sample."""
 
     async def get_token_series(
         self,

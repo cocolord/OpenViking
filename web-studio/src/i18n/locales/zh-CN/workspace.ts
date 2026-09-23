@@ -171,6 +171,8 @@ const workspace = {
         totalQueries: '查询总数',
         totalResults: '结果总数',
         totalTime: '总耗时（秒）',
+        window: '统计窗口',
+        windowStartUtc: '窗口起点（UTC）',
         zeroResultQueries: '无结果查询次数',
         zeroResultRate: '无结果查询占比',
       },
@@ -197,6 +199,7 @@ const workspace = {
         configured: '已配置',
         error: '错误',
         ok: '正常',
+        sinceCollectorStart: '自本进程检索统计初始化起',
         total: '合计',
         unknown: '未知',
       },
@@ -1070,10 +1073,12 @@ const workspace = {
     requestFailed: '请求失败',
     todayRetrievals: {
       description:
-        '展示今日基础检索（find()）和增强检索（search()）的成功调用次数，每天零点刷新。',
+        '展示今日成功的 HTTP find/search 请求。零结果率只统计已记录最终返回条数的请求，升级前的历史请求不计入样本。',
       find: '基础检索',
       search: '增强检索',
       title: '今日检索次数',
+      zeroResultRate: '零结果率',
+      zeroResultSample: '零结果 / 有效样本',
     },
     todayTokens: {
       description: '展示今日实时 Token 用量，每天零点刷新。',

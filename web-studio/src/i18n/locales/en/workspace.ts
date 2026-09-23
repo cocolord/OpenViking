@@ -171,6 +171,8 @@ const workspace = {
         totalQueries: 'Total Queries',
         totalResults: 'Total Results',
         totalTime: 'Total Time (s)',
+        window: 'Window',
+        windowStartUtc: 'Window Start (UTC)',
         zeroResultQueries: 'Zero-Result Queries',
         zeroResultRate: 'Zero-Result Rate',
       },
@@ -197,6 +199,7 @@ const workspace = {
         configured: 'Configured',
         error: 'Error',
         ok: 'OK',
+        sinceCollectorStart: 'Since collector start',
         total: 'Total',
         unknown: 'Unknown',
       },
@@ -1114,10 +1117,12 @@ const workspace = {
     requestFailed: 'Request failed',
     todayRetrievals: {
       description:
-        'Shows successful semantic retrieval calls for find() and search() today. Resets at midnight.',
+        'Shows successful HTTP find/search requests today. The zero-result rate uses only requests with a recorded final result count; historical requests before this upgrade are excluded.',
       find: 'find',
       search: 'search',
       title: 'Retrievals Today',
+      zeroResultRate: 'Zero-result rate',
+      zeroResultSample: 'Zero results / known sample',
     },
     todayTokens: {
       description:

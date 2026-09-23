@@ -87,11 +87,13 @@ class TestRetrievalStatsCollector:
 
     def test_reset(self):
         collector = RetrievalStatsCollector()
+        start = collector.snapshot().window_start_utc
         collector.record_query("memory", 3, [0.9, 0.7, 0.5])
         collector.reset()
         stats = collector.snapshot()
         assert stats.total_queries == 0
         assert stats.total_results == 0
+        assert stats.window_start_utc >= start
 
     def test_snapshot_is_copy(self):
         collector = RetrievalStatsCollector()
@@ -149,6 +151,8 @@ class TestRetrievalObserver:
         observer = RetrievalObserver()
         table = observer.get_status_table()
         assert "No retrieval queries recorded" in table
+        assert "Since collector start" in table
+        assert "Window Start (UTC)" in table
 
     def test_status_table_with_data(self):
         collector = self._setup_collector()
@@ -158,6 +162,8 @@ class TestRetrievalObserver:
         table = observer.get_status_table()
         assert "Total Queries" in table
         assert "Zero-Result Rate" in table
+        assert "Since collector start" in table
+        assert "Window Start (UTC)" in table
         assert "memory" in table
         assert "resource" in table
 

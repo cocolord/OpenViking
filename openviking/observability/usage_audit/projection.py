@@ -38,7 +38,7 @@ class UsageAuditProjection:
     """Write-ready rows derived from a batch of observability events."""
 
     token_rows: dict[tuple, int] = field(default_factory=dict)
-    retrieval_rows: dict[tuple, tuple[int, int]] = field(default_factory=dict)
+    retrieval_rows: dict[tuple, tuple[int, int, int, int]] = field(default_factory=dict)
     context_rows: dict[tuple, int] = field(default_factory=dict)
     audit_rows: list[tuple] = field(default_factory=list)
     touched_audit_accounts: set[str] = field(default_factory=set)
@@ -77,7 +77,9 @@ def project_events(
     viewers from any region.
     """
     token_rows: defaultdict[tuple, int] = defaultdict(int)
-    retrieval_rows: defaultdict[tuple, tuple[int, int]] = defaultdict(lambda: (0, 0))
+    retrieval_rows: defaultdict[tuple, tuple[int, int, int, int]] = defaultdict(
+        lambda: (0, 0, 0, 0)
+    )
     context_rows: defaultdict[tuple, int] = defaultdict(int)
     audit_rows: list[tuple] = []
     touched_audit_accounts: set[str] = set()
@@ -213,7 +215,7 @@ def _project_http_request(
     event_date: str,
     hour: int,
     created_at: str,
-    retrieval_rows: defaultdict[tuple, tuple[int, int]],
+    retrieval_rows: defaultdict[tuple, tuple[int, int, int, int]],
     context_rows: defaultdict[tuple, int],
     audit_rows: list[tuple],
     touched_audit_accounts: set[str],
@@ -259,9 +261,21 @@ def _project_http_request(
             retrieval_operation,
             status,
         )
-        prev_count, prev_results = retrieval_rows[retrieval_key]
-        result_count = max(safe_int(payload.get("result_count")), 0) if status == "success" else 0
-        retrieval_rows[retrieval_key] = (prev_count + 1, prev_results + result_count)
+        prev_count, prev_results, prev_observed, prev_zero = retrieval_rows[retrieval_key]
+        raw_result_count = payload.get("result_count")
+        observed = (
+            status == "success"
+            and isinstance(raw_result_count, int)
+            and not isinstance(raw_result_count, bool)
+            and raw_result_count >= 0
+        )
+        result_count = max(safe_int(raw_result_count), 0) if status == "success" else 0
+        retrieval_rows[retrieval_key] = (
+            prev_count + 1,
+            prev_results + result_count,
+            prev_observed + int(observed),
+            prev_zero + int(observed and result_count == 0),
+        )
 
     context_operation = context_write_operation_for_http(method, route, status_code)
     if context_operation:

@@ -20,8 +20,11 @@ export type ConsoleTokenCounts = {
 
 export type ConsoleRetrievalCounts = {
   find?: number
+  observed_request_count?: number
   search?: number
   total?: number
+  zero_result_count?: number
+  zero_result_rate?: number | null
 }
 
 export type ConsoleDashboardSummaryResult = OvMaybeDisabled & {

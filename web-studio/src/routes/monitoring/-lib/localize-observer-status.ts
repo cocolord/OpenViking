@@ -46,6 +46,8 @@ const metricKeys = {
   'Total Queries': 'detail.metrics.totalQueries',
   'Total Results': 'detail.metrics.totalResults',
   'Total Time (s)': 'detail.metrics.totalTime',
+  Window: 'detail.metrics.window',
+  'Window Start (UTC)': 'detail.metrics.windowStartUtc',
   'Zero-Result Queries': 'detail.metrics.zeroResultQueries',
   'Zero-Result Rate': 'detail.metrics.zeroResultRate',
 } as const
@@ -100,6 +102,9 @@ function localizeCell(
     return translateMappedValue(cell.toLowerCase(), queueKeys, t)
   }
   if (header === 'Metric') return translateMappedValue(cell, metricKeys, t)
+  if (header === 'Value' && cell === 'Since collector start') {
+    return t('detail.values.sinceCollectorStart')
+  }
   if (header === 'Collection' && cell === 'TOTAL') {
     return t('detail.values.total')
   }

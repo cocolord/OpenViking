@@ -9,6 +9,8 @@ const translations: Record<string, string> = {
   'detail.columns.queries': '查询次数',
   'detail.columns.value': '数值',
   'detail.metrics.totalOperations': '操作总数',
+  'detail.metrics.window': '统计窗口',
+  'detail.values.sinceCollectorStart': '自本进程检索统计初始化起',
   'detail.statusText.mount': '挂载点：{{path}}（插件：{{plugin}}）',
   'detail.values.total': '合计',
   'detail.values.unknown': '未知',
@@ -42,6 +44,11 @@ describe('localizeObserverStatusBlocks', () => {
             ],
           },
           {
+            headers: ['Metric', 'Value'],
+            kind: 'table',
+            rows: [['Window', 'Since collector start']],
+          },
+          {
             kind: 'text',
             value: 'Mount: /local (plugin: localfs)',
           },
@@ -61,6 +68,11 @@ describe('localizeObserverStatusBlocks', () => {
           ['未知', '8'],
           ['resource', '4'],
         ],
+      },
+      {
+        headers: ['指标', '数值'],
+        kind: 'table',
+        rows: [['统计窗口', '自本进程检索统计初始化起']],
       },
       {
         kind: 'text',
