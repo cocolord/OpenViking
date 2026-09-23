@@ -882,9 +882,10 @@ class _AccessMixin:
             except Exception as exc:
                 if is_not_found_error(exc):
                     continue
-                if require_source:
-                    raise
-                return True
+                # A transient source failure cannot prove an object is live.
+                # Propagate it even for ls/glob instead of exposing an expired
+                # name while the TTL metadata is unreadable.
+                raise
             try:
                 if scope == "sessions":
                     metadata = json.loads(self._decode_bytes(raw))
@@ -913,9 +914,10 @@ class _AccessMixin:
             try:
                 record = await self.ttl_registry.get(ctx.account_id, object_uri)
             except Exception:
-                if require_source:
-                    raise
-                return True
+                # The metadata may already be gone after a partial strict
+                # delete. Do not expose its remaining subtree if the durable
+                # expiry record cannot be checked.
+                raise
             if record is not None and hidden_by_ttl(record.expires_at):
                 return False
         return not require_source

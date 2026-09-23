@@ -218,6 +218,25 @@ async def test_source_read_error_cannot_return_unverified_vector_content(setup):
 
 
 @pytest.mark.asyncio
+async def test_source_read_error_cannot_expose_event_name(setup):
+    s = setup
+    uri = ROOT + "/event.md"
+    s.source(uri, PAST)
+    s.fs._async_agfs.read = AsyncMock(side_effect=OSError("storage unavailable"))
+    with pytest.raises(OSError, match="storage unavailable"):
+        await s.fs._ttl_uri_visible(uri, s.ctx)
+
+
+@pytest.mark.asyncio
+async def test_partial_delete_registry_error_cannot_expose_session_subtree(setup):
+    s = setup
+    uri = "viking://user/alice/sessions/expired-session/messages.jsonl"
+    s.fs.ttl_registry.get = AsyncMock(side_effect=OSError("registry unavailable"))
+    with pytest.raises(OSError, match="registry unavailable"):
+        await s.fs._ttl_uri_visible(uri, s.ctx)
+
+
+@pytest.mark.asyncio
 async def test_backend_ignoring_exclusion_fails_without_looping_forever(setup):
     s = setup
     row = {"uri": ROOT + "/expired.md", "level": 2}
