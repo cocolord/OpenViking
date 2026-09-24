@@ -2094,7 +2094,8 @@ class VikingVectorIndexBackend:
         )
         # Model reranking needs semantic candidates; fuse once after reranking
         # and parent-score propagation in the retriever.
-        use_cloud_decay = self._backend_type in {"vikingdb", "volcengine"} and not defer_fusion
+        account_backend = await self._get_backend_for_context(ctx)
+        use_cloud_decay = account_backend._mode in {"vikingdb", "volcengine"} and not defer_fusion
         advance = (
             {
                 "post_process_ops": build_time_decay_post_process_ops(

@@ -247,7 +247,10 @@ class TestEmbeddingTextConstruction:
 
         embedding_msg = updater._vikingdb.enqueue_embedding_msg.await_args.args[0]
         assert embedding_msg.context_data["search_tags"] == [experience_source_tag(experience_uri)]
-        assert embedding_msg.context_data["_upsert_options"] == {"search_tag_mode": "append"}
+        assert embedding_msg.context_data["_upsert_options"] == {
+            "search_tag_mode": "append",
+            "extracted_memory_type": "trajectories",
+        }
 
     @pytest.mark.asyncio
     async def test_logs_final_embedding_text_before_vectorization(self):

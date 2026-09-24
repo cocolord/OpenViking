@@ -1,9 +1,8 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: Apache-2.0
 
-from datetime import datetime, timezone
-
 import threading
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -84,6 +83,9 @@ def _backend_with_type(backend_type: str) -> VikingVectorIndexBackend:
     backend = object.__new__(VikingVectorIndexBackend)
     backend.acl_manager = None
     backend._backend_type = backend_type
+    backend._get_backend_for_context = AsyncMock(
+        return_value=SimpleNamespace(_mode=backend_type)
+    )
     return backend
 
 
@@ -828,6 +830,31 @@ async def test_decay_leaves_untagged_user_and_peer_events_unchanged(backend_type
 @pytest.mark.parametrize("backend_type", ["local", "cuvs", "http", "opengauss"])
 async def test_non_cloud_decay_never_passes_advanced_ranking_options(backend_type):
     backend = _backend_with_type(backend_type)
+    calls = []
+
+    async def fake_search(**kwargs):
+        calls.append(kwargs)
+        return []
+
+    backend.search = fake_search
+    await backend.search_in_tenant(
+        ctx=_ctx(),
+        query_vector=[1.0],
+        context_type="memory",
+        limit=3,
+        events_time_decay_protection="0",
+        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
+    )
+
+    assert len(calls) == 2
+    assert all(call["advance"] is None for call in calls)
+    assert all(call["return_detail_info"] is False for call in calls)
+
+
+@pytest.mark.asyncio
+async def test_decay_uses_the_resolved_account_backend_capabilities():
+    backend = _backend_with_type("vikingdb")
+    backend._get_backend_for_context = AsyncMock(return_value=SimpleNamespace(_mode="http"))
     calls = []
 
     async def fake_search(**kwargs):

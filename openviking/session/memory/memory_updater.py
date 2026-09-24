@@ -1517,6 +1517,10 @@ class MemoryUpdater:
                             embedding_msg.context_data["_upsert_options"] = {
                                 "search_tag_mode": "append"
                             }
+                            if memory_type:
+                                embedding_msg.context_data["_upsert_options"][
+                                    "extracted_memory_type"
+                                ] = memory_type
                     if embedding_msg.telemetry_id:
                         request_wait_tracker.register_embedding_root(
                             embedding_msg.telemetry_id, embedding_msg.id
