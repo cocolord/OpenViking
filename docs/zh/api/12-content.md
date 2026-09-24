@@ -829,15 +829,15 @@ GET /api/v1/tasks?task_type=admin_reindex&resource_id=viking://resources
 
 ## 文档到期时间
 
-`GET /api/v1/content/ttl?uri=...` 返回 event 或 resource 的冻结期限，未纳管对象仅返回 `uri`。`PATCH /api/v1/content/ttl` 调整一个未过期、已纳管文档的清理时间：
+`GET /api/v1/content/ttl?uri=...` 返回精确 event 或 resource 文件实际生效的期限，未纳管文件仅返回 `uri`。resource 目录不是带期限对象，传入目录会被拒绝。`PATCH /api/v1/content/ttl` 调整一个未过期、已纳管文件的清理时间：
 
 ```json
 {"uri": "viking://user/alice/memories/events/example.txt", "expires_at": "2027-01-01T00:00:00Z"}
 ```
 
-新期限必须为未来的 ISO 8601 时间。服务端在同一对象锁内重新校验权限、对象身份和当前期限，只修改 `expires_at` 及持久化清理登记；保留正文、`received_at`、`ttl_days`、`ttl_generation`。旧清理任务重新检查源期限后跳过已延长的对象，不重新提取记忆或生成向量。
+新期限必须为未来的 ISO 8601 时间。服务端在同一对象锁内重新校验权限、对象身份和当前期限，只修改 `expires_at` 及持久化清理登记；保留正文、`received_at`、`ttl_days`、`ttl_generation`。旧清理任务重新检查源期限后跳过已延长的对象，不重新提取记忆或生成向量。之后若内容成功更新，相对 TTL 会从该更新时间起按文件已保存的 `ttl_days` 顺延；绝对期限保持不变。
 
-资源子文件继承导入根时，返回 `owner_uri`，修改影响该导入根拥有的文档树。若独立子资源受父资源更早期限约束，返回有效 `expires_at` 和自身 `owner_expires_at`；需先延长父资源，才能将子资源延长到其期限之后。此接口不恢复已过期对象、不改变目录默认、不为历史未纳管文档新增 TTL。
+resource 期限始终属于精确文件。修改一个文件不会影响兄弟文件、父目录或目录默认策略；后续新文件的默认值应通过 resource 配置接口调整。此接口不恢复已过期对象，也不为历史未纳管文档新增 TTL。
 
 ```bash
 ov ttl get viking://user/alice/memories/events/example.txt

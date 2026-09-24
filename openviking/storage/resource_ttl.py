@@ -1,20 +1,24 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
-"""Resource source metadata adapter for the common TTL lifecycle.
+"""Resource file metadata adapter for the common TTL lifecycle.
 
-A parsed document owns its root subtree; a flat file owns only its own sidecar.
-Source bytes and generated summaries never serve as lifecycle metadata.
+Directory policies provide defaults, but directories are not lifecycle owners.
+Each source file owns an independent sidecar so its relative deadline follows
+that file's latest content update and cleanup never removes a live sibling.
+Generated summaries never serve as lifecycle metadata.
 """
 
 from __future__ import annotations
 
 import json
+from typing import Mapping
 
+from openviking.concurrency import bounded_map
 from openviking.config.ttl import resolve_ttl_config
 from openviking.core.namespace import classify_uri
 from openviking.core.ttl import (
-    OBJECT_TYPE_RESOURCE,
     OBJECT_TYPE_RESOURCE_FILE,
+    apply_ttl_fields,
     freeze_ttl_fields,
     hidden_by_ttl,
     ttl_enabled,
@@ -28,7 +32,7 @@ from openviking_cli.exceptions import ConflictError, InvalidArgumentError, NotFo
 
 
 def resource_ttl_targets(uri: str):
-    """Yield the exact file and containing document roots, nearest first."""
+    """Yield the exact resource file owner, never an ancestor directory."""
     if ttl_scope_for_uri(uri) != "resources":
         return
     shape = classify_uri(uri)
@@ -37,8 +41,6 @@ def resource_ttl_targets(uri: str):
     if len(parts) <= root_depth:
         return
     yield OBJECT_TYPE_RESOURCE_FILE, uri.rstrip("/")
-    for depth in range(len(parts), root_depth, -1):
-        yield OBJECT_TYPE_RESOURCE, "viking://" + "/".join(parts[:depth])
 
 
 async def read_resource_fields(fs, object_type: str, uri: str, *, ctx):
@@ -62,20 +64,13 @@ async def read_resource_fields(fs, object_type: str, uri: str, *, ctx):
 
 
 async def resource_ttl_fields(fs, uri: str, *, ctx) -> dict:
-    """Return the nearest object's incarnation; parents still constrain visibility."""
+    """Return the exact file's lifecycle fields."""
     if not ttl_enabled() and not await fs.ttl_registry.account_may_have_records(ctx.account_id):
         return {}
-    result = {}
     for object_type, owner in resource_ttl_targets(uri):
         fields = await read_resource_fields(fs, object_type, owner, ctx=ctx)
-        if fields is None:
-            continue
-        if not result:
-            result = dict(fields)
-        expiry = fields.get("expires_at")
-        if expiry and (not result.get("expires_at") or expiry < result["expires_at"]):
-            result["expires_at"] = expiry
-    return result
+        return dict(fields) if fields is not None else {}
+    return {}
 
 
 async def resource_ttl_visible(fs, uri: str, *, ctx, require_source=False) -> bool:
@@ -100,26 +95,61 @@ async def resource_ttl_visible(fs, uri: str, *, ctx, require_source=False) -> bo
 
 
 async def prepare_resource_ttl(
-    fs, uri: str, *, is_dir: bool, existing: bool, ctx, lease_ref, resource_ttl=None
+    fs,
+    uri: str,
+    *,
+    is_dir: bool,
+    existing: bool,
+    ctx,
+    lease_ref,
+    resource_ttl=None,
+    received_at=None,
+    content_md5=None,
 ) -> dict:
-    """Publish metadata/registration before content under the import's source lease.
+    """Create or renew one resource file's independent TTL snapshot.
 
-    Re-importing preserves the old snapshot, even when it had no TTL. Only a new
-    resource freezes current policy. A failed content write leaves retryable
-    metadata, so retrying cannot accidentally extend the deadline.
+    A directory only supplies configuration defaults and therefore receives no
+    metadata or cleanup registration. Existing relative snapshots keep their
+    original duration and renew from ``received_at``; explicit absolute
+    deadlines remain unchanged. Legacy files with no snapshot do not become
+    managed merely because a directory policy changed.
     """
-    if ttl_scope_for_uri(uri) != "resources":
+    if ttl_scope_for_uri(uri) != "resources" or is_dir:
         return {}
-    object_type = OBJECT_TYPE_RESOURCE if is_dir else OBJECT_TYPE_RESOURCE_FILE
-    # Check the object itself as well as its ancestors: partial cleanup can
-    # leave a tombstone after removing metadata, while vector deletion retries.
-    if not await resource_ttl_visible(fs, uri, ctx=ctx):
-        raise NotFoundError(uri, "resource")
+    # Preserve duck-typed/third-party VikingFS compatibility when no TTL
+    # persistence backend is available. These facades historically supported
+    # ordinary resource writes without implementing raw AGFS or a registry.
+    if not hasattr(getattr(fs, "_async_agfs", None), "stat") or not hasattr(
+        fs, "ttl_registry"
+    ):
+        return {}
+    object_type = OBJECT_TYPE_RESOURCE_FILE
     fields = await read_resource_fields(fs, object_type, uri, ctx=ctx)
-    if fields is not None:
-        return fields
     pending = await fs.ttl_registry.get(ctx.account_id, uri)
-    if pending is not None:
+    expired_snapshot = (
+        fields is not None and hidden_by_ttl(fields.get("expires_at"))
+    ) or (fields is None and pending is not None and hidden_by_ttl(pending.expires_at))
+    if expired_snapshot and pending is not None:
+        # Physical cleanup is still in flight. Never let a writer race the old
+        # generation; once cleanup removes the registry entry, a changed Watch
+        # source may deliberately establish a new incarnation.
+        raise NotFoundError(uri, "resource")
+    if fields is not None and not expired_snapshot:
+        if existing:
+            renewed = apply_ttl_fields(
+                uri, {}, existing_fields=fields, received_at=received_at
+            )
+            if content_md5:
+                renewed["content_md5"] = content_md5
+            elif fields.get("content_md5"):
+                renewed["content_md5"] = fields["content_md5"]
+            if renewed != fields:
+                await write_resource_fields(
+                    fs, object_type, uri, renewed, ctx=ctx, lease_ref=lease_ref
+                )
+                return renewed
+        return fields
+    if pending is not None and not expired_snapshot:
         if pending.object_type != object_type:
             raise ConflictError("resource TTL write is pending for a different object type")
         # A crash between registry publication and metadata publication must
@@ -127,17 +157,62 @@ async def prepare_resource_ttl(
         fields = {"expires_at": pending.expires_at, "ttl_generation": pending.generation}
         await write_resource_fields(fs, object_type, uri, fields, ctx=ctx, lease_ref=lease_ref)
         return fields
-    parent_uri = uri.rsplit("/", 1)[0]
-    parent_fields = await resource_ttl_fields(fs, parent_uri, ctx=ctx)
-    if parent_fields and not resource_ttl:
-        # A document's children share its lifecycle; do not register each chunk.
-        return parent_fields
     config = await resolve_ttl_config(fs, ctx.account_id) if not existing else None
-    fields = None if existing else freeze_ttl_fields(uri, resource_ttl=resource_ttl, config=config)
+    fields = (
+        None
+        if existing
+        else freeze_ttl_fields(
+            uri,
+            received_at=received_at,
+            resource_ttl=resource_ttl,
+            config=config,
+        )
+    )
     if fields is None:
+        if expired_snapshot:
+            # A direct create or a Watch-observed content change is a new
+            # incarnation. If policy is now disabled, remove the tombstone so
+            # the newly written file is visible and unmanaged.
+            await fs._remove_resource_file_metadata(uri, ctx=ctx, lease_ref=lease_ref)
         return {}
+    if content_md5:
+        fields["content_md5"] = content_md5
     await write_resource_fields(fs, object_type, uri, fields, ctx=ctx, lease_ref=lease_ref)
     return fields
+
+
+async def unchanged_expired_resource_paths(
+    fs,
+    root_uri: str,
+    file_md5s: Mapping[str, str],
+    *,
+    ctx,
+    concurrency: int = 64,
+) -> set[str]:
+    """Return Watch artifact files that match durable expiry tombstones.
+
+    A directory Watch must keep updating live files, but polling an unchanged
+    external source must not recreate a file that TTL already removed. Cleanup
+    retains only a hidden sidecar containing the last successful content MD5;
+    changed source bytes intentionally create a new file incarnation.
+    """
+
+    async def inspect(item: tuple[str, str]) -> str | None:
+        rel_path, expected_md5 = item
+        uri = f"{root_uri.rstrip('/')}/{rel_path}" if rel_path else root_uri.rstrip("/")
+        fields = await read_resource_fields(fs, OBJECT_TYPE_RESOURCE_FILE, uri, ctx=ctx)
+        if (
+            fields is not None
+            and hidden_by_ttl(fields.get("expires_at"))
+            and fields.get("content_md5") == expected_md5
+        ):
+            return rel_path
+        return None
+
+    matches = await bounded_map(
+        file_md5s.items(), inspect, concurrency=max(1, min(concurrency, len(file_md5s) or 1))
+    )
+    return {path for path in matches if path is not None}
 
 
 async def write_resource_fields(fs, object_type, uri, fields, *, ctx, lease_ref):

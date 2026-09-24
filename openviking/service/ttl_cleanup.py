@@ -39,13 +39,25 @@ from openviking.session.ttl_fence import reconcile_session_ttl
 from openviking.storage.errors import StorageException, VikingDBException
 from openviking.storage.queuefs.named_queue import DequeueHandlerBase
 from openviking.storage.queuefs.process_result import ProcessResult
-from openviking.storage.ttl_registry import TTLRecord
+from openviking.storage.ttl_registry import TTLRecord, cleanup_not_before
+from openviking.utils.content_hash import content_md5
 from openviking.utils.time_utils import format_iso8601
 from openviking_cli.exceptions import InvalidArgumentError, PermissionDeniedError
 from openviking_cli.session.user_id import UserIdentifier
+from openviking_cli.utils.config import get_openviking_config
 from openviking_cli.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+class _CleanupDeferred(Exception):
+    def __init__(self, run_at: str, reason: str):
+        super().__init__(reason)
+        self.run_at = run_at
+
+
+def _cleanup_settings():
+    return get_openviking_config().ttl_cleanup
 
 
 def _cleanup_task_id(record: TTLRecord, *, attempt: int = 0) -> str:
@@ -93,6 +105,7 @@ class TTLCleanupService:
     ) -> None:
         self._service = service
         self._service_loop = service_loop
+        self._closed = False
         self._scheduler = TTLCleanupScheduler(service, check_interval=check_interval)
 
     async def initialize(self) -> None:
@@ -102,7 +115,38 @@ class TTLCleanupService:
         await self._scheduler.start()
 
     async def close(self) -> None:
+        self._closed = True
         await self._scheduler.stop()
+
+    def _check_running(self) -> None:
+        config = _cleanup_settings()
+        if getattr(self, "_closed", False) or not config.enabled:
+            raise _CleanupDeferred(
+                format_iso8601(
+                    datetime.now(timezone.utc) + timedelta(seconds=config.check_interval_seconds)
+                ),
+                "paused",
+            )
+
+    async def _defer(self, record, message, tracker, owner, deferred):
+        retry_count = int(message.get("retry_count", 0))
+        saved = await self._service.viking_fs.ttl_registry.defer_retry(
+            record,
+            retry_count=retry_count,
+            expected_retry_count=retry_count,
+            task_id=message["task_id"],
+            next_retry_at=deferred.run_at,
+            verify_only=bool(message.get("verify_only", False)),
+        )
+        if not saved:
+            await tracker.complete(
+                message["task_id"],
+                {"deleted": False, "skipped": "superseded"},
+                **owner,
+            )
+            return ProcessResult.success()
+        await tracker.update_stage(message["task_id"], str(deferred), **owner)
+        return ProcessResult.requeued()
 
     async def _process(self, message: dict[str, Any]) -> ProcessResult:
         """Settle or durably replace one cleanup delivery."""
@@ -136,10 +180,15 @@ class TTLCleanupService:
                 expected_retry_count=retry_count - 1,
                 task_id=_cleanup_task_id(record, attempt=retry_count),
                 next_retry_at=format_iso8601(datetime.now(timezone.utc) + timedelta(days=1)),
+                verify_only=bool(message.get("verify_only", False)),
             )
             return ProcessResult.requeued()
 
-        result = await run_to_completion(lambda: self._run_delivery(record, message))
+        try:
+            self._check_running()
+            result = await run_to_completion(lambda: self._run_delivery(record, message))
+        except _CleanupDeferred as deferred:
+            return await self._defer(record, message, tracker, owner, deferred)
         if result is None:
             return ProcessResult.requeued()
 
@@ -240,6 +289,8 @@ class TTLCleanupService:
                 return await self._cleanup_record(
                     scheduled, ctx, lease, verify_only=message["verify_only"]
                 )
+            except _CleanupDeferred:
+                raise
             except Exception as exc:
                 await self._defer_retry(scheduled, message, exc)
                 return None
@@ -260,9 +311,7 @@ class TTLCleanupService:
                 [
                     {
                         "path": object_path,
-                        "kind": "tree"
-                        if scheduled.object_type == OBJECT_TYPE_RESOURCE
-                        else "exact",
+                        "kind": "exact",
                     },
                     *(
                         [
@@ -274,7 +323,7 @@ class TTLCleanupService:
                                 "kind": "exact",
                             }
                         ]
-                        if scheduled.object_type == OBJECT_TYPE_RESOURCE_FILE
+                        if scheduled.object_type in {OBJECT_TYPE_RESOURCE, OBJECT_TYPE_RESOURCE_FILE}
                         else []
                     ),
                 ]
@@ -282,11 +331,35 @@ class TTLCleanupService:
         return ctx, lease
 
     async def _cleanup_record(
-        self, scheduled: TTLRecord, ctx: RequestContext, lease: Any, *, verify_only: bool = False
+        self,
+        scheduled: TTLRecord,
+        ctx: Optional[RequestContext] = None,
+        lease: Any = None,
+        *,
+        verify_only: bool = False,
     ) -> dict[str, Any]:
         """Strictly delete one generation under the caller's object lock."""
+        if ctx is None and lease is None:
+            owned_ctx, owned_lease = await self._acquire_object_lock(scheduled)
+            try:
+                return await self._cleanup_record(
+                    scheduled,
+                    owned_ctx,
+                    owned_lease,
+                    verify_only=verify_only,
+                )
+            finally:
+                await self._service.viking_fs._async_agfs.pathlock_release(owned_lease)
+        if ctx is None or lease is None:
+            raise ValueError("ctx and lease must be provided together")
+
         viking_fs = self._service.viking_fs
         registry = viking_fs.ttl_registry
+        self._check_running()
+        registered = await registry.get(scheduled.account_id, scheduled.object_uri)
+        if registered is None or registered.generation != scheduled.generation:
+            return {"deleted": False, "skipped": "stale_registry_generation"}
+
         if scheduled.object_type == OBJECT_TYPE_SESSION:
             await reconcile_session_ttl(
                 viking_fs,
@@ -309,21 +382,73 @@ class TTLCleanupService:
                 )
             return {"deleted": False, "skipped": "stale_object_generation"}
         if live is not None and not hidden_by_ttl(live.expires_at):
-            if live.expires_at != scheduled.expires_at:
+            if live.expires_at != registered.expires_at:
                 await registry.upsert(live)
             return {"deleted": False, "skipped": "renewed"}
+
+        run_at = cleanup_not_before(live or registered)
+        if not hidden_by_ttl(run_at):
+            raise _CleanupDeferred(run_at, "waiting_cleanup_window")
+
+        if scheduled.object_type == OBJECT_TYPE_RESOURCE:
+            # Older builds registered a directory as one lifecycle owner. A
+            # directory is now only a default-policy boundary, so retire only
+            # that legacy fence and never recurse into independently-lived files.
+            metadata_uri = ttl_metadata_uri(scheduled.object_type, scheduled.object_uri)
+            try:
+                await viking_fs.remove_files(metadata_uri, ctx=ctx, lease_ref=lease)
+            except Exception as exc:
+                if not is_storage_not_found(exc):
+                    raise
+            await registry.remove_if_generation(
+                scheduled.account_id, scheduled.object_uri, scheduled.generation
+            )
+            return {"deleted": False, "skipped": "legacy_resource_directory"}
+
+        if scheduled.object_type == OBJECT_TYPE_RESOURCE_FILE and live is not None:
+            # Retain a source fingerprint in the sidecar tombstone. Watch skips
+            # unchanged expired sources but accepts a genuinely updated version.
+            from openviking.storage.resource_ttl import (
+                read_resource_fields,
+                write_resource_fields,
+            )
+
+            try:
+                fields = await read_resource_fields(
+                    viking_fs, OBJECT_TYPE_RESOURCE_FILE, scheduled.object_uri, ctx=ctx
+                )
+                if fields is not None and not fields.get("content_md5"):
+                    read_bytes = getattr(viking_fs, "read_file_bytes", None)
+                    if not callable(read_bytes):
+                        raise AttributeError("binary resource reads are unavailable")
+                    raw = await read_bytes(scheduled.object_uri, ctx=ctx, include_expired=True)
+                    fields["content_md5"] = content_md5(raw)
+                    await write_resource_fields(
+                        viking_fs,
+                        OBJECT_TYPE_RESOURCE_FILE,
+                        scheduled.object_uri,
+                        fields,
+                        ctx=ctx,
+                        lease_ref=lease,
+                    )
+            except Exception as exc:
+                logger.debug(
+                    "Unable to persist TTL tombstone fingerprint for %s: %s",
+                    scheduled.object_uri,
+                    exc,
+                )
 
         # Missing source still requires strict vector cleanup.  Passing the
         # already-held lease makes the live re-check and the whole delete
         # one critical section; writers cannot renew or recreate between.
         remove = (
             self._service.fs.rm
-            if scheduled.object_type in {OBJECT_TYPE_RESOURCE, OBJECT_TYPE_RESOURCE_FILE}
+            if scheduled.object_type == OBJECT_TYPE_RESOURCE_FILE
             else viking_fs.rm
         )
         await remove(
             scheduled.object_uri,
-            recursive=scheduled.object_type in {OBJECT_TYPE_SESSION, OBJECT_TYPE_RESOURCE},
+            recursive=scheduled.object_type == OBJECT_TYPE_SESSION,
             ctx=ctx,
             lease_ref=lease,
             strict=True,
@@ -333,7 +458,10 @@ class TTLCleanupService:
         removed = await registry.remove_if_generation(
             scheduled.account_id, scheduled.object_uri, scheduled.generation
         )
-        if not removed:
+        if (
+            not removed
+            and await registry.get(scheduled.account_id, scheduled.object_uri) is not None
+        ):
             raise RuntimeError(
                 f"TTL registry record changed before cleanup completion: {scheduled.object_uri}"
             )
@@ -371,15 +499,9 @@ class TTLCleanupService:
 
 
 class TTLCleanupScheduler(PeriodicTask):
-    """Drain daily UTC cleanup batches and due retries through the shared queue.
-
-    Visibility follows expires_at immediately. First deletion attempts are
-    admitted at the next UTC midnight; polling only advances that day's backlog
-    and retries. The persisted due index also resumes work after a restart.
-    """
+    """Enqueue due records after each object's stable cleanup jitter window."""
 
     DEFAULT_CHECK_INTERVAL = 30.0
-    BATCH_SIZE = 100
 
     def __init__(
         self,
@@ -389,41 +511,41 @@ class TTLCleanupScheduler(PeriodicTask):
         sleep: Any = asyncio.sleep,
     ) -> None:
         self._service = service
+        self._interval_override = check_interval
         self._check_interval = (
             self.DEFAULT_CHECK_INTERVAL if check_interval is None else float(check_interval)
         )
         super().__init__(interval=self._check_interval, sleep=sleep)
 
+    def _next_interval(self) -> float:
+        config = _cleanup_settings()
+        interval = (
+            config.check_interval_seconds
+            if self._interval_override is None
+            else self._interval_override
+        )
+        return interval + random.uniform(0.0, config.scan_jitter_seconds)
+
     async def _scan_once(self) -> None:
+        config = _cleanup_settings()
+        if not config.enabled:
+            return
         queue_manager = self._service._queue_manager
         queue = queue_manager.get_queue(queue_manager.TTL_CLEANUP)
         # Drain the durable queue before leasing another page. Otherwise a slow
         # backend can accumulate repeated deliveries after claim leases expire.
-        status = await queue.get_status()
-        if status.pending or status.in_progress:
-            return
-        now = datetime.now(timezone.utc)
-        cutoff = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        get_status = getattr(queue, "get_status", None)
+        if callable(get_status):
+            status = await get_status()
+            if status.pending or status.in_progress:
+                return
         scheduled = 0
-        deferred = 0
-        registry = self._service.viking_fs.ttl_registry
-        async for record, payload in registry.claim_due(
-            now=now,
-            limit=self.BATCH_SIZE,
-            max_bytes=1_048_576,
-            time_budget=5.0,
+        async for record, payload in self._service.viking_fs.ttl_registry.claim_due(
+            now=datetime.now(timezone.utc),
+            limit=config.batch_size,
+            max_bytes=config.max_batch_bytes,
+            time_budget=config.scan_time_budget_seconds,
         ):
-            if not payload.get("retry_count") and not hidden_by_ttl(record.expires_at, now=cutoff):
-                # Reuse the delayed index for the next daily batch, including
-                # records already persisted by the former immediate scheduler.
-                await registry.defer_retry(
-                    record,
-                    retry_count=0,
-                    task_id=payload.get("task_id") or _cleanup_task_id(record),
-                    next_retry_at=format_iso8601(cutoff + timedelta(days=1)),
-                )
-                deferred += 1
-                continue
             await queue.enqueue(
                 _ttl_cleanup_message(
                     record=record,
@@ -433,13 +555,8 @@ class TTLCleanupScheduler(PeriodicTask):
                 )
             )
             scheduled += 1
-        if scheduled or deferred:
-            logger.info(
-                "TTLCleanupScheduler cutoff=%s scheduled=%d deferred=%d",
-                format_iso8601(cutoff),
-                scheduled,
-                deferred,
-            )
+        if scheduled:
+            logger.info("TTLCleanupScheduler scheduled=%d", scheduled)
 
 
 class _TTLCleanupProcessor(DequeueHandlerBase):

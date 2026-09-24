@@ -34,7 +34,7 @@ class PeriodicTask:
     async def _run_loop(self):
         while self._running:
             try:
-                await self._sleep(self._check_interval)
+                await self._sleep(self._next_interval())
                 await self._scan_once()
             except asyncio.CancelledError:
                 break
@@ -43,3 +43,6 @@ class PeriodicTask:
 
     async def _scan_once(self):
         raise NotImplementedError
+
+    def _next_interval(self) -> float:
+        return self._check_interval

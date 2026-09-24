@@ -15,9 +15,9 @@ from typing import Optional
 from openviking.config.account_config import AccountConfig
 from openviking.config.assembly import build_config_source, resolve_config_source_settings
 from openviking.config.manager import RuntimeConfigManager
-from openviking.config.merge import apply_three_state_patch
 from openviking.config.source.base import ConfigSource
 from openviking.config.source.file_source import FileConfigSource
+from openviking.config.ttl import effective_ttl_config, merge_runtime_settings
 from openviking.config.validate import normalize_config_keys, validate_patch
 from openviking.pyagfs import AsyncAGFSClient
 from openviking_cli.utils.config import get_openviking_config, set_openviking_config
@@ -45,7 +45,7 @@ def _build_cluster(old: OpenVikingConfig, override: dict) -> OpenVikingConfig:
     stored override may contain top-level fields from a newer binary, so that
     runtime-only rebuild intentionally ignores those fields.
     """
-    merged = apply_three_state_patch(
+    merged = merge_runtime_settings(
         old.model_dump(by_alias=True, exclude_unset=True),
         normalize_config_keys(OpenVikingConfig, override or {}),
     )
@@ -111,6 +111,8 @@ def manager_over_source(
         set_config=set_openviking_config,
         build_config=_build_cluster,
         build_account=_build_account,
+        merge_override=merge_runtime_settings,
+        validate_account_effective=effective_ttl_config,
         validate_request=_validate_request,
         normalize_request=lambda patch, account: normalize_config_keys(
             AccountConfig if account else OpenVikingConfig, patch

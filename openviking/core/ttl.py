@@ -3,8 +3,9 @@
 """Central TTL resolution: map an object URI to its expiry.
 
 This is the single seam that turns a canonical Viking URI plus the cluster TTL
-config into a frozen ``expires_at`` at object-creation time. Every writer that
-freezes TTL (events via the memory path, sessions via SessionMeta) and the
+config into an ``expires_at``. Relative TTL is based on the latest successful
+content update; an explicit absolute deadline remains fixed. Every writer that
+owns TTL (events via the memory path, sessions via SessionMeta) and the
 background cleanup scanner go through here so the scope rules stay in one place.
 
 TTL is default OFF and strictly scoped to four directory kinds:
@@ -15,8 +16,10 @@ TTL is default OFF and strictly scoped to four directory kinds:
 - ``sessions``     -> ``viking://user/{uid}/sessions/{sid}...``
 
 Day granularity is expressed as ``ttl_days`` whole days after ``received_at``
-(N x 24h in UTC). ``expires_at`` is authoritative for both the read barrier and
-the cleanup scan.
+(N x 24h in UTC). For compatibility the persisted field is still named
+``received_at``; for a relative policy it records the update timestamp used to
+derive the current deadline. ``expires_at`` is authoritative for both the read
+barrier and the cleanup scan.
 """
 
 from __future__ import annotations
@@ -143,11 +146,11 @@ def freeze_ttl_fields(
     config: Optional[TTLConfig] = None,
     resource_ttl: Optional[dict] = None,
 ) -> Optional[dict]:
-    """Compute the frozen TTL snapshot for a new object, or ``None`` when off.
+    """Compute the initial TTL snapshot for a new object, or ``None`` when off.
 
     Returns a dict with RFC 3339 ``received_at``/``expires_at`` strings and the
-    integer ``ttl_days`` actually applied. Callers persist this snapshot verbatim
-    at creation time and never recompute it from later config changes.
+    integer ``ttl_days`` actually applied. Later config changes do not alter the
+    snapshot duration; relative objects renew it from successful content updates.
     """
     policy = None
     if ttl_scope_for_uri(uri) == "resources":
@@ -188,12 +191,14 @@ def apply_ttl_fields(
     received_at: Optional[datetime] = None,
     config: Optional[TTLConfig] = None,
 ) -> dict[str, Any]:
-    """Return metadata with system-owned TTL fields frozen or preserved.
+    """Return metadata with system-owned TTL fields created or renewed.
 
     On creation (``existing_fields is None``), caller-provided TTL fields are
     discarded and a snapshot is derived from the effective policy. On update,
-    the existing object's fields are copied verbatim. This prevents public and
-    LLM write paths from choosing or changing expiry independently.
+    a relative snapshot is renewed from the successful content-update time
+    while retaining its duration and incarnation fence. An explicit absolute
+    deadline is copied verbatim. Public and LLM write paths therefore cannot
+    choose expiry independently.
     """
     result = {key: value for key, value in metadata.items() if key not in TTL_FIELD_NAMES}
     if existing_fields is None:
@@ -201,10 +206,40 @@ def apply_ttl_fields(
         if snapshot:
             result.update(snapshot)
         return result
-    for field in TTL_FIELD_NAMES:
-        value = existing_fields.get(field)
-        if value is not None and value != "":
-            result[field] = value
+    existing = {
+        field: existing_fields.get(field)
+        for field in TTL_FIELD_NAMES
+        if field in existing_fields and existing_fields.get(field) != ""
+    }
+    ttl_days = existing.get("ttl_days")
+    # A manually adjusted deadline on an originally-relative object is absolute
+    # from that point onward. Infer the legacy representation by verifying that
+    # its stored deadline still exactly matches base + ttl_days. This preserves
+    # compatibility without introducing a new persisted discriminator.
+    relative = False
+    if isinstance(ttl_days, int) and not isinstance(ttl_days, bool) and ttl_days > 0:
+        try:
+            base = parse_iso_datetime(str(existing["received_at"]))
+            expiry = parse_iso_datetime(str(existing["expires_at"]))
+            relative = compute_expires_at(base, ttl_days) == expiry
+        except (KeyError, TypeError, ValueError):
+            relative = False
+    if relative:
+        updated = received_at or datetime.now(timezone.utc)
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        result.update(
+            {
+                "ttl_days": ttl_days,
+                "received_at": format_iso8601(updated),
+                "expires_at": format_iso8601(compute_expires_at(updated, ttl_days)),
+            }
+        )
+        generation = existing.get(TTL_GENERATION_FIELD)
+        if generation:
+            result[TTL_GENERATION_FIELD] = generation
+        return result
+    result.update(existing)
     return result
 
 

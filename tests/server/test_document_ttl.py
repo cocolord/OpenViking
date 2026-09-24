@@ -76,6 +76,21 @@ async def write(client, uri):
     return await request(client, "get", "/api/v1/content/ttl", params={"uri": uri})
 
 
+async def rewrite(client, uri, *, mode):
+    return await request(
+        client,
+        "post",
+        "/api/v1/content/write",
+        json={
+            "uri": uri,
+            "content": " Updated.",
+            "mode": mode,
+            "processing_mode": "vectors_only",
+            "wait": True,
+        },
+    )
+
+
 @pytest.mark.asyncio
 async def test_account_configuration_reaches_all_creation_paths_and_is_incremental(client, service):
     await request(
@@ -94,6 +109,7 @@ async def test_account_configuration_reaches_all_creation_paths_and_is_increment
             "settings": {
                 "ttl": {
                     "global": {"mode": "days", "ttl_days": 20},
+                    "resources": {"mode": "days", "ttl_days": 20},
                     "directories": {
                         ROOT + "/memories/events": {"mode": "days", "ttl_days": 7},
                         ROOT + "/memories/events/2026": {"mode": "days", "ttl_days": 5},
@@ -148,7 +164,12 @@ async def test_expiry_change_supersedes_cleanup_and_preserves_content(
         "patch",
         CONFIG,
         json={
-            "settings": {"ttl": {"global": {"mode": "days", "ttl_days": 7}}},
+            "settings": {
+                "ttl": {
+                    "global": {"mode": "days", "ttl_days": 7},
+                    "resources": {"mode": "days", "ttl_days": 7},
+                }
+            },
         },
     )
     uri = ROOT + "/" + suffix
@@ -201,6 +222,86 @@ async def test_expiry_change_supersedes_cleanup_and_preserves_content(
     )
     assert response.status_code == 404
     assert (await _cleanup_once(cleanup, await fs.ttl_registry.get(ctx.account_id, uri)))["deleted"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["replace", "append"])
+@pytest.mark.parametrize(
+    "suffix,policy",
+    [
+        ("memories/events/updated.txt", "user_events"),
+        ("resources/updated.txt", "resources"),
+    ],
+)
+async def test_successful_content_update_renews_relative_deadline(
+    client, service, mode, suffix, policy
+):
+    await request(
+        client,
+        "patch",
+        CONFIG,
+        json={"settings": {"ttl": {policy: {"mode": "days", "ttl_days": 7}}}},
+    )
+    uri = ROOT + "/" + suffix
+    original = await write(client, uri)
+    await asyncio.sleep(0.01)
+
+    await rewrite(client, uri, mode=mode)
+
+    renewed = await request(client, "get", "/api/v1/content/ttl", params={"uri": uri})
+    assert renewed["ttl_generation"] == original["ttl_generation"]
+    assert renewed["ttl_days"] == 7
+    assert parse_iso_datetime(renewed["received_at"]) > parse_iso_datetime(
+        original["received_at"]
+    )
+    assert parse_iso_datetime(renewed["expires_at"]) - parse_iso_datetime(
+        renewed["received_at"]
+    ) == timedelta(days=7)
+    record = await service.viking_fs.ttl_registry.get("default", uri)
+    assert record.expires_at == renewed["expires_at"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["replace", "append"])
+async def test_manual_absolute_deadline_does_not_move_on_resource_update(client, mode):
+    await request(
+        client,
+        "patch",
+        CONFIG,
+        json={
+            "settings": {"ttl": {"resources": {"mode": "days", "ttl_days": 7}}}
+        },
+    )
+    uri = ROOT + "/resources/absolute.txt"
+    original = await write(client, uri)
+    fixed = format_iso8601(parse_iso_datetime(original["expires_at"]) + timedelta(days=10))
+    await request(
+        client,
+        "patch",
+        "/api/v1/content/ttl",
+        json={"uri": uri, "expires_at": fixed},
+    )
+
+    await rewrite(client, uri, mode=mode)
+
+    unchanged = await request(client, "get", "/api/v1/content/ttl", params={"uri": uri})
+    assert unchanged["expires_at"] == fixed
+    assert unchanged["received_at"] == original["received_at"]
+    assert unchanged["ttl_generation"] == original["ttl_generation"]
+
+
+@pytest.mark.asyncio
+async def test_resource_directory_deadline_edit_is_rejected(client, service):
+    directory = ROOT + "/resources/folder"
+    await service.viking_fs.mkdir(directory, exist_ok=True, ctx=root_ctx())
+
+    response = await client.patch(
+        "/api/v1/content/ttl",
+        json={"uri": directory, "expires_at": "2999-01-01T00:00:00.000Z"},
+    )
+
+    assert response.status_code == 400, response.text
+    assert "resource directories define defaults via resources/config" in response.text
 
 
 @pytest.mark.asyncio

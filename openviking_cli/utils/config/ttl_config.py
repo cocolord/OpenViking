@@ -13,8 +13,10 @@ It is not extended to preferences, entities, or any other directory.
 
 The configuration mirrors the design doc's minimal ``policy`` protocol: a library
 global default, per-scope defaults, and optional concrete-directory overrides.
-All levels use the same ``TTLPolicy`` structure. Resolution order is *nearest
-directory override > scope default > library global default > off*.
+All levels use the same ``TTLPolicy`` structure. Events and sessions resolve as
+*nearest directory override > scope default > library global default > off*.
+Resources are long-term memory and resolve as *nearest directory override >
+resource default > off*; they never inherit the library global default.
 """
 
 from typing import Dict, Literal, Optional
@@ -70,8 +72,8 @@ class TTLPolicy(BaseModel):
     - ``inherit``: defer to the next explicit ancestor, then scope -> global ->
       off. Valid for directories and scope defaults, never for the library global.
     - ``disabled``: explicitly no TTL; blocks inheritance from the global level.
-    - ``days``: expire ``ttl_days`` after object creation. ``ttl_days`` is then a
-      required positive integer (minimum 1 day). "Off" is expressed with
+    - ``days``: expire ``ttl_days`` after the object's latest successful content
+      update. ``ttl_days`` is then a required positive integer (minimum 1 day). "Off" is expressed with
       ``disabled``, never with ``0`` or a negative value.
     """
 
@@ -96,10 +98,11 @@ class TTLPolicy(BaseModel):
 class TTLConfig(BaseModel):
     """Cluster-wide TTL policy. Default OFF.
 
-    The default instance leaves the global policy ``disabled`` and every scope
-    ``inherit``, so nothing expires unless an operator opts in. Changing this
-    config only affects objects created afterwards — existing objects keep the
-    ``ttl_days`` snapshot frozen at their creation time.
+    The default instance leaves the global and resource policies ``disabled``
+    and the event/session scopes ``inherit``, so nothing expires unless an
+    operator opts in. Changing this config only affects objects created
+    afterwards. Existing managed objects retain their snapshotted duration,
+    and relative deadlines renew when their content is successfully updated.
     """
 
     global_default: TTLPolicy = RuntimeField(
@@ -123,8 +126,8 @@ class TTLConfig(BaseModel):
         description="TTL default for viking://user/{user_id}/sessions/.",
     )
     resources: TTLPolicy = RuntimeField(
-        default_factory=TTLPolicy,
-        description="Resource TTL default; directory and per-import overrides take precedence.",
+        default_factory=lambda: TTLPolicy(mode="disabled"),
+        description="Separate resource TTL default; never inherits the library global policy.",
     )
     directories: Dict[str, TTLPolicy] = RuntimeField(
         default_factory=dict,
@@ -173,13 +176,14 @@ class TTLConfig(BaseModel):
     def resolve_scope(self, scope: TTLScope) -> Optional[int]:
         """Return the effective ``ttl_days`` for a scope, or ``None`` when off.
 
-        Resolution order: the scope's own policy first; ``inherit`` falls through
-        to the global default; ``disabled`` blocks inheritance and yields off.
+        The scope's own policy wins. For events and sessions, ``inherit`` falls
+        through to the global default; resources never inherit that default.
+        ``disabled`` blocks inheritance and yields off.
         """
         policy = getattr(self, scope)
         if policy.mode == "days":
             return policy.ttl_days
-        if policy.mode != "inherit":
+        if policy.mode != "inherit" or scope == "resources":
             return None
         # mode == "inherit": fall through to the global default.
         if self.global_default.mode == "days":
@@ -208,6 +212,8 @@ class TTLConfig(BaseModel):
             if policy.mode != "inherit":
                 return policy
         policy = getattr(self, scope)
+        if scope == "resources" and policy.mode == "inherit":
+            return TTLPolicy(mode="disabled")
         return self.global_default if policy.mode == "inherit" else policy
 
     @property
@@ -218,6 +224,23 @@ class TTLConfig(BaseModel):
             or any(self.resolve_scope(scope) is not None for scope in TTL_SCOPES)
             or any(policy.mode in {"days", "absolute"} for policy in self.directories.values())
         )
+
+
+class TTLCleanupConfig(BaseModel):
+    """Cluster-only controls for physical deletion, separate from object expiry.
+
+    Disabling is a rollout/incident pause for new physical deletes; expired L2
+    remains invisible. The default keeps the cleanup behavior enabled whenever
+    an object has an expiry snapshot.
+    """
+
+    enabled: bool = RuntimeField(default=True)
+    check_interval_seconds: float = RuntimeField(default=30.0, ge=1, le=86400)
+    scan_jitter_seconds: float = RuntimeField(default=5.0, ge=0, le=86400)
+    cleanup_jitter_seconds: float = RuntimeField(default=86400.0, ge=0, le=86400)
+    batch_size: StrictInt = RuntimeField(default=100, ge=1, le=10000)
+    max_batch_bytes: StrictInt = RuntimeField(default=1_048_576, ge=1024, le=104_857_600)
+    scan_time_budget_seconds: float = RuntimeField(default=5.0, gt=0, le=300)
 
 
 class ResourceTTL(BaseModel):

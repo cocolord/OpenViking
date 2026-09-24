@@ -1,7 +1,6 @@
-"""Resource TTL contracts: one import root, frozen lifetime and durable cleanup."""
+"""Resource TTL contracts: directory defaults, per-file lifetime and cleanup."""
 
 import json
-from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -12,7 +11,9 @@ from openviking.server.identity import RequestContext, Role
 from openviking.storage.resource_ttl import (
     prepare_resource_ttl,
     read_resource_fields,
+    resource_ttl_fields,
     resource_ttl_visible,
+    unchanged_expired_resource_paths,
     update_resource_expiry,
 )
 from openviking.storage.ttl_registry import TTLRegistry
@@ -83,12 +84,13 @@ async def install(fs, ctx, uri, *, is_dir, expires_at=FUTURE):
 async def test_retry_after_registry_only_write_keeps_pending_deadline(fs_ctx):
     fs, ctx = fs_ctx
     uri = ROOT + "/interrupted"
-    expected = await install(fs, ctx, uri, is_dir=True)
-    del fs._async_agfs.files[fs._uri_to_path(uri + "/.ttl.json", ctx=ctx)]
+    expected = await install(fs, ctx, uri, is_dir=False)
+    metadata = ttl.ttl_metadata_uri(ttl.OBJECT_TYPE_RESOURCE_FILE, uri)
+    del fs._async_agfs.files[fs._uri_to_path(metadata, ctx=ctx)]
     fields = await prepare_resource_ttl(
         fs,
         uri,
-        is_dir=True,
+        is_dir=False,
         existing=False,
         ctx=ctx,
         lease_ref=None,
@@ -96,73 +98,134 @@ async def test_retry_after_registry_only_write_keeps_pending_deadline(fs_ctx):
     )
     assert fields["expires_at"] == expected["expires_at"]
     assert fields["ttl_generation"] == expected["ttl_generation"]
-    assert await read_resource_fields(fs, "resource", uri, ctx=ctx) == fields
+    assert await read_resource_fields(fs, "resource_file", uri, ctx=ctx) == fields
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("is_dir", [True, False])
 @pytest.mark.parametrize(
     "root", [ROOT, "viking://resources", "viking://user/u1/peers/p1/resources"]
 )
-async def test_root_lifecycle_hides_bytes_and_registers_only_one_owner(fs_ctx, is_dir, root):
+async def test_file_lifecycle_hides_only_its_exact_bytes(fs_ctx, root):
     fs, ctx = fs_ctx
     uri = root + "/doc"
-    payload_uri = uri + "/sections/a.bin" if is_dir else uri
-    await fs.write_file_bytes(payload_uri, b"\x00\xff original", ctx=ctx)
+    await fs.write_file_bytes(uri, b"\x00\xff original", ctx=ctx)
     await fs.write_file(ROOT + "/sibling", "keep", ctx=ctx)
-    fields = await install(fs, ctx, uri, is_dir=is_dir)
-    assert await fs.read_file_bytes(payload_uri, ctx=ctx) == b"\x00\xff original"
+    fields = await install(fs, ctx, uri, is_dir=False)
+    assert await fs.read_file_bytes(uri, ctx=ctx) == b"\x00\xff original"
     assert (await fs.ttl_registry.get("acct", uri)).generation == "g1"
-    if is_dir:
-        assert await fs.ttl_registry.get("acct", payload_uri) is None
     fields["expires_at"] = PAST
-    await install(fs, ctx, uri, is_dir=is_dir, expires_at=PAST)
+    await install(fs, ctx, uri, is_dir=False, expires_at=PAST)
     with pytest.raises(NotFoundError):
-        await fs.read_file_bytes(payload_uri, ctx=ctx)
+        await fs.read_file_bytes(uri, ctx=ctx)
     assert await fs.read_file(ROOT + "/sibling", ctx=ctx) == "keep"
     # Removing metadata during a failed strict cleanup must not revive bytes.
     fs._async_agfs.files.pop(
         fs._uri_to_path(
-            ttl.ttl_metadata_uri("resource" if is_dir else "resource_file", uri), ctx=ctx
+            ttl.ttl_metadata_uri("resource_file", uri), ctx=ctx
         )
     )
-    assert not await resource_ttl_visible(fs, payload_uri, ctx=ctx)
+    assert not await resource_ttl_visible(fs, uri, ctx=ctx)
 
 
 @pytest.mark.asyncio
-async def test_new_root_freezes_but_reimport_and_children_keep_original(fs_ctx):
+async def test_directory_default_creates_independent_file_lifetimes(fs_ctx):
     fs, ctx = fs_ctx
-    uri = ROOT + "/doc"
+    directory = ROOT + "/doc"
     first = await prepare_resource_ttl(
         fs,
-        uri,
-        is_dir=True,
+        directory + "/first.txt",
+        is_dir=False,
         existing=False,
         ctx=ctx,
         lease_ref=None,
         resource_ttl={"ttl_relative": 7},
+        received_at=ttl.parse_iso_datetime("2026-01-01T00:00:00Z"),
     )
-    assert ttl.parse_iso_datetime(first["expires_at"]) - ttl.parse_iso_datetime(
-        first["received_at"]
-    ) == timedelta(days=7)
-    assert (
-        await prepare_resource_ttl(
-            fs,
-            uri,
-            is_dir=True,
-            existing=True,
-            ctx=ctx,
-            lease_ref=None,
-            resource_ttl={"ttl_relative": 30},
-        )
-        == first
+    second = await prepare_resource_ttl(
+        fs,
+        directory + "/second.txt",
+        is_dir=False,
+        existing=False,
+        ctx=ctx,
+        lease_ref=None,
+        resource_ttl={"ttl_relative": 7},
+        received_at=ttl.parse_iso_datetime("2026-01-03T00:00:00Z"),
     )
-    child = await prepare_resource_ttl(
-        fs, uri + "/chapter.txt", is_dir=False, existing=False, ctx=ctx, lease_ref=None
+    assert first["expires_at"] == "2026-01-08T00:00:00.000Z"
+    assert second["expires_at"] == "2026-01-10T00:00:00.000Z"
+    assert first["ttl_generation"] != second["ttl_generation"]
+    assert (await fs.ttl_registry.get("acct", directory + "/first.txt")).generation == first[
+        "ttl_generation"
+    ]
+    assert (await fs.ttl_registry.get("acct", directory + "/second.txt")).generation == second[
+        "ttl_generation"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_relative_resource_update_renews_but_absolute_deadline_does_not(fs_ctx):
+    fs, ctx = fs_ctx
+    relative_uri = ROOT + "/relative.txt"
+    relative = await prepare_resource_ttl(
+        fs,
+        relative_uri,
+        is_dir=False,
+        existing=False,
+        ctx=ctx,
+        lease_ref=None,
+        resource_ttl={"ttl_relative": 7},
+        received_at=ttl.parse_iso_datetime("2997-01-01T00:00:00Z"),
     )
-    assert child == first
-    assert await fs.ttl_registry.get("acct", uri + "/chapter.txt") is None
-    assert await read_resource_fields(fs, "resource_file", uri + "/chapter.txt", ctx=ctx) is None
+    renewed = await prepare_resource_ttl(
+        fs,
+        relative_uri,
+        is_dir=False,
+        existing=True,
+        ctx=ctx,
+        lease_ref=None,
+        received_at=ttl.parse_iso_datetime("2997-01-10T00:00:00Z"),
+    )
+    assert renewed == {
+        **relative,
+        "received_at": "2997-01-10T00:00:00.000Z",
+        "expires_at": "2997-01-17T00:00:00.000Z",
+    }
+
+    absolute_uri = ROOT + "/absolute.txt"
+    absolute = await prepare_resource_ttl(
+        fs,
+        absolute_uri,
+        is_dir=False,
+        existing=False,
+        ctx=ctx,
+        lease_ref=None,
+        resource_ttl={"ttl_absolute": 2_000_000_000},
+        received_at=ttl.parse_iso_datetime("2026-01-01T00:00:00Z"),
+    )
+    unchanged = await prepare_resource_ttl(
+        fs,
+        absolute_uri,
+        is_dir=False,
+        existing=True,
+        ctx=ctx,
+        lease_ref=None,
+        received_at=ttl.parse_iso_datetime("2026-01-10T00:00:00Z"),
+    )
+    assert unchanged == absolute
+
+
+@pytest.mark.asyncio
+async def test_expired_directory_metadata_does_not_hide_live_child(fs_ctx):
+    fs, ctx = fs_ctx
+    directory = ROOT + "/legacy-directory"
+    child = directory + "/still-live.txt"
+    await fs.write_file(child, "keep", ctx=ctx)
+    await install(fs, ctx, directory, is_dir=True, expires_at=PAST)
+    await install(fs, ctx, child, is_dir=False, expires_at=FUTURE)
+
+    assert (await resource_ttl_fields(fs, child, ctx=ctx))["expires_at"] == FUTURE
+    assert await resource_ttl_visible(fs, child, ctx=ctx)
+    assert await fs.read_file(child, ctx=ctx) == "keep"
 
 
 @pytest.mark.asyncio
@@ -187,10 +250,10 @@ async def test_disabled_and_legacy_resources_do_not_gain_metadata(fs_ctx):
 @pytest.mark.asyncio
 async def test_expiry_edit_keeps_incarnation_and_updates_due_record(fs_ctx):
     fs, ctx = fs_ctx
-    uri = ROOT + "/doc"
-    await fs.write_file(uri + "/child", "text", ctx=ctx)
-    before = await install(fs, ctx, uri, is_dir=True)
-    fs.stat = AsyncMock(return_value={"isDir": True})
+    uri = ROOT + "/doc.txt"
+    await fs.write_file(uri, "text", ctx=ctx)
+    before = await install(fs, ctx, uri, is_dir=False)
+    fs.stat = AsyncMock(return_value={"isDir": False})
     after = await update_resource_expiry(fs, uri, "2998-01-01T00:00:00Z", ctx=ctx)
     assert after["ttl_generation"] == before["ttl_generation"]
     assert after["received_at"] == before["received_at"]
@@ -200,19 +263,39 @@ async def test_expiry_edit_keeps_incarnation_and_updates_due_record(fs_ctx):
 
 
 @pytest.mark.asyncio
-async def test_resource_descendant_markers_cover_ancestors_not_siblings(fs_ctx):
+async def test_resource_directory_deadline_edit_is_rejected(fs_ctx):
     fs, ctx = fs_ctx
-    await install(fs, ctx, ROOT + "/a/sub/doc", is_dir=True)
-    assert await fs.ttl_registry.has_ttl_descendants("acct", ROOT + "/a/sub")
-    assert await fs.ttl_registry.has_ttl_descendants("acct", ROOT + "/a")
-    assert await fs.ttl_registry.has_ttl_descendants("acct", ROOT)
-    assert not await fs.ttl_registry.has_ttl_descendants("acct", ROOT + "/b")
+    uri = ROOT + "/folder"
+    await fs.write_file(uri + "/child.txt", "text", ctx=ctx)
+    fs.stat = AsyncMock(return_value={"isDir": True})
+
+    with pytest.raises(InvalidArgumentError, match="resources/config"):
+        await update_resource_expiry(fs, uri, FUTURE, ctx=ctx)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind,recursive", [("resource", True), ("resource_file", False)])
-async def test_cleanup_uses_common_strict_delete_and_persistent_retry(tracker, kind, recursive):
-    record = _record(kind, object_uri=ROOT + "/doc")
+async def test_watch_tombstone_only_suppresses_same_expired_content(fs_ctx):
+    fs, ctx = fs_ctx
+    uri = ROOT + "/watched/doc.txt"
+    fields = await install(fs, ctx, uri, is_dir=False, expires_at=PAST)
+    fields["content_md5"] = "old-md5"
+    await fs.write_file(
+        ttl.ttl_metadata_uri(ttl.OBJECT_TYPE_RESOURCE_FILE, uri),
+        json.dumps(fields),
+        ctx=ctx,
+    )
+
+    assert await unchanged_expired_resource_paths(
+        fs, ROOT + "/watched", {"doc.txt": "old-md5"}, ctx=ctx
+    ) == {"doc.txt"}
+    assert await unchanged_expired_resource_paths(
+        fs, ROOT + "/watched", {"doc.txt": "new-md5"}, ctx=ctx
+    ) == set()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_uses_common_strict_delete_and_persistent_retry(tracker):
+    record = _record("resource_file", object_uri=ROOT + "/doc")
     cleanup, fs, registry, queues = _make_service(
         record=record, live_content=_session_meta(), rm_error=RuntimeError("vector delete failed")
     )
@@ -221,11 +304,29 @@ async def test_cleanup_uses_common_strict_delete_and_persistent_retry(tracker, k
     registry.remove_if_generation.assert_not_awaited()
     registry.defer_retry.assert_awaited_once()
     assert fs.rm.await_args.kwargs["strict"] is True
-    assert fs.rm.await_args.kwargs["recursive"] is recursive
+    assert fs.rm.await_args.kwargs["recursive"] is False
     fs.rm.side_effect = None
     result = await _cleanup_once(cleanup, record)
     assert result["deleted"]
     registry.remove_if_generation.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_drops_legacy_directory_record_without_deleting_tree(tracker):
+    record = _record("resource", object_uri=ROOT + "/doc")
+    cleanup, fs, registry, _ = _make_service(
+        record=record, live_content=_session_meta(expires_at=PAST)
+    )
+    cleanup._service.fs = SimpleNamespace(rm=fs.rm)
+
+    result = await cleanup._cleanup_record(record)
+
+    assert result == {"deleted": False, "skipped": "legacy_resource_directory"}
+    fs.rm.assert_not_awaited()
+    fs.remove_files.assert_awaited_once()
+    registry.remove_if_generation.assert_awaited_once_with(
+        record.account_id, record.object_uri, record.generation
+    )
 
 
 @pytest.mark.parametrize(

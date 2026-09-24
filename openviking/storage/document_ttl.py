@@ -1,10 +1,9 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
-"""Explicit expiry edits for live event files and resource lifecycle owners."""
+"""Explicit expiry edits for live event and resource files."""
 
 from openviking.core.ttl import (
     OBJECT_TYPE_EVENT,
-    OBJECT_TYPE_RESOURCE,
     OBJECT_TYPE_RESOURCE_FILE,
     TTL_FIELD_NAMES,
     hidden_by_ttl,
@@ -26,12 +25,16 @@ from openviking_cli.exceptions import ConflictError, InvalidArgumentError, NotFo
 async def _document_target(fs, uri, *, ctx):
     stat = await fs.stat(uri, ctx=ctx)
     if ttl_scope_for_uri(uri) == "resources":
+        if stat.get("isDir"):
+            raise InvalidArgumentError(
+                "resource directories define defaults via resources/config; "
+                "resources/ttl requires a file"
+            )
         for kind, owner in resource_ttl_targets(uri):
             fields = await read_resource_fields(fs, kind, owner, ctx=ctx)
             if fields is not None:
                 return kind, owner, fields
-        kind = OBJECT_TYPE_RESOURCE if stat.get("isDir") else OBJECT_TYPE_RESOURCE_FILE
-        return kind, uri, {}
+        return OBJECT_TYPE_RESOURCE_FILE, uri, {}
     if ttl_object_for_uri(uri, is_dir=bool(stat.get("isDir"))) == (OBJECT_TYPE_EVENT, uri):
         memory = MemoryFileUtils.read(await fs.read_file(uri, ctx=ctx), uri=uri)
         return (
@@ -44,7 +47,12 @@ async def _document_target(fs, uri, *, ctx):
 
 async def get_document_ttl(fs, uri: str, *, ctx) -> dict:
     kind, owner, fields = await _document_target(fs, uri, ctx=ctx)
-    result = {"uri": uri, **fields}
+    # Sidecars can carry private lifecycle bookkeeping (for example a Watch
+    # tombstone fingerprint). Keep the public API limited to TTL fields.
+    result = {
+        "uri": uri,
+        **{key: value for key, value in fields.items() if key in TTL_FIELD_NAMES},
+    }
     if owner != uri:
         result["owner_uri"] = owner
     if kind != OBJECT_TYPE_EVENT:
@@ -67,12 +75,7 @@ async def update_document_expiry(fs, uri: str, expires_at: str, *, ctx) -> dict:
     await fs._ensure_access(owner, ctx, action=AclAction.WRITE)
     if not original.get("expires_at") or not original.get("ttl_generation"):
         raise InvalidArgumentError("document has no frozen TTL to update")
-    acquire = (
-        fs._async_agfs.pathlock_acquire_tree
-        if kind == OBJECT_TYPE_RESOURCE
-        else fs._async_agfs.pathlock_acquire_exact
-    )
-    lease = await acquire(fs._uri_to_path(owner, ctx=ctx))
+    lease = await fs._async_agfs.pathlock_acquire_exact(fs._uri_to_path(owner, ctx=ctx))
     try:
         live_kind, live_owner, fields = await _document_target(fs, uri, ctx=ctx)
         if (live_kind, live_owner, fields.get("ttl_generation")) != (
@@ -83,10 +86,6 @@ async def update_document_expiry(fs, uri: str, expires_at: str, *, ctx) -> dict:
             raise ConflictError("document changed while updating its expiry; reload and retry")
         if hidden_by_ttl(fields["expires_at"]):
             raise NotFoundError(uri, "document")
-        if kind != OBJECT_TYPE_EVENT:
-            parent = await resource_ttl_fields(fs, owner.rsplit("/", 1)[0], ctx=ctx)
-            if parent.get("expires_at") and expiry > parent["expires_at"]:
-                raise InvalidArgumentError("extend the containing resource's expiry first")
         if kind == OBJECT_TYPE_EVENT:
             memory = MemoryFileUtils.read(await fs.read_file(uri, ctx=ctx), uri=uri)
             memory.extra_fields["expires_at"] = expiry

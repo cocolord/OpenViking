@@ -147,6 +147,11 @@ async def write_stored_links(
             if current_trace_id:
                 mf.extra_fields["last_update_trace_id"] = current_trace_id
             bump_memory_version(mf)
+            from openviking.core.ttl import apply_ttl_fields
+
+            mf.extra_fields = apply_ttl_fields(
+                uri, mf.extra_fields, existing_fields=mf.extra_fields
+            )
             await viking_fs.write_file(
                 uri,
                 MemoryFileUtils.write(mf),
@@ -1075,6 +1080,11 @@ class MemoryUpdater:
                     source=RESOURCE_REF_SOURCE_SESSION_COMMIT,
                 )
                 if changed:
+                    from openviking.core.ttl import apply_ttl_fields
+
+                    mf.extra_fields = apply_ttl_fields(
+                        uri, mf.extra_fields, existing_fields=mf.extra_fields
+                    )
                     await viking_fs.write_file(
                         uri,
                         MemoryFileUtils.write(mf),
@@ -1379,6 +1389,11 @@ class MemoryUpdater:
                 if current_trace_id:
                     mf.extra_fields["last_update_trace_id"] = current_trace_id
                 bump_memory_version(mf)
+                from openviking.core.ttl import apply_ttl_fields
+
+                mf.extra_fields = apply_ttl_fields(
+                    uri, mf.extra_fields, existing_fields=mf.extra_fields
+                )
                 await viking_fs.write_file(
                     uri,
                     MemoryFileUtils.write(mf),

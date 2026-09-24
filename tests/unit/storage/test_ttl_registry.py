@@ -19,8 +19,14 @@ from openviking.pyagfs.exceptions import (
     AGFSTimeoutError,
 )
 from openviking.server.identity import RequestContext, Role
-from openviking.storage.ttl_registry import TTLRecord, TTLRegistry, record_from_fields
+from openviking.storage.ttl_registry import (
+    TTLRecord,
+    TTLRegistry,
+    cleanup_not_before,
+    record_from_fields,
+)
 from openviking.storage.viking_fs import VikingFS
+from openviking.utils.time_utils import parse_iso_datetime
 from openviking_cli.exceptions import NotFoundError
 from openviking_cli.session.user_id import UserIdentifier
 
@@ -97,6 +103,18 @@ def _record(*, generation="g1", uri="viking://user/u1/sessions/s1"):
         expires_at="2026-09-23T00:00:00.000Z",
         generation=generation,
     )
+
+
+def test_physical_cleanup_jitter_is_stable_and_bounded_by_one_day():
+    record = _record()
+
+    first = cleanup_not_before(record, jitter_seconds=86400)
+    restarted = cleanup_not_before(record, jitter_seconds=86400)
+    offset = parse_iso_datetime(first) - parse_iso_datetime(record.expires_at)
+
+    assert first == restarted
+    assert timedelta(0) <= offset < timedelta(days=1)
+    assert cleanup_not_before(record, jitter_seconds=0) == record.expires_at
 
 
 @pytest.mark.asyncio
@@ -179,7 +197,7 @@ async def test_marker_inspection_fails_open_on_storage_error(error):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["record", "summary", "claim"])
+@pytest.mark.parametrize("operation", ["record", "claim"])
 async def test_registry_outage_is_not_treated_as_absence(operation):
     agfs = _MemoryAGFS()
     registry = TTLRegistry(agfs)
@@ -188,33 +206,8 @@ async def test_registry_outage_is_not_treated_as_absence(operation):
     with pytest.raises(AGFSNetworkError, match="endpoint not found"):
         if operation == "record":
             await registry.get("acct", _record().object_uri)
-        elif operation == "summary":
-            await registry.has_ttl_descendants("acct", "viking://user/u1/memories/events")
         else:
             _ = [item async for item in registry.claim_due(now=datetime.now(timezone.utc))]
-
-
-@pytest.mark.asyncio
-async def test_descendant_marker_survives_cleanup_and_is_shared_across_workers():
-    class CachedAGFS(_MemoryAGFS):
-        async def stat(self, path, *, bypass_cache=False):
-            if not bypass_cache:
-                raise FileNotFoundError("cached marker miss")
-            return await super().stat(path)
-
-    agfs = CachedAGFS()
-    registry = TTLRegistry(agfs)
-    reader = TTLRegistry(agfs)
-    directory = "viking://resources/day"
-    await registry.upsert(_record())  # Session TTL does not affect event summaries.
-    assert not await reader.has_ttl_descendants("acct", directory)
-    event = replace(_record(uri=directory + "/doc"), object_type="resource")
-    await registry.upsert(event)
-    await registry.remove_if_generation("acct", event.object_uri, event.generation)
-    assert await reader.has_ttl_descendants("acct", directory)
-    restarted = TTLRegistry(agfs)
-    assert await restarted.has_ttl_descendants("acct", directory)
-    assert not await restarted.has_ttl_descendants("acct", directory + "-sibling")
 
 
 @pytest.mark.asyncio

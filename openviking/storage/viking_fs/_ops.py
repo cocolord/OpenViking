@@ -320,7 +320,10 @@ class _OpsMixin:
             if not strict or lease_ref is None:
                 raise ValueError("verify_only requires strict deletion and an object lease")
             await confirm()
-            await self._remove_resource_file_metadata(target_uri, ctx=ctx, lease_ref=lease_ref)
+            if not (preserve_summaries and ttl_scope_for_uri(target_uri) == "resources"):
+                await self._remove_resource_file_metadata(
+                    target_uri, ctx=ctx, lease_ref=lease_ref
+                )
             return {"estimated_deleted_count": 0}
 
         async def _estimate_deleted_count(target_path: str, real_ctx: RequestContext) -> int:
@@ -361,7 +364,11 @@ class _OpsMixin:
             )
             if strict:
                 await confirm()
-            await self._remove_resource_file_metadata(target_uri, ctx=ctx, lease_ref=lease_ref)
+            if not (preserve_summaries and ttl_scope_for_uri(target_uri) == "resources"):
+                await self._remove_resource_file_metadata(
+                    target_uri, ctx=ctx, lease_ref=lease_ref
+                )
+            await self._remove_deleted_ttl_records(uris_to_delete, ctx=ctx)
             logger.info(f"[VikingFS] rm target not found, cleaned orphan index: {uri}")
             return {"estimated_deleted_count": estimated_count}
 
@@ -445,7 +452,11 @@ class _OpsMixin:
                 result = {"estimated_deleted_count": estimated_count}
             if strict:
                 await confirm()
-            await self._remove_resource_file_metadata(target_uri, ctx=ctx, lease_ref=lease_ref)
+            if not (preserve_summaries and ttl_scope_for_uri(target_uri) == "resources"):
+                await self._remove_resource_file_metadata(
+                    target_uri, ctx=ctx, lease_ref=lease_ref
+                )
+            await self._remove_deleted_ttl_records(uris_to_delete, ctx=ctx)
             return result
         finally:
             if lease_ref is None and lease is not None:
@@ -467,6 +478,20 @@ class _OpsMixin:
             await self.remove_files(metadata_uri, ctx=ctx, lease_ref=lease)
         finally:
             await self._async_agfs.pathlock_release(lease)
+        await self._remove_deleted_ttl_records([metadata_uri], ctx=ctx)
+
+    async def _remove_deleted_ttl_records(self, uris: List[str], *, ctx) -> None:
+        """Drop projections whose authoritative metadata was explicitly deleted."""
+        real_ctx = self._ctx_or_default(ctx)
+        object_uris = {
+            target[1] for uri in uris if (target := ttl_object_for_uri(uri)) is not None
+        }
+        for object_uri in sorted(object_uris):
+            record = await self.ttl_registry.get(real_ctx.account_id, object_uri)
+            if record is not None:
+                await self.ttl_registry.remove_if_generation(
+                    real_ctx.account_id, object_uri, record.generation
+                )
 
     async def remove_files(
         self,

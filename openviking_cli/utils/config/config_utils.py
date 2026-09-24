@@ -78,6 +78,12 @@ def _child_model_type(annotation: Any) -> Optional[type[BaseModel]]:
     if isinstance(annotation, type) and issubclass(annotation, BaseModel):
         return annotation
 
+    # Mapping keys are data (for example concrete Viking directory URIs), not
+    # config field names. Their values are still validated by Pydantic, but the
+    # unknown-field diagnostic must not descend through the key space.
+    if get_origin(annotation) in (dict, Mapping):
+        return None
+
     args = get_args(annotation)
     if not args or any(get_origin(arg) in (dict, Mapping) for arg in args):
         return None

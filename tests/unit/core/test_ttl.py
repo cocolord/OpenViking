@@ -120,7 +120,7 @@ def test_resolve_ttl_days_uses_scope_then_global(monkeypatch):
     assert ttl.resolve_ttl_days("viking://user/u1/memories/events/e.md") == 30
     assert ttl.resolve_ttl_days("viking://user/u1/sessions/s1") == 7
     assert ttl.resolve_ttl_days("viking://user/u1/peers/p1/memories/events/e.md") is None
-    assert ttl.resolve_ttl_days("viking://user/u1/resources/r.md") == 7
+    assert ttl.resolve_ttl_days("viking://user/u1/resources/r.md") is None
     # Out-of-scope URIs are never TTL'd even when global is on.
     assert ttl.resolve_ttl_days("viking://user/u1/skills/r.md") is None
 
@@ -164,9 +164,9 @@ def test_freeze_ttl_fields_snapshot(monkeypatch):
 def test_freeze_ttl_fields_none_when_out_of_scope(monkeypatch):
     config = TTLConfig(**{"global": {"mode": "days", "ttl_days": 5}})
     _install_config(monkeypatch, config)
-    # Sessions and resources inherit global; skills remain outside TTL.
+    # Only events and sessions inherit global; resources require a separate policy.
     assert ttl.freeze_ttl_fields("viking://user/u1/skills/r.md") is None
-    assert ttl.freeze_ttl_fields("viking://user/u1/resources/r.md") is not None
+    assert ttl.freeze_ttl_fields("viking://user/u1/resources/r.md") is None
     assert ttl.freeze_ttl_fields("viking://user/u1/sessions/s1") is not None
 
 
@@ -179,7 +179,7 @@ def test_freeze_ttl_fields_naive_received_at_treated_as_utc(monkeypatch):
     assert snap["expires_at"] == "2026-05-02T12:00:00.000Z"
 
 
-def test_apply_ttl_fields_owns_creation_and_preserves_existing(monkeypatch):
+def test_apply_ttl_fields_owns_creation_and_renews_relative_ttl_on_update(monkeypatch):
     config = TTLConfig(user_events={"mode": "days", "ttl_days": 3})
     _install_config(monkeypatch, config)
     received = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -194,11 +194,28 @@ def test_apply_ttl_fields_owns_creation_and_preserves_existing(monkeypatch):
         "viking://user/u1/memories/events/e.md",
         {"title": "y", "ttl_days": 1},
         existing_fields=created,
+        received_at=datetime(2026, 1, 10, tzinfo=timezone.utc),
     )
     assert updated["title"] == "y"
     assert updated["ttl_days"] == 3
-    assert updated["received_at"] == created["received_at"]
-    assert updated["expires_at"] == created["expires_at"]
+    assert updated["received_at"] == "2026-01-10T00:00:00.000Z"
+    assert updated["expires_at"] == "2026-01-13T00:00:00.000Z"
+    assert updated["ttl_generation"] == created["ttl_generation"]
+
+
+def test_apply_ttl_fields_preserves_explicit_absolute_deadline_on_update():
+    existing = {
+        "received_at": "2026-01-01T00:00:00.000Z",
+        "expires_at": "2026-02-01T00:00:00.000Z",
+        "ttl_generation": "absolute-generation",
+    }
+    updated = ttl.apply_ttl_fields(
+        "viking://user/u1/memories/events/e.md",
+        {"title": "changed"},
+        existing_fields=existing,
+        received_at=datetime(2026, 1, 10, tzinfo=timezone.utc),
+    )
+    assert updated == {"title": "changed", **existing}
 
 
 def test_compute_expires_at_day_granularity():

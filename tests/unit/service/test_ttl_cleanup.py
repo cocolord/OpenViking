@@ -109,6 +109,7 @@ def _make_service(
         _async_agfs=agfs,
         _uri_to_path=lambda uri, ctx=None: f"/local/acct/{uri.removeprefix('viking://')}",
         read_file=read_file,
+        remove_files=AsyncMock(),
         rm=AsyncMock(side_effect=rm_error),
         _delete_from_vector_store=AsyncMock(),
         _confirm_vector_uris_cleared=AsyncMock(),
@@ -340,6 +341,34 @@ async def test_delete_failure_is_requeued_without_terminal_failure(tracker):
 
 
 @pytest.mark.asyncio
+async def test_paused_cleanup_is_durably_deferred_without_deleting(monkeypatch, tracker):
+    record = _record()
+    cleanup, viking_fs, registry, _ = _make_service(record=record, live_content=_session_meta())
+    monkeypatch.setattr(
+        ttl_cleanup,
+        "_cleanup_settings",
+        lambda: SimpleNamespace(enabled=False, check_interval_seconds=45),
+    )
+
+    result = await cleanup._process(_message(record))
+
+    assert result.outcome is ProcessOutcome.REQUEUED
+    viking_fs.read_file.assert_not_awaited()
+    viking_fs.rm.assert_not_awaited()
+    retry = registry.defer_retry.await_args.kwargs
+    assert retry["retry_count"] == 0
+    assert retry["task_id"] == "task-1"
+    assert ttl_cleanup.hidden_by_ttl(retry["next_retry_at"]) is False
+    task = await tracker.get(
+        "task-1",
+        account_id=ttl_cleanup.SYSTEM_TASK_ACCOUNT_ID,
+        user_id=ttl_cleanup.SYSTEM_TASK_USER_ID,
+    )
+    assert task.status is TaskStatus.PENDING
+    assert task.stage == "paused"
+
+
+@pytest.mark.asyncio
 async def test_ack_of_deferred_retry_does_not_complete_the_business_task(tracker):
     from openviking.service.task_queue_middleware import TaskWorkQueueMiddleware
     from openviking.storage.queuefs.queue_middleware import (
@@ -557,6 +586,49 @@ async def test_scheduler_enqueues_only_claimed_due_work_with_original_retry_iden
     assert message["target"]["object_uri"] == SESSION_URI
     assert message["task_id"] == "retry-1" and message["retry_count"] == 3
     assert calls[0]["limit"] == 100 and calls[0]["time_budget"] > 0
+
+
+@pytest.mark.asyncio
+async def test_scheduler_pause_and_runtime_budgets_are_independent(monkeypatch):
+    calls = []
+
+    async def claim_due(**kwargs):
+        calls.append(kwargs)
+        if False:
+            yield None
+
+    queue = SimpleNamespace(enqueue=AsyncMock())
+    service = SimpleNamespace(
+        viking_fs=SimpleNamespace(ttl_registry=SimpleNamespace(claim_due=claim_due)),
+        _queue_manager=SimpleNamespace(TTL_CLEANUP="ttl_cleanup", get_queue=lambda name: queue),
+    )
+    settings = SimpleNamespace(
+        enabled=False,
+        check_interval_seconds=60.0,
+        scan_jitter_seconds=12.0,
+        batch_size=17,
+        max_batch_bytes=4096,
+        scan_time_budget_seconds=2.5,
+    )
+    monkeypatch.setattr(ttl_cleanup, "_cleanup_settings", lambda: settings)
+    scheduler = ttl_cleanup.TTLCleanupScheduler(service)
+
+    await scheduler._scan_once()
+    assert calls == []
+    assert scheduler._next_interval() >= 60.0
+    assert scheduler._next_interval() <= 72.0
+
+    settings.enabled = True
+    await scheduler._scan_once()
+    assert calls == [
+        {
+            "now": calls[0]["now"],
+            "limit": 17,
+            "max_bytes": 4096,
+            "time_budget": 2.5,
+        }
+    ]
+    queue.enqueue.assert_not_awaited()
 
 
 def test_cleanup_message_requires_generation_fence():

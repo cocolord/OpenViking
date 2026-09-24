@@ -148,6 +148,8 @@ class RuntimeConfigManager(Generic[C, A]):
         build_account: Callable[[Optional[dict]], A],
         validate_request: Optional[Callable[[dict, bool, bool], None]] = None,
         normalize_request: Optional[Callable[[dict, bool], dict]] = None,
+        merge_override: Callable[[Optional[dict], dict], dict] = apply_three_state_patch,
+        validate_account_effective: Optional[Callable[[C, A], Any]] = None,
     ) -> None:
         self._source = source
         self._dispatcher = OwnerLoopDispatcher()
@@ -167,6 +169,8 @@ class RuntimeConfigManager(Generic[C, A]):
         # validate_request(patch, is_account_scope, creating) -> None (structural gate).
         self._validate_request = validate_request
         self._normalize_request = normalize_request or (lambda patch, _: patch)
+        self._merge_override = merge_override
+        self._validate_account_effective = validate_account_effective
         # Per-account cache; only touched on the owner loop.
         self._accounts: dict[str, _AccountEntry[A]] = {}
         self._overrides: dict[ConfigScope, Optional[dict]] = {}
@@ -217,12 +221,17 @@ class RuntimeConfigManager(Generic[C, A]):
         scope = ConfigScope.cluster()
         async with self._lock_for(scope):
             async with self._publish_lock:
+                previous_base = self._base_config
                 self._base_config = base_config
-                event = self._publish(
-                    scope,
-                    self._overrides.get(scope),
-                    reason=ConfigChangeReason.UPDATE,
-                )
+                try:
+                    event = self._publish(
+                        scope,
+                        self._overrides.get(scope),
+                        reason=ConfigChangeReason.UPDATE,
+                    )
+                except BaseException:
+                    self._base_config = previous_base
+                    raise
         await self._notify(event)
         return event
 
@@ -247,7 +256,7 @@ class RuntimeConfigManager(Generic[C, A]):
             override = await self._source.load(scope)
             async with self._publish_lock:
                 self._accounts[account_id] = _AccountEntry(
-                    config=self._build_account(override),
+                    config=self._build_candidate(scope, override),
                     last_access=time.monotonic(),
                 )
                 self._overrides[scope] = override
@@ -295,8 +304,13 @@ class RuntimeConfigManager(Generic[C, A]):
         settings = self._normalize_request(settings, True)
         if self._validate_request is not None:
             self._validate_request(settings, True, True)
-        # Construct-to-validate: section-internal and cross-section validators run.
-        self._build_account(settings)
+        # Apply the same merge normalization as PATCH before validating.  This
+        # matters for discriminated sections whose shorthand selects a variant
+        # (for example TTL's ``ttl_days`` implies ``mode=days``).
+        self._build_candidate(
+            ConfigScope.account(account_id),
+            self._merge_override({}, settings),
+        )
 
     # -- PATCH ---------------------------------------------------------------
 
@@ -350,7 +364,7 @@ class RuntimeConfigManager(Generic[C, A]):
 
             def mutate(current: Optional[dict]) -> dict:
                 current = self._normalize_request(current or {}, is_account)
-                override = apply_three_state_patch(current, patch)
+                override = self._merge_override(current, patch)
                 if self._validate_request is not None and not creating:
                     self._validate_resets(current or {}, patch, is_account)
                 # Construct-to-validate before persisting.
@@ -385,8 +399,17 @@ class RuntimeConfigManager(Generic[C, A]):
     def _build_candidate(self, scope: ConfigScope, override: Optional[dict]) -> Any:
         """Build (and thereby validate) the new object for a scope's override."""
         if scope.kind is ScopeKind.CLUSTER:
-            return self._build_config(self._base_config, override or {})
-        return self._build_account(override)
+            cluster = self._build_config(self._base_config, override or {})
+            if self._validate_account_effective is not None:
+                for entry in self._accounts.values():
+                    self._validate_account_effective(cluster, entry.config)
+            return cluster
+        # Normalize persisted/out-of-band sparse settings through the same merge
+        # contract as API PATCHes without materializing cluster fallback.
+        account = self._build_account(self._merge_override({}, override or {}))
+        if self._validate_account_effective is not None:
+            self._validate_account_effective(self._get_config(), account)
+        return account
 
     def _publish(
         self,
@@ -403,7 +426,7 @@ class RuntimeConfigManager(Generic[C, A]):
         """
         if scope.kind is ScopeKind.CLUSTER:
             old = self._get_config()
-            new = self._build_config(self._base_config, override or {})
+            new = self._build_candidate(scope, override)
             self._set_config(new)
             self._overrides[scope] = override
             return ConfigChangeEvent(
@@ -417,7 +440,7 @@ class RuntimeConfigManager(Generic[C, A]):
         account_id = scope.key
         old_entry = self._accounts.get(account_id)
         old_config = old_entry.config if old_entry is not None else None
-        new_config = self._build_account(override)
+        new_config = self._build_candidate(scope, override)
         self._accounts[account_id] = _AccountEntry(
             config=new_config,
             last_access=(old_entry.last_access if old_entry else time.monotonic()),

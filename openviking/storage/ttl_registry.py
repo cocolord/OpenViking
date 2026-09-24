@@ -12,12 +12,15 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict, dataclass
+from datetime import timedelta
 from typing import Any, Mapping, Optional
 
 from openviking.pyagfs import AsyncAGFSClient
 from openviking.server.error_mapping import is_storage_not_found
 from openviking.server.identity import RequestContext
 from openviking.service.task_store import PersistentTaskStore
+from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
+from openviking_cli.utils.config import get_openviking_config
 from openviking_cli.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -48,6 +51,26 @@ class TTLRecord:
         )
 
 
+def cleanup_not_before(record: TTLRecord, jitter_seconds: float | None = None) -> str:
+    """Spread physical cleanup without changing the source visibility deadline.
+
+    The offset is stable across processes/restarts and includes the expiry
+    revision, so retries do not keep postponing the same object.
+    """
+    if jitter_seconds is None:
+        jitter_seconds = get_openviking_config().ttl_cleanup.cleanup_jitter_seconds
+    if not jitter_seconds:
+        return record.expires_at
+    identity = json.dumps(
+        [record.account_id, record.object_uri, record.generation, record.expires_at],
+        separators=(",", ":"),
+    )
+    fraction = int.from_bytes(hashlib.sha256(identity.encode()).digest()[:8], "big") / 2**64
+    return format_iso8601(
+        parse_iso_datetime(record.expires_at) + timedelta(seconds=fraction * jitter_seconds)
+    )
+
+
 class TTLRegistry:
     """Map TTL object identity to the shared task persistence and due index."""
 
@@ -55,7 +78,6 @@ class TTLRegistry:
         self._agfs = agfs
         self._tasks = PersistentTaskStore(agfs)
         self._known_accounts: set[str] = set()
-        self._known_resource_scopes: set[tuple[str, str]] = set()
 
     @staticmethod
     def _key(account_id: str, uri: str) -> str:
@@ -68,28 +90,6 @@ class TTLRegistry:
     @staticmethod
     def marker_path(account_id: str) -> str:
         return f"{_ROOT}/{account_id}/{_MARKER}"
-
-    @staticmethod
-    def _descendant_marker(account_id: str, directory_uri: str) -> str:
-        digest = hashlib.sha256(directory_uri.rstrip("/").encode()).hexdigest()
-        return f"{_ROOT}/{account_id}/_system/ttl/descendants/{digest}.enabled"
-
-    async def has_ttl_descendants(self, account_id: str, directory_uri: str) -> bool:
-        """Guard Watch replay over independently expiring resources.
-
-        The marker survives cleanup so replaying an ancestor cannot resurrect
-        an expired child whose source and registration have been removed.
-        """
-        key = (account_id, directory_uri.rstrip("/"))
-        if key not in self._known_resource_scopes:
-            try:
-                await self._agfs.stat(self._descendant_marker(*key), bypass_cache=True)
-            except Exception as exc:
-                if is_storage_not_found(exc):
-                    return False
-                raise
-            self._known_resource_scopes.add(key)
-        return True
 
     async def account_may_have_records(self, account_id: str) -> bool:
         """Cache marker presence only; another worker can publish the first record."""
@@ -112,25 +112,12 @@ class TTLRegistry:
         marker = self.marker_path(record.account_id)
         await self._agfs.ensure_parent_dirs(marker)
         await self._agfs.write(marker, b"1")
-        from openviking.core.ttl import ttl_scope_for_uri
-
-        directory_uri = record.object_uri.rsplit("/", 1)[0]
-        while record.object_type in {"resource", "resource_file"}:
-            key = (record.account_id, directory_uri)
-            if key not in self._known_resource_scopes:
-                descendant_marker = self._descendant_marker(*key)
-                await self._agfs.ensure_parent_dirs(descendant_marker)
-                await self._agfs.write(descendant_marker, b"1")
-                self._known_resource_scopes.add(key)
-            directory_uri = directory_uri.rsplit("/", 1)[0]
-            if ttl_scope_for_uri(directory_uri) != "resources":
-                break
         fields = asdict(record)
         await self._tasks.schedule(
             _TASK_KIND,
             self._key(record.account_id, record.object_uri),
             payload={"record": fields, "retry_count": 0},
-            run_at=record.expires_at,
+            run_at=cleanup_not_before(record),
             # Ordinary writes must not erase a claim lease or retry backoff.
             preserve=lambda item: item["payload"]["record"] == fields,
         )

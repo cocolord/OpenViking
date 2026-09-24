@@ -1230,6 +1230,12 @@ class ContentWriteCoordinator:
                     mf.extra_fields,
                     config=await resolve_ttl_config(self._viking_fs, ctx.account_id),
                 )
+            if mode != "create":
+                mf.extra_fields = apply_ttl_fields(
+                    uri,
+                    mf.extra_fields,
+                    existing_fields=mf.extra_fields,
+                )
             sync_memory_resource_refs(mf, source=RESOURCE_REF_SOURCE_CONTENT_WRITE)
             rendered = MemoryFileUtils.write(mf)
             await self._viking_fs.write_file(
@@ -1242,14 +1248,15 @@ class ContentWriteCoordinator:
 
         from openviking.core.ttl import ttl_scope_for_uri
 
-        if ttl_scope_for_uri(uri) == "resources":
+        resource_write = ttl_scope_for_uri(uri) == "resources"
+        if resource_write and mode == "create":
             from openviking.storage.resource_ttl import prepare_resource_ttl
 
             await prepare_resource_ttl(
                 self._viking_fs,
                 uri,
                 is_dir=False,
-                existing=mode != "create",
+                existing=False,
                 ctx=ctx,
                 lease_ref=lease_ref,
             )
@@ -1268,8 +1275,36 @@ class ContentWriteCoordinator:
                 raise InvalidArgumentError(f"append only supports text content: {uri}")
             final_content = existing_raw + content
             await self._viking_fs.write_file(uri, final_content, ctx=ctx, lease_ref=lease_ref)
+            if resource_write:
+                from openviking.storage.resource_ttl import prepare_resource_ttl
+
+                await prepare_resource_ttl(
+                    self._viking_fs,
+                    uri,
+                    is_dir=False,
+                    existing=True,
+                    ctx=ctx,
+                    lease_ref=lease_ref,
+                    content_md5=content_md5(final_content.encode("utf-8")),
+                )
             return final_content.encode("utf-8")
         await self._viking_fs.write_file(uri, content, ctx=ctx, lease_ref=lease_ref)
+        if resource_write:
+            from openviking.storage.resource_ttl import prepare_resource_ttl
+
+            # New resources pre-publish a cleanup fence above, then use the
+            # completed write as the actual relative-TTL timestamp.
+            await prepare_resource_ttl(
+                self._viking_fs,
+                uri,
+                is_dir=False,
+                existing=True,
+                ctx=ctx,
+                lease_ref=lease_ref,
+                content_md5=content_md5(
+                    content if isinstance(content, bytes) else content.encode("utf-8")
+                ),
+            )
         return content if isinstance(content, bytes) else content.encode("utf-8")
 
     async def _load_file_abstracts(self, uris: list[str], *, ctx: RequestContext) -> dict[str, str]:

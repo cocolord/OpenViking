@@ -1164,9 +1164,10 @@ async def get_ttl(uri: str) -> str:
 async def update_ttl(uri: str, expires_at: str) -> str:
     """Set a live event/resource document's cleanup time (ISO 8601 with timezone).
 
-    Requires an existing TTL and a future timestamp. A parsed resource's files
-    share its root lifecycle; get_ttl identifies that owner. Does not revive
-    expired data or change policy for future documents.
+    Requires an existing TTL and a future timestamp. Resource files have
+    independent lifetimes; directory defaults are changed with
+    update_resource_config. Does not revive expired data or change policy for
+    future documents.
     """
     ctx = _get_ctx()
     uri = validate_request_viking_uri(uri, ctx)

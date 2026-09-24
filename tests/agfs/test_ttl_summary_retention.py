@@ -22,7 +22,7 @@ from tests.unit.service.test_ttl_cleanup import _cleanup_once
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["event", "resource_file", "resource", "session"])
+@pytest.mark.parametrize("kind", ["event", "resource_file", "session"])
 @pytest.mark.parametrize("fail_confirmation", [False, True])
 async def test_cleanup_keeps_all_summary_bytes_and_vectors(
     indexed_fs, monkeypatch, kind, fail_confirmation
@@ -33,10 +33,9 @@ async def test_cleanup_keeps_all_summary_bytes_and_vectors(
     owner = {
         "event": "viking://user/default/memories/events/document.txt",
         "resource_file": "viking://user/default/resources/document.txt",
-        "resource": "viking://user/default/resources/document",
         "session": "viking://user/default/sessions/s1",
     }[kind]
-    directory = kind in {"resource", "session"}
+    directory = kind == "session"
     parent = owner if directory else owner.rsplit("/", 1)[0]
     bodies = (
         [owner + "/body.txt", owner + "/nested/.note", owner + "/nested/.meta.json"]

@@ -1632,9 +1632,22 @@ class ResourceService:
         from openviking.storage.resource_ttl import resource_ttl_fields, resource_ttl_visible
 
         if to and ttl_scope_for_uri(to) == "resources":
-            if not await resource_ttl_visible(self._viking_fs, to, ctx=ctx, require_source=True):
-                return {"status": "success", "root_uri": to, "skipped": "expired_or_removed"}
             fields = await resource_ttl_fields(self._viking_fs, to, ctx=ctx)
+            if not await resource_ttl_visible(
+                self._viking_fs, to, ctx=ctx, require_source=True
+            ):
+                # A completed resource-file cleanup retains a hidden sidecar
+                # fingerprint. Let the parser compare the current source with
+                # that tombstone: unchanged bytes stay deleted, while changed
+                # bytes may establish a new incarnation. While the old registry
+                # record is still pending, keep the generation fence closed.
+                pending = await self._viking_fs.ttl_registry.get(ctx.account_id, to)
+                if not fields or pending is not None:
+                    return {
+                        "status": "success",
+                        "root_uri": to,
+                        "skipped": "expired_or_removed",
+                    }
             kwargs["expected_ttl_generation"] = fields.get("ttl_generation") or ""
         return await self._submit_resource_ingestion(
             path=path,

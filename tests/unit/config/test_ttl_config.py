@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from openviking_cli.utils.config.ttl_config import (
     TTL_SCOPES,
+    TTLCleanupConfig,
     TTLConfig,
     TTLPolicy,
 )
@@ -36,6 +37,26 @@ def test_scope_days_overrides_global():
     assert config.resolve_scope("sessions") == 7
     assert config.resolve_scope("peer_events") == 7
     assert config.enabled is True
+
+
+def test_library_global_never_applies_to_resources_but_resource_directory_can_opt_in():
+    root = "viking://user/u1/resources/project"
+    config = TTLConfig(
+        **{"global": {"mode": "days", "ttl_days": 30}},
+        directories={root: {"mode": "days", "ttl_days": 7}},
+    )
+
+    assert config.resolve_scope("resources") is None
+    assert config.resolve_uri("viking://resources/public/doc.md", "resources") is None
+    assert config.resolve_uri("viking://user/u1/resources/private.md", "resources") is None
+    assert config.resolve_uri(root + "/doc.md", "resources") == 7
+
+
+def test_cleanup_defaults_to_ready_with_day_level_physical_jitter():
+    cleanup = TTLCleanupConfig()
+
+    assert cleanup.enabled is True
+    assert cleanup.cleanup_jitter_seconds == 24 * 60 * 60
 
 
 def test_scope_disabled_blocks_global_inheritance():

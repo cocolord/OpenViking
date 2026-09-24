@@ -546,27 +546,9 @@ async def export_ovpack(
         )
     )
     entries = await _filter_existing_optional_sidecars(viking_fs, uri, entries, ctx)
-    from openviking.core.ttl import RESOURCE_TTL_FILENAME, ttl_scope_for_uri
-    from openviking.storage.resource_ttl import resource_ttl_fields
-
-    if ttl_scope_for_uri(uri) == "resources":
-        fields = await resource_ttl_fields(viking_fs, uri, ctx=ctx)
-        if fields:
-            root_metadata = next(
-                (entry for entry in entries if entry.get("rel_path") == RESOURCE_TTL_FILENAME),
-                None,
-            )
-            if root_metadata is None:
-                root_metadata = {
-                    "rel_path": RESOURCE_TTL_FILENAME,
-                    "name": RESOURCE_TTL_FILENAME,
-                    "uri": f"{uri}/{RESOURCE_TTL_FILENAME}",
-                    "isDir": False,
-                }
-                entries.append(root_metadata)
-            # Exporting a subtree must retain an earlier enclosing deadline,
-            # even when that subtree has a later snapshot of its own.
-            root_metadata["ttl_fields"] = fields
+    # Exact per-file TTL sidecars are already present in the recursive tree and
+    # round-trip as ordinary package files. Do not synthesize a root .ttl.json:
+    # directories are policy boundaries, not lifecycle owners.
     if include_vectors:
         ensure_dense_snapshot_supported(vector_store)
         report = await check_index_consistency(

@@ -43,7 +43,7 @@ from openviking.utils.git_auth import is_git_https_url
 from openviking.utils.ingest_options import IngestOptions
 from openviking.utils.log_correlation import log_correlation
 from openviking.utils.summarizer import Summarizer
-from openviking_cli.exceptions import InvalidArgumentError, OpenVikingError
+from openviking_cli.exceptions import OpenVikingError
 from openviking_cli.utils import VikingURI, get_logger
 from openviking_cli.utils.config import get_openviking_config
 from openviking_cli.utils.storage import StoragePath
@@ -287,10 +287,13 @@ class ResourceProcessor:
         is_code_repo: bool,
         ingest_options: IngestOptions,
         source_metadata: Optional[Dict[str, str]],
+        resource_ttl: Optional[Dict[str, Any]] = None,
+        watch_refresh: bool = False,
     ) -> Any:
         """Resolve and commit one artifact through the canonical update plan."""
         from openviking.metrics.datasources.resource import ResourceIngestionEventDataSource
         from openviking.storage.context_update_plan import (
+            ContextUpdatePlan,
             build_context_update_plan_from_snapshot,
             execute_content_tree_actions,
         )
@@ -306,6 +309,7 @@ class ResourceProcessor:
             root_uri=root_uri,
             ctx=ctx,
             lease_ref=lease_ref,
+            resource_ttl=resource_ttl,
         )
         telemetry = get_current_telemetry()
         artifact_backend = str(getattr(artifact_ref, "backend", "unknown"))
@@ -319,6 +323,78 @@ class ResourceProcessor:
                     target_root_uri=root_uri,
                     root_is_file=root_is_file,
                 )
+                if watch_refresh:
+                    from openviking.storage.resource_ttl import (
+                        unchanged_expired_resource_paths,
+                    )
+
+                    expired_unchanged = await unchanged_expired_resource_paths(
+                        get_viking_fs(),
+                        root_uri,
+                        {
+                            path: entry.md5
+                            for path, entry in artifact_inventory.entries.items()
+                            if not entry.is_dir and entry.md5
+                        },
+                        ctx=ctx,
+                    )
+                    if expired_unchanged:
+                        artifact_inventory = replace(
+                            artifact_inventory,
+                            entries={
+                                path: entry
+                                for path, entry in artifact_inventory.entries.items()
+                                if path not in expired_unchanged
+                            },
+                            artifact_paths={
+                                path: artifact_path
+                                for path, artifact_path in artifact_inventory.artifact_paths.items()
+                                if path not in expired_unchanged
+                            },
+                            rewritten_paths=frozenset(
+                                path
+                                for path in artifact_inventory.rewritten_paths
+                                if path not in expired_unchanged
+                            ),
+                        )
+                        if root_is_file and not artifact_inventory.entries:
+                            # A flat-file Watch has no siblings to carry a plan.
+                            # Treat an unchanged expired source as a successful
+                            # no-op instead of compiling an empty root snapshot.
+                            # Target resolution may already have reserved this
+                            # missing file URI as an empty directory; remove that
+                            # placeholder so the expired file remains absent.
+                            if not target_preexisting:
+                                try:
+                                    stat = await get_viking_fs().stat(
+                                        root_uri, ctx=ctx, skip_count=True
+                                    )
+                                except Exception:
+                                    stat = {}
+                                if stat.get("isDir"):
+                                    await get_viking_fs().remove_files(
+                                        root_uri,
+                                        recursive=True,
+                                        ctx=ctx,
+                                        lease_ref=lease_ref,
+                                    )
+                            return ContextUpdatePlan(
+                                root_uri=root_uri,
+                                context_type=context_type_for_uri(root_uri),
+                            )
+                if root_is_file and not target_preexisting:
+                    # Resolving a missing flat-file target can leave an empty
+                    # placeholder directory at that URI. This is especially
+                    # visible after TTL cleanup retains the sibling tombstone.
+                    # Remove only the placeholder before an added file action.
+                    try:
+                        stat = await get_viking_fs().stat(root_uri, ctx=ctx, skip_count=True)
+                    except Exception:
+                        stat = {}
+                    if stat.get("isDir"):
+                        await get_viking_fs().remove_files(
+                            root_uri, recursive=True, ctx=ctx, lease_ref=lease_ref
+                        )
             plan_processing_mode = (
                 processing_mode
                 if processing_mode == VECTORS_ONLY or summarize or vectorize
@@ -945,23 +1021,9 @@ class ResourceProcessor:
                             ingest_options,
                             acl_update=await viking_fs.prepare_acl_update(root_uri, acl, ctx),
                         )
-                    from openviking.storage.resource_ttl import (
-                        prepare_resource_ttl,
-                        resource_ttl_fields,
-                    )
+                    from openviking.storage.resource_ttl import resource_ttl_fields
 
                     if expected_ttl_generation is not None:
-                        # A Watch owns one import root. Replaying a parent that
-                        # has independently expiring descendants could recreate
-                        # them after cleanup; the persistent descendant marker also
-                        # covers descendants already physically removed.
-                        if await viking_fs.ttl_registry.has_ttl_descendants(
-                            ctx.account_id, root_uri
-                        ):
-                            raise InvalidArgumentError(
-                                "Watch refresh cannot cover independently expiring resources; "
-                                "watch their individual import roots instead"
-                            )
                         live_fields = await resource_ttl_fields(viking_fs, root_uri, ctx=ctx)
                         if (live_fields.get("ttl_generation") or "") != expected_ttl_generation:
                             await self._cleanup_parse_result_artifact(
@@ -976,15 +1038,6 @@ class ResourceProcessor:
                                 "skipped": "stale_ttl_generation",
                                 "_resource_lock": resource_lock,
                             }
-                    ttl_fields = await prepare_resource_ttl(
-                        viking_fs,
-                        root_uri,
-                        is_dir=not root_is_file,
-                        existing=target_preexisting,
-                        ctx=ctx,
-                        lease_ref=resource_lock,
-                        resource_ttl=resource_ttl,
-                    )
                     artifact_ref = self._ensure_parse_artifact_ref(parse_result)
                     artifact_store = self._store_for_parse_artifact(
                         artifact_ref, output_store=output_store, viking_fs=viking_fs, ctx=ctx
@@ -1009,8 +1062,16 @@ class ResourceProcessor:
                             prepared_resource=prepared_resource,
                             source_format=parse_result.source_format,
                         ),
+                        resource_ttl=resource_ttl,
+                        watch_refresh=expected_ttl_generation is not None,
                     )
                     incremental_noop = target_preexisting and context_update_plan.is_noop()
+                    # The target adapter creates/renews exact file snapshots only
+                    # after their content writes complete.  Reading here avoids
+                    # the old root-level pre-write renewal and keeps the watch
+                    # fence for the flat-file case. Directories have no owner.
+                    if root_is_file:
+                        ttl_fields = await resource_ttl_fields(viking_fs, root_uri, ctx=ctx)
                     temp_uri = root_uri
                     source_committed = True
                 except BaseException:
