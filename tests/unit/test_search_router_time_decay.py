@@ -17,6 +17,10 @@ def _request_context() -> RequestContext:
     return RequestContext(user=UserIdentifier.the_default_user(), role=Role.ROOT)
 
 
+def _http_request():
+    return SimpleNamespace(state=SimpleNamespace())
+
+
 async def test_search_router_forwards_time_decay_protection(monkeypatch):
     captured = {}
 
@@ -35,6 +39,7 @@ async def test_search_router_forwards_time_decay_protection(monkeypatch):
 
     response = await search_router.search(
         search_router.SearchRequest(query="sample", events_time_decay_protection="2d"),
+        _http_request(),
         _request_context(),
     )
 
@@ -117,6 +122,7 @@ async def test_context_router_forwards_time_decay_protection(monkeypatch):
             mode="context",
             events_time_decay_protection="2d",
         ),
+        http_request=_http_request(),
         effective_filter=None,
         actual_limit=10,
     )

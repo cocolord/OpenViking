@@ -12,7 +12,6 @@ from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Awaitable, Callable, Container, Dict, List, Mapping, Optional
 
 from openviking.core.namespace import (
-    canonical_user_root,
     resolve_uri,
     uri_parts,
     visible_roots,
@@ -26,6 +25,7 @@ from openviking.storage.acl import (
     AclAction,
     AclManager,
     AclMode,
+    AclUpdate,
     acl_grant_tokens,
     acl_principals,
     is_acl_uri,
@@ -130,6 +130,7 @@ VIKINGDB_CONTENT_MAX_SIZE = 1024 * 1024
 class UpsertOptions:
     partial_update: bool = False
     search_tag_mode: str = "replace"
+    acl_update: AclUpdate | None = None
 
 
 @dataclass
@@ -162,6 +163,11 @@ def normalize_upsert_options(
     return UpsertOptions(
         partial_update=bool(options.get("partial_update", False)),
         search_tag_mode=str(options.get("search_tag_mode", "replace")),
+        acl_update=(
+            AclUpdate.model_validate(options["acl_update"])
+            if options.get("acl_update") is not None
+            else None
+        ),
     )
 
 
@@ -1133,7 +1139,7 @@ class VikingVectorIndexBackend:
             options.search_tag_mode,
         )
         data = {key: value for key, value in data.items() if key not in ACL_CONTEXT_FIELDS}
-        data = (await self._materialize_acl_fields([data], ctx))[0]
+        data = (await self._materialize_acl_fields([data], ctx, update=options.acl_update))[0]
         backend = self._get_backend_for_context(ctx)
         logger.debug(
             "[VikingVectorIndexBackend.upsert] Using backend for account_id=%s",
@@ -1143,6 +1149,10 @@ class VikingVectorIndexBackend:
             data,
             options=options,
         )
+        if result and options.acl_update and data.get("uri") == options.acl_update.uri:
+            # Import descendants can reach the index before their root. Once its
+            # own record exists, converge all stored inherited grants as well.
+            await self.acl_manager.refresh_context_subtree(options.acl_update.uri, ctx)
         logger.debug(
             "[VikingVectorIndexBackend.upsert] Completed with partial_update=%s, "
             "search_tag_mode=%s, result=%s",
@@ -1189,11 +1199,15 @@ class VikingVectorIndexBackend:
         return await self._get_backend_for_context(ctx).upsert_many(data_list)
 
     async def _materialize_acl_fields(
-        self, records: List[Dict[str, Any]], ctx: RequestContext
+        self,
+        records: List[Dict[str, Any]],
+        ctx: RequestContext,
+        *,
+        update: AclUpdate | None = None,
     ) -> List[Dict[str, Any]]:
         if not self.acl_manager or not records:
             return records
-        return await self.acl_manager.materialize_context_records(records, ctx)
+        return await self.acl_manager.materialize_context_records(records, ctx, update=update)
 
     async def update(self, data: Dict[str, Any], *, ctx: RequestContext) -> UpdateResult:
         """Strict update path. The target record must already exist."""
@@ -2872,31 +2886,33 @@ class VikingVectorIndexBackend:
             )
 
         controlled_modes = [AclMode.INHERIT.value, AclMode.RESTRICTED.value]
-        uncontrolled_filter = And(
-            [
-                RawDSL(
-                    {
-                        "op": "must_not",
-                        "field": ACL_MODE_FIELD,
-                        # Exclude controlled modes so absent/null fields stay visible.
-                        "conds": controlled_modes,
-                    }
-                ),
-                Or([PathScope("uri", root, depth=-1) for root in visible_roots(ctx)]),
-            ]
+        # Shared records written while ACL was disabled retain the root's
+        # default user:* manage access. Controlled descendants must match their
+        # own grants, including inherit nodes below a restricted boundary.
+        default_shared_filter = RawDSL(
+            {"op": "must_not", "field": ACL_MODE_FIELD, "conds": controlled_modes}
         )
         read_grants = acl_grant_tokens(acl_principals(ctx), AclAction.READ)
         shared_acl_filter = And(
             [
                 PathScope("uri", "viking://resources", depth=-1),
-                In(ACL_MODE_FIELD, controlled_modes),
                 Or(
                     [
-                        In("acl_direct_grants", read_grants),
+                        default_shared_filter,
                         And(
                             [
-                                Eq(ACL_MODE_FIELD, AclMode.INHERIT.value),
-                                In("acl_inherited_grants", read_grants),
+                                In(ACL_MODE_FIELD, controlled_modes),
+                                Or(
+                                    [
+                                        In("acl_direct_grants", read_grants),
+                                        And(
+                                            [
+                                                Eq(ACL_MODE_FIELD, AclMode.INHERIT.value),
+                                                In("acl_inherited_grants", read_grants),
+                                            ]
+                                        ),
+                                    ]
+                                ),
                             ]
                         ),
                     ]
@@ -2904,9 +2920,12 @@ class VikingVectorIndexBackend:
             ]
         )
         access_filters: List[FilterExpr] = [
-            uncontrolled_filter,
+            *(
+                PathScope("uri", root, depth=-1)
+                for root in visible_roots(ctx)
+                if not is_acl_uri(root)
+            ),
             shared_acl_filter,
-            PathScope("uri", f"{canonical_user_root(ctx)}/resources", depth=-1),
         ]
         if ctx.role == Role.ADMIN:
             access_filters.append(PathScope("uri", "viking://resources", depth=-1))
