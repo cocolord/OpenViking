@@ -260,11 +260,7 @@ class OpenVikingService:
         if manager is None:
             return
         base_config = self._config.model_copy(
-            update={
-                "agent_evolution": self._agent_evolution_base_config.model_copy(
-                    deep=True
-                )
-            }
+            update={"agent_evolution": self._agent_evolution_base_config.model_copy(deep=True)}
         )
         await manager.replace_base_config(base_config)
 
@@ -286,11 +282,7 @@ class OpenVikingService:
         if self._agfs_client is None:
             raise RuntimeError("AGFS client not initialized")
         base_config = self._config.model_copy(
-            update={
-                "agent_evolution": self._agent_evolution_base_config.model_copy(
-                    deep=True
-                )
-            },
+            update={"agent_evolution": self._agent_evolution_base_config.model_copy(deep=True)},
         )
         manager = build_runtime_config_manager(
             AsyncAGFSClient(self._agfs_client),
@@ -299,7 +291,6 @@ class OpenVikingService:
         )
         await manager.initialize()
         self._runtime_config_manager = manager
-        self._viking_fs.runtime_config_manager = manager
         if self._vikingdb_manager is None or self._vikingdb_manager.acl_manager is None:
             raise NotInitializedError("ACL")
         self._vikingdb_manager.acl_manager.set_runtime_config_manager(manager)
@@ -498,6 +489,7 @@ class OpenVikingService:
             embedding_provider=self._embedding_provider,
             vector_config_resolver=self._vector_config_resolver,
         )
+        self._viking_fs.runtime_config_manager = self._runtime_config_manager
         if enable_recorder:
             logger.info("VikingFS IO Recorder enabled")
         self._resource_processor = ResourceProcessor(
