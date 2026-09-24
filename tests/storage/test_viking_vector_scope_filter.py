@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from datetime import datetime, timezone
+
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -362,6 +364,16 @@ async def test_cloud_default_user_scope_splits_tagged_events_without_a_peer():
     assert semantic_call["return_detail_info"] is False
 
 
+def _single_account_backend(async_adapter, account_id: str | None):
+    backend = object.__new__(_SingleAccountBackend)
+    backend._bound_account_id = account_id
+    backend._operation_condition = threading.Condition()
+    backend._operations = {}
+    backend._retired = False
+    backend._async_adapter = async_adapter
+    return backend
+
+
 @pytest.mark.asyncio
 async def test_search_by_random_passes_runtime_acl_state_to_tenant_filter():
     ctx = _ctx()
@@ -369,7 +381,7 @@ async def test_search_by_random_passes_runtime_acl_state_to_tenant_filter():
     acl_reader = _AclConfigReader(False)
     backend = object.__new__(VikingVectorIndexBackend)
     backend.acl_manager = AclManager(backend, acl_reader)
-    backend._get_backend_for_context = lambda _ctx: adapter
+    backend._get_backend_for_context = AsyncMock(return_value=adapter)
 
     assert await backend.search_by_random(ctx=ctx) == []
     adapter.search_by_random.assert_awaited_once()
@@ -454,7 +466,9 @@ def test_mixed_visible_and_outside_targets_keep_original_tenant_filter():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("legacy_mode", [{}, {"acl_mode": None}, {"acl_mode": "none"}])
-async def test_tenant_search_enforces_visible_roots_and_shared_acl(tmp_path, legacy_mode):
+async def test_tenant_search_enforces_visible_roots_and_shared_acl(
+    vector_backend_factory, tmp_path, legacy_mode
+):
     ctx = _ctx()
     own_uri = "viking://user/alice/resources/notes"
     cross_user_uri = "viking://user/bob/resources/notes"
@@ -535,7 +549,7 @@ async def test_tenant_search_enforces_visible_roots_and_shared_acl(tmp_path, leg
         },
     ]
 
-    backend = VikingVectorIndexBackend(
+    backend = vector_backend_factory(
         config=VectorDBBackendConfig(
             backend="local", name="context", dimension=4, path=str(tmp_path / "vectors")
         )
@@ -711,9 +725,7 @@ def test_actor_peer_target_retains_account_and_exact_target_scope():
 
 @pytest.mark.asyncio
 async def test_search_by_random_propagates_adapter_errors():
-    backend = object.__new__(_SingleAccountBackend)
-    backend._bound_account_id = None
-    backend._async_adapter = _FailingAsyncAdapter()
+    backend = _single_account_backend(_FailingAsyncAdapter(), None)
 
     with pytest.raises(RuntimeError, match="search_by_random failed"):
         await backend.search_by_random(filter=Eq("uri", "viking://resources/a.md"))
@@ -721,9 +733,7 @@ async def test_search_by_random_propagates_adapter_errors():
 
 @pytest.mark.asyncio
 async def test_search_by_random_reuses_account_filter_for_raw_dsl():
-    backend = object.__new__(_SingleAccountBackend)
-    backend._bound_account_id = "acct"
-    backend._async_adapter = _RecordingAsyncAdapter()
+    backend = _single_account_backend(_RecordingAsyncAdapter(), "acct")
     raw_filter = {"op": "must", "field": "uri", "conds": ["viking://resources"]}
 
     await backend.search_by_random(filter=raw_filter)
@@ -1094,8 +1104,8 @@ async def test_tagged_events_use_the_same_split_and_scores_across_backends(
 
 
 @pytest.mark.asyncio
-async def test_local_tag_split_does_not_boost_fresh_events(tmp_path):
-    backend = VikingVectorIndexBackend(
+async def test_local_tag_split_does_not_boost_fresh_events(vector_backend_factory, tmp_path):
+    backend = vector_backend_factory(
         config=VectorDBBackendConfig(
             backend="local", name="context", dimension=4, path=str(tmp_path / "vectors")
         )
