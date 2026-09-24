@@ -28,9 +28,13 @@ class CleanupQueue:
     def __init__(self):
         self.items = deque()
         self.peak = 0
+        self.in_progress = 0
 
     async def size(self):
         return len(self.items)
+
+    async def get_status(self):
+        return SimpleNamespace(pending=len(self.items), in_progress=self.in_progress)
 
     async def enqueue(self, message):
         self.items.append(message)

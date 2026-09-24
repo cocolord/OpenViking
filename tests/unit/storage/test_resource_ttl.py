@@ -20,7 +20,13 @@ from openviking.storage.viking_fs import VikingFS
 from openviking_cli.exceptions import InvalidArgumentError, NotFoundError
 from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils.config.ttl_config import ResourceTTL, TTLConfig
-from tests.unit.service.test_ttl_cleanup import _make_service, _message, _record, _session_meta
+from tests.unit.service.test_ttl_cleanup import (
+    _cleanup_once,
+    _make_service,
+    _message,
+    _record,
+    _session_meta,
+)
 from tests.unit.service.test_ttl_cleanup import tracker as tracker
 from tests.unit.storage.test_ttl_registry import _MemoryAGFS
 
@@ -217,7 +223,7 @@ async def test_cleanup_uses_common_strict_delete_and_persistent_retry(tracker, k
     assert fs.rm.await_args.kwargs["strict"] is True
     assert fs.rm.await_args.kwargs["recursive"] is recursive
     fs.rm.side_effect = None
-    result = await cleanup._cleanup_record(record)
+    result = await _cleanup_once(cleanup, record)
     assert result["deleted"]
     registry.remove_if_generation.assert_awaited_once()
 

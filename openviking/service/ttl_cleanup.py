@@ -27,6 +27,7 @@ from openviking.core.ttl import (
     hidden_by_ttl,
     ttl_metadata_uri,
 )
+from openviking.pyagfs.exceptions import AGFSConfigError, AGFSPermissionDeniedError
 from openviking.server.error_mapping import is_storage_not_found
 from openviking.server.identity import RequestContext, Role
 from openviking.service.periodic_task import PeriodicTask
@@ -35,10 +36,12 @@ from openviking.service.task_tracker import TaskStatus, get_task_tracker
 from openviking.service.task_tracker_concurrency import OwnerLoopDispatcher, run_to_completion
 from openviking.session.memory.utils.messages import parse_memory_file_with_fields
 from openviking.session.ttl_fence import reconcile_session_ttl
+from openviking.storage.errors import StorageException, VikingDBException
 from openviking.storage.queuefs.named_queue import DequeueHandlerBase
 from openviking.storage.queuefs.process_result import ProcessResult
 from openviking.storage.ttl_registry import TTLRecord
 from openviking.utils.time_utils import format_iso8601
+from openviking_cli.exceptions import InvalidArgumentError, PermissionDeniedError
 from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils.logger import get_logger
 
@@ -64,6 +67,7 @@ def _ttl_cleanup_message(
     record: TTLRecord,
     task_id: Optional[str] = None,
     retry_count: int = 0,
+    verify_only: bool = False,
 ) -> dict[str, Any]:
     return {
         "task_id": task_id or _cleanup_task_id(record, attempt=retry_count),
@@ -71,11 +75,14 @@ def _ttl_cleanup_message(
         "user_id": SYSTEM_TASK_USER_ID,
         "target": asdict(record),
         "retry_count": max(0, int(retry_count)),
+        "verify_only": verify_only,
     }
 
 
 class TTLCleanupService:
     """Own the TTL cleanup consumer and registry scheduler."""
+
+    MAX_FAST_RETRIES = 3
 
     def __init__(
         self,
@@ -123,64 +130,124 @@ class TTLCleanupService:
             # remains permanently failed/cancelled.  The deterministic attempt
             # id keeps duplicate recovery deliveries idempotent.
             retry_count = int(message.get("retry_count", 0)) + 1
-            replacement = _ttl_cleanup_message(
-                record=record,
-                retry_count=retry_count,
-            )
-            queue_manager = self._service._queue_manager
-            await queue_manager.enqueue(queue_manager.TTL_CLEANUP, replacement)
-            return ProcessResult.requeued()
-
-        await tracker.start(task_id, stage="strict_cleanup", **owner)
-        try:
-            result = await run_to_completion(lambda: self._cleanup_record(record))
-        except Exception as exc:
-            # QueueFS ACKs every returned result, including FAILED. Persist a
-            # delayed retry first and return REQUEUED so partial deletion or
-            # eventual vector consistency cannot strand an uncleared object.
-            error = f"TTL cleanup retry: {exc}"
-            await tracker.update_stage(
-                task_id,
-                "retrying",
-                meta={
-                    "last_error": error,
-                    "retry_count": int(message.get("retry_count", 0)) + 1,
-                },
-                **owner,
-            )
-            retry_count = int(message.get("retry_count", 0)) + 1
-            delay = min(3600.0, 30.0 * (2 ** min(retry_count - 1, 7)))
-            next_retry_at = format_iso8601(
-                datetime.now(timezone.utc)
-                + timedelta(seconds=min(3600.0, delay * random.uniform(1.0, 1.2)))
-            )
-            # Persist before ACK, keeping delayed retries out of the immediate queue.
-            deferred = await self._service.viking_fs.ttl_registry.defer_retry(
+            await self._service.viking_fs.ttl_registry.defer_retry(
                 record,
                 retry_count=retry_count,
-                task_id=task_id,
-                next_retry_at=next_retry_at,
+                expected_retry_count=retry_count - 1,
+                task_id=_cleanup_task_id(record, attempt=retry_count),
+                next_retry_at=format_iso8601(datetime.now(timezone.utc) + timedelta(days=1)),
             )
-            if not deferred:
-                await tracker.complete(
-                    task_id, {"deleted": False, "skipped": "superseded"}, **owner
-                )
-                return ProcessResult.success()
-            logger.warning(
-                "TTL cleanup requeued for %s generation=%s: %s",
-                record.object_uri,
-                record.generation,
-                exc,
-            )
+            return ProcessResult.requeued()
+
+        result = await run_to_completion(lambda: self._run_delivery(record, message))
+        if result is None:
             return ProcessResult.requeued()
 
         await tracker.complete(task_id, result, **owner)
         return ProcessResult.success()
 
-    async def _cleanup_record(self, scheduled: TTLRecord) -> dict[str, Any]:
-        """Strictly delete one generation while holding its object lock."""
+    async def _defer_retry(self, record: TTLRecord, message: dict, exc: Exception) -> None:
+        """One retry owner: persist bounded backoff before acknowledging QueueFS."""
+        confirmation = isinstance(exc, StorageException) and exc.action == "confirm_delete"
+        cause = exc.__cause__ if confirmation and exc.__cause__ is not None else exc
+        status = getattr(cause, "status_code", None)
+        permanent = (
+            isinstance(
+                cause,
+                (
+                    AGFSConfigError,
+                    AGFSPermissionDeniedError,
+                    PermissionError,
+                    PermissionDeniedError,
+                    InvalidArgumentError,
+                    ValueError,
+                ),
+            )
+            or (isinstance(status, int) and 400 <= status < 500 and status not in (408, 409, 429))
+            or (
+                isinstance(cause, VikingDBException)
+                and cause.action is not None
+                and not cause.retryable
+            )
+        )
+        retry_count = int(message.get("retry_count", 0)) + 1
+        cooldown = permanent or retry_count > self.MAX_FAST_RETRIES
+        delay = 86400.0 if cooldown else 30.0 * 2 ** (retry_count - 1)
+        next_retry_at = format_iso8601(
+            datetime.now(timezone.utc) + timedelta(seconds=delay * random.uniform(1.0, 1.2))
+        )
+        # Give an accepted deletion one confirmation-only retry. If it still
+        # has residue, the following attempt reissues deletion to repair a real
+        # partial/no-op delete rather than polling forever.
+        verify_only = confirmation and not message.get("verify_only", False)
+        deferred = await self._service.viking_fs.ttl_registry.defer_retry(
+            record,
+            retry_count=retry_count,
+            expected_retry_count=retry_count - 1,
+            task_id=message["task_id"],
+            next_retry_at=next_retry_at,
+            verify_only=verify_only,
+        )
+        if deferred:
+            stage = "retry_cooldown" if cooldown else "retrying"
+            await get_task_tracker().update_stage(
+                message["task_id"],
+                stage,
+                account_id=message["account_id"],
+                user_id=message["user_id"],
+                meta={
+                    "last_error": str(exc),
+                    "retry_count": retry_count,
+                    "next_retry_at": next_retry_at,
+                    "verify_only": verify_only,
+                },
+            )
+            logger.warning(
+                "TTL cleanup %s uri=%s retry_count=%d verify_only=%s next_retry_at=%s: %s",
+                stage,
+                record.object_uri,
+                retry_count,
+                verify_only,
+                next_retry_at,
+                exc,
+            )
+
+    async def _run_delivery(self, scheduled: TTLRecord, message: dict) -> Optional[dict]:
+        """Fence duplicate deliveries and persist retry progress under the object lock."""
         viking_fs = self._service.viking_fs
         registry = viking_fs.ttl_registry
+        try:
+            ctx, lease = await self._acquire_object_lock(scheduled)
+        except Exception as exc:
+            await self._defer_retry(scheduled, message, exc)
+            return None
+        try:
+            item = await registry.get_scheduled(scheduled.account_id, scheduled.object_uri)
+            if item is None or item["payload"]["record"] != asdict(scheduled):
+                return {"deleted": False, "skipped": "stale_registry_generation"}
+            if item["payload"].get("retry_count", 0) != message.get("retry_count", 0):
+                # Another delivery already persisted the next attempt. Do not
+                # reset its backoff or complete its still-running business task.
+                return None
+            message = {**message, "verify_only": bool(item["payload"].get("verify_only"))}
+            await get_task_tracker().start(
+                message["task_id"],
+                stage="confirm_cleanup" if message["verify_only"] else "strict_cleanup",
+                account_id=message["account_id"],
+                user_id=message["user_id"],
+            )
+            try:
+                return await self._cleanup_record(
+                    scheduled, ctx, lease, verify_only=message["verify_only"]
+                )
+            except Exception as exc:
+                await self._defer_retry(scheduled, message, exc)
+                return None
+        finally:
+            await viking_fs._async_agfs.pathlock_release(lease)
+
+    async def _acquire_object_lock(self, scheduled: TTLRecord) -> tuple[RequestContext, Any]:
+        viking_fs = self._service.viking_fs
         ctx = RequestContext(
             user=UserIdentifier(scheduled.account_id, scheduled.user_id or SYSTEM_TASK_USER_ID),
             role=Role.ROOT,
@@ -212,67 +279,69 @@ class TTLCleanupService:
                     ),
                 ]
             )
-        try:
-            registered = await registry.get(scheduled.account_id, scheduled.object_uri)
-            if registered is None or registered.generation != scheduled.generation:
-                return {"deleted": False, "skipped": "stale_registry_generation"}
+        return ctx, lease
 
-            if scheduled.object_type == OBJECT_TYPE_SESSION:
-                await reconcile_session_ttl(
-                    viking_fs,
-                    ctx,
-                    session_uri=scheduled.object_uri,
-                    generation=scheduled.generation,
-                    lease_ref=lease,
-                )
-            live = await self._read_live_record(scheduled, ctx)
-            if live is not None and live.generation != scheduled.generation:
-                # An import/restore may have replaced the source without going
-                # through the normal registry-first writer.  Repair the
-                # projection when the replacement has its own complete TTL
-                # snapshot; otherwise discard only the stale old projection.
-                if live.generation and live.expires_at:
-                    await registry.upsert(live)
-                else:
-                    await registry.remove_if_generation(
-                        scheduled.account_id, scheduled.object_uri, scheduled.generation
-                    )
-                return {"deleted": False, "skipped": "stale_object_generation"}
-            if live is not None and not hidden_by_ttl(live.expires_at):
-                if live.expires_at != registered.expires_at:
-                    await registry.upsert(live)
-                return {"deleted": False, "skipped": "renewed"}
-
-            # Missing source still requires strict vector cleanup.  Passing the
-            # already-held lease makes the live re-check and the whole delete
-            # one critical section; writers cannot renew or recreate between.
-            remove = (
-                self._service.fs.rm
-                if scheduled.object_type in {OBJECT_TYPE_RESOURCE, OBJECT_TYPE_RESOURCE_FILE}
-                else viking_fs.rm
-            )
-            await remove(
-                scheduled.object_uri,
-                recursive=scheduled.object_type in {OBJECT_TYPE_SESSION, OBJECT_TYPE_RESOURCE},
-                ctx=ctx,
+    async def _cleanup_record(
+        self, scheduled: TTLRecord, ctx: RequestContext, lease: Any, *, verify_only: bool = False
+    ) -> dict[str, Any]:
+        """Strictly delete one generation under the caller's object lock."""
+        viking_fs = self._service.viking_fs
+        registry = viking_fs.ttl_registry
+        if scheduled.object_type == OBJECT_TYPE_SESSION:
+            await reconcile_session_ttl(
+                viking_fs,
+                ctx,
+                session_uri=scheduled.object_uri,
+                generation=scheduled.generation,
                 lease_ref=lease,
-                strict=True,
-                preserve_summaries=True,
             )
-            removed = await registry.remove_if_generation(
-                scheduled.account_id, scheduled.object_uri, scheduled.generation
-            )
-            if not removed:
-                raise RuntimeError(
-                    f"TTL registry record changed before cleanup completion: {scheduled.object_uri}"
+        live = await self._read_live_record(scheduled, ctx)
+        if live is not None and live.generation != scheduled.generation:
+            # An import/restore may have replaced the source without going
+            # through the normal registry-first writer.  Repair the
+            # projection when the replacement has its own complete TTL
+            # snapshot; otherwise discard only the stale old projection.
+            if live.generation and live.expires_at:
+                await registry.upsert(live)
+            else:
+                await registry.remove_if_generation(
+                    scheduled.account_id, scheduled.object_uri, scheduled.generation
                 )
-            # The only process-local VikingFS cache stores count-based engine
-            # selection hints.  Clear it after physical deletion so no stale
-            # scope count survives cleanup.
-            viking_fs._count_cache.clear()
-            return {"deleted": True, "source_missing": live is None}
-        finally:
-            await viking_fs._async_agfs.pathlock_release(lease)
+            return {"deleted": False, "skipped": "stale_object_generation"}
+        if live is not None and not hidden_by_ttl(live.expires_at):
+            if live.expires_at != scheduled.expires_at:
+                await registry.upsert(live)
+            return {"deleted": False, "skipped": "renewed"}
+
+        # Missing source still requires strict vector cleanup.  Passing the
+        # already-held lease makes the live re-check and the whole delete
+        # one critical section; writers cannot renew or recreate between.
+        remove = (
+            self._service.fs.rm
+            if scheduled.object_type in {OBJECT_TYPE_RESOURCE, OBJECT_TYPE_RESOURCE_FILE}
+            else viking_fs.rm
+        )
+        await remove(
+            scheduled.object_uri,
+            recursive=scheduled.object_type in {OBJECT_TYPE_SESSION, OBJECT_TYPE_RESOURCE},
+            ctx=ctx,
+            lease_ref=lease,
+            strict=True,
+            preserve_summaries=True,
+            **({"verify_only": True} if verify_only else {}),
+        )
+        removed = await registry.remove_if_generation(
+            scheduled.account_id, scheduled.object_uri, scheduled.generation
+        )
+        if not removed:
+            raise RuntimeError(
+                f"TTL registry record changed before cleanup completion: {scheduled.object_uri}"
+            )
+        # The only process-local VikingFS cache stores count-based engine
+        # selection hints.  Clear it after physical deletion so no stale
+        # scope count survives cleanup.
+        viking_fs._count_cache.clear()
+        return {"deleted": True, "source_missing": live is None}
 
     async def _read_live_record(
         self, scheduled: TTLRecord, ctx: RequestContext
@@ -330,7 +399,8 @@ class TTLCleanupScheduler(PeriodicTask):
         queue = queue_manager.get_queue(queue_manager.TTL_CLEANUP)
         # Drain the durable queue before leasing another page. Otherwise a slow
         # backend can accumulate repeated deliveries after claim leases expire.
-        if await queue.size():
+        status = await queue.get_status()
+        if status.pending or status.in_progress:
             return
         now = datetime.now(timezone.utc)
         cutoff = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -359,6 +429,7 @@ class TTLCleanupScheduler(PeriodicTask):
                     record=record,
                     task_id=payload.get("task_id"),
                     retry_count=int(payload.get("retry_count", 0)),
+                    verify_only=bool(payload.get("verify_only", False)),
                 )
             )
             scheduled += 1
@@ -412,6 +483,7 @@ class _TTLCleanupProcessor(DequeueHandlerBase):
             "account_id": str(payload["account_id"]),
             "user_id": str(payload["user_id"]),
             "retry_count": max(0, int(payload.get("retry_count", 0))),
+            "verify_only": bool(payload.get("verify_only", False)),
             "target": {
                 "object_type": object_type,
                 "object_uri": object_uri,

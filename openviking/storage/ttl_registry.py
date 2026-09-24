@@ -137,13 +137,16 @@ class TTLRegistry:
         self._known_accounts.add(record.account_id)
 
     async def get(self, account_id: str, uri: str) -> Optional[TTLRecord]:
-        item = await self._tasks.get_scheduled(_TASK_KIND, self._key(account_id, uri))
+        item = await self.get_scheduled(account_id, uri)
         if item is None:
             return None
         record = TTLRecord.from_dict(item["payload"]["record"])
         if record.account_id != account_id or record.object_uri != uri:
             raise ValueError(f"Invalid TTL registry record for {uri}")
         return record
+
+    async def get_scheduled(self, account_id: str, uri: str) -> Optional[dict]:
+        return await self._tasks.get_scheduled(_TASK_KIND, self._key(account_id, uri))
 
     async def remove_if_generation(self, account_id: str, uri: str, generation: str) -> bool:
         return await self._tasks.cancel_scheduled(
@@ -159,14 +162,28 @@ class TTLRegistry:
         retry_count: int,
         task_id: str,
         next_retry_at: str,
+        verify_only: bool = False,
+        expected_retry_count: Optional[int] = None,
     ) -> bool:
         fields = asdict(record)
         return await self._tasks.schedule(
             _TASK_KIND,
             self._key(record.account_id, record.object_uri),
-            payload={"record": fields, "retry_count": retry_count, "task_id": task_id},
+            payload={
+                "record": fields,
+                "retry_count": retry_count,
+                "task_id": task_id,
+                "verify_only": verify_only,
+            },
             run_at=next_retry_at,
-            condition=lambda item: item is not None and item["payload"]["record"] == fields,
+            condition=lambda item: (
+                item is not None
+                and item["payload"]["record"] == fields
+                and (
+                    expected_retry_count is None
+                    or item["payload"].get("retry_count", 0) == expected_retry_count
+                )
+            ),
         )
 
     async def claim_due(self, **kwargs):

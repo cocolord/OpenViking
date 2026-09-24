@@ -8,6 +8,7 @@ import pytest
 
 from openviking.pyagfs.exceptions import AGFSNetworkError
 from openviking.server.identity import RequestContext, Role
+from openviking.storage.errors import StorageException
 from openviking.storage.expr import Eq, In, Or, PathScope
 from openviking.storage.vectordb.index.cuvs_index import matches_filter
 from openviking.storage.vectordb_adapters.local_adapter import LocalCollectionAdapter
@@ -140,3 +141,33 @@ def test_path_membership_matches_only_listed_paths(field):
         )
     ]
     assert selected == paths
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("residue", [0, 1])
+async def test_verification_retry_never_reissues_vector_or_content_delete(monkeypatch, residue):
+    vectors = SimpleNamespace(count=AsyncMock(return_value=residue))
+    fs = VikingFS(agfs=SimpleNamespace(), vector_store=vectors)
+    fs._async_agfs.rm = AsyncMock()
+    monkeypatch.setattr(fs, "_ensure_access", AsyncMock())
+    monkeypatch.setattr(fs, "_delete_from_vector_store", AsyncMock())
+    monkeypatch.setattr(fs, "_confirm_fs_scope_cleared", AsyncMock())
+    target = "viking://user/alice/sessions/expired"
+    kwargs = {
+        "ctx": _ctx(),
+        "strict": True,
+        "preserve_summaries": True,
+        "verify_only": True,
+        "lease_ref": {"lease_ref": "held-by-cleanup"},
+    }
+    if residue:
+        with pytest.raises(StorageException) as error:
+            await fs.rm(target, **kwargs)
+        assert error.value.action == "confirm_delete"
+        assert isinstance(error.value.__cause__, RuntimeError)
+    else:
+        await fs.rm(target, **kwargs)
+        fs._confirm_fs_scope_cleared.assert_awaited_once()
+    vectors.count.assert_awaited_once()
+    fs._delete_from_vector_store.assert_not_awaited()
+    fs._async_agfs.rm.assert_not_awaited()

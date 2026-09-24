@@ -39,6 +39,7 @@ from openviking.storage.abstract_overview import (
     rewrite_abstract_overview_for_transfer,
 )
 from openviking.storage.acl import AclAction, is_acl_uri
+from openviking.storage.errors import StorageException
 from openviking.storage.expr import And, PathScope, RawDSL
 from openviking.storage.internal_names import is_storage_internal_name
 from openviking.storage.vector_ids import is_vector_record_id, vector_record_id
@@ -261,6 +262,7 @@ class _OpsMixin:
         *,
         strict: bool = False,
         preserve_summaries: bool = False,
+        verify_only: bool = False,
     ) -> Dict[str, Any]:
         """Delete file/directory + recursively update vector index.
 
@@ -287,6 +289,8 @@ class _OpsMixin:
 
         TTL uses ``preserve_summaries`` to delete only L2 vectors and content.
         Summary files, directories, ACLs and lifecycle fences are retained.
+        ``verify_only`` resumes strict confirmation under a caller-owned lease,
+        without repeating vector or content deletion.
 
         Returns:
             Dict with 'estimated_deleted_count' indicating the estimated number
@@ -300,7 +304,24 @@ class _OpsMixin:
         path = self._uri_to_path(uri, ctx=ctx)
         target_uri = self._path_to_uri(path, ctx=ctx)
         vector_options = {"level": ContextLevel.DETAIL} if preserve_summaries else {}
-        fs_options = {"preserve_summaries": True} if preserve_summaries else {}
+
+        async def confirm() -> None:
+            try:
+                await self._confirm_vector_scope_cleared(target_uri, ctx=ctx, **vector_options)
+                await self._confirm_fs_scope_cleared(
+                    path, target_uri, preserve_summaries=preserve_summaries
+                )
+            except Exception as exc:
+                # Preserve the cause for retry classification; callers can resume
+                # verification without parsing error text or replaying deletion.
+                raise StorageException(str(exc), action="confirm_delete") from exc
+
+        if verify_only:
+            if not strict or lease_ref is None:
+                raise ValueError("verify_only requires strict deletion and an object lease")
+            await confirm()
+            await self._remove_resource_file_metadata(target_uri, ctx=ctx, lease_ref=lease_ref)
+            return {"estimated_deleted_count": 0}
 
         async def _estimate_deleted_count(target_path: str, real_ctx: RequestContext) -> int:
             """Estimate number of nodes to be deleted using vector index."""
@@ -339,12 +360,7 @@ class _OpsMixin:
                 **vector_options,
             )
             if strict:
-                await self._confirm_vector_scope_cleared(
-                    target_uri,
-                    ctx=ctx,
-                    **vector_options,
-                )
-                await self._confirm_fs_scope_cleared(path, target_uri, **fs_options)
+                await confirm()
             await self._remove_resource_file_metadata(target_uri, ctx=ctx, lease_ref=lease_ref)
             logger.info(f"[VikingFS] rm target not found, cleaned orphan index: {uri}")
             return {"estimated_deleted_count": estimated_count}
@@ -428,12 +444,7 @@ class _OpsMixin:
             else:
                 result = {"estimated_deleted_count": estimated_count}
             if strict:
-                await self._confirm_vector_scope_cleared(
-                    target_uri,
-                    ctx=ctx,
-                    **vector_options,
-                )
-                await self._confirm_fs_scope_cleared(path, target_uri, **fs_options)
+                await confirm()
             await self._remove_resource_file_metadata(target_uri, ctx=ctx, lease_ref=lease_ref)
             return result
         finally:

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -85,6 +86,9 @@ def _make_service(
 ):
     registry = SimpleNamespace(
         get=AsyncMock(return_value=record),
+        get_scheduled=AsyncMock(
+            return_value={"payload": {"record": asdict(record), "retry_count": 0}}
+        ),
         upsert=AsyncMock(),
         defer_retry=AsyncMock(return_value=True),
         remove_if_generation=AsyncMock(return_value=True),
@@ -315,6 +319,7 @@ async def test_delete_failure_is_requeued_without_terminal_failure(tracker):
         rm_error=RuntimeError("vector residue"),
     )
 
+    registry.get_scheduled.return_value["payload"]["retry_count"] = 2
     result = await cleanup._process(_message(record, retry_count=2))
 
     assert result.outcome is ProcessOutcome.REQUEUED
@@ -467,9 +472,10 @@ async def test_failed_or_cancelled_task_does_not_ack_before_physical_cleanup(
     assert result.outcome is ProcessOutcome.REQUEUED
     viking_fs.rm.assert_not_awaited()
     registry.remove_if_generation.assert_not_awaited()
-    queue_manager.enqueue.assert_awaited_once()
-    queue_name, replacement = queue_manager.enqueue.await_args.args
-    assert queue_name == queue_manager.TTL_CLEANUP
+    queue_manager.enqueue.assert_not_awaited()
+    retry = registry.defer_retry.await_args.kwargs
+    replacement = _message(record, task_id=retry["task_id"], retry_count=retry["retry_count"])
+    registry.get_scheduled.return_value["payload"]["retry_count"] = retry["retry_count"]
     assert replacement["task_id"] != "task-1"
     assert replacement["retry_count"] == 1
 
@@ -501,7 +507,7 @@ async def test_cancelled_delivery_callback_requeues_with_fresh_task_id(tracker):
         account_id=ttl_cleanup.SYSTEM_TASK_ACCOUNT_ID,
         user_id=ttl_cleanup.SYSTEM_TASK_USER_ID,
     )
-    cleanup, viking_fs, _, queue_manager = _make_service(
+    cleanup, viking_fs, registry, queue_manager = _make_service(
         record=record, live_content=_session_meta()
     )
 
@@ -517,8 +523,8 @@ async def test_cancelled_delivery_callback_requeues_with_fresh_task_id(tracker):
 
     assert result.outcome is ProcessOutcome.REQUEUED
     viking_fs.rm.assert_not_awaited()
-    replacement = queue_manager.enqueue.await_args.args[1]
-    assert replacement["task_id"] != "task-1"
+    queue_manager.enqueue.assert_not_awaited()
+    assert registry.defer_retry.await_args.kwargs["task_id"] != "task-1"
 
 
 def test_task_id_changes_when_session_expiry_is_renewed():
@@ -538,7 +544,10 @@ async def test_scheduler_enqueues_only_claimed_due_work_with_original_retry_iden
         calls.append(kwargs)
         yield due, {"task_id": "retry-1", "retry_count": 3}
 
-    queue = SimpleNamespace(enqueue=AsyncMock(), size=AsyncMock(return_value=0))
+    queue = SimpleNamespace(
+        enqueue=AsyncMock(),
+        get_status=AsyncMock(return_value=SimpleNamespace(pending=0, in_progress=0)),
+    )
     service = SimpleNamespace(
         viking_fs=SimpleNamespace(ttl_registry=SimpleNamespace(claim_due=claim_due)),
         _queue_manager=SimpleNamespace(TTL_CLEANUP="ttl_cleanup", get_queue=lambda name: queue),
@@ -566,3 +575,12 @@ def test_due_boundary_is_inclusive():
     assert ttl_cleanup.hidden_by_ttl(
         record.expires_at, now=datetime(2026, 9, 22, tzinfo=timezone.utc)
     )
+
+
+async def _cleanup_once(cleanup, record):
+    """Exercise the strict cleanup body under its required object lease."""
+    ctx, lease = await cleanup._acquire_object_lock(record)
+    try:
+        return await cleanup._cleanup_record(record, ctx, lease)
+    finally:
+        await cleanup._service.viking_fs._async_agfs.pathlock_release(lease)

@@ -11,12 +11,14 @@ import pytest
 
 from openviking.core import ttl
 from openviking.service.ttl_cleanup import TTLCleanupService
+from openviking.storage.errors import StorageException
 from openviking.storage.ovpack.operations import export_ovpack, import_ovpack
 from openviking.storage.resource_ttl import prepare_resource_ttl, resource_ttl_fields
 from openviking_cli.exceptions import NotFoundError
 from openviking_cli.utils.config.ttl_config import TTLConfig
 from tests.storage.test_transfer_merge_binding import binding_fs as binding_fs
 from tests.storage.test_transfer_merge_binding import root_ctx
+from tests.unit.service.test_ttl_cleanup import _cleanup_once
 
 ROOT = "viking://user/default/resources"
 PAST = "2000-01-01T00:00:00.000Z"
@@ -92,13 +94,13 @@ async def test_partial_cleanup_blocks_recreation_and_retry_removes_only_owner(
         "_confirm_fs_scope_cleared",
         AsyncMock(side_effect=RuntimeError("confirmation unavailable")),
     )
-    with pytest.raises(RuntimeError, match="confirmation unavailable"):
-        await cleanup._cleanup_record(record)
+    with pytest.raises(StorageException, match="confirmation unavailable"):
+        await _cleanup_once(cleanup, record)
     assert await fs.ttl_registry.get(ctx.account_id, uri) is not None
     with pytest.raises(NotFoundError):
         await prepare_resource_ttl(fs, uri, is_dir=is_dir, existing=False, ctx=ctx, lease_ref=None)
     monkeypatch.setattr(fs, "_confirm_fs_scope_cleared", original)
-    assert (await cleanup._cleanup_record(record))["deleted"]
+    assert (await _cleanup_once(cleanup, record))["deleted"]
     assert await fs.ttl_registry.get(ctx.account_id, uri) is None
     assert await fs.read_file_bytes(sibling, ctx=ctx) == b"keep"
     metadata = ttl.ttl_metadata_uri("resource" if is_dir else "resource_file", uri)

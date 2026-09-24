@@ -434,6 +434,7 @@ class FSService:
         strict: bool = False,
         lease_ref: Optional[Dict[str, Any]] = None,
         preserve_summaries: bool = False,
+        verify_only: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Remove resource."""
         if is_ttl_metadata_name(uri.rsplit("/", 1)[-1]):
@@ -451,6 +452,7 @@ class FSService:
             ctx=ctx,
             strict=strict,
             **({"preserve_summaries": True} if preserve_summaries else {}),
+            **({"verify_only": True} if verify_only else {}),
             **({"lease_ref": lease_ref} if lease_ref is not None else {}),
         )
         await self._sync_watch_after_rm(uri, account_id=ctx.account_id, context_type=context_type)

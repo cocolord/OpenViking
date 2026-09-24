@@ -12,11 +12,13 @@ import pytest
 from openviking.core import ttl
 from openviking.service.ttl_cleanup import TTLCleanupService
 from openviking.storage.abstract_overview import render_abstract_overview
+from openviking.storage.errors import StorageException
 from openviking.storage.vector_ids import vector_record_id
 from openviking_cli.exceptions import NotFoundError
 from tests.storage.test_transfer_merge_binding import binding_fs as binding_fs
 from tests.storage.test_transfer_merge_binding import indexed_fs as indexed_fs
 from tests.storage.test_transfer_merge_binding import root_ctx
+from tests.unit.service.test_ttl_cleanup import _cleanup_once
 
 
 @pytest.mark.asyncio
@@ -96,11 +98,11 @@ async def test_cleanup_keeps_all_summary_bytes_and_vectors(
         monkeypatch.setattr(
             fs, "_confirm_fs_scope_cleared", AsyncMock(side_effect=OSError("retry confirmation"))
         )
-        with pytest.raises(OSError, match="retry confirmation"):
-            await cleanup._cleanup_record(record)
+        with pytest.raises(StorageException, match="retry confirmation"):
+            await _cleanup_once(cleanup, record)
         assert await fs.ttl_registry.get(ctx.account_id, owner) is not None
         monkeypatch.setattr(fs, "_confirm_fs_scope_cleared", original)
-    assert (await cleanup._cleanup_record(record))["deleted"]
+    assert (await _cleanup_once(cleanup, record))["deleted"]
     assert await fs.ttl_registry.get(ctx.account_id, owner) is None
     for uri in bodies:
         with pytest.raises(Exception) as missing:

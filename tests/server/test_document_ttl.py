@@ -20,6 +20,7 @@ from openviking.session.memory.utils.memory_file_utils import MemoryFileUtils
 from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
 from openviking_cli.utils.config import get_openviking_config, set_openviking_config
 from tests.storage.test_transfer_merge_binding import root_ctx
+from tests.unit.service.test_ttl_cleanup import _cleanup_once
 
 ROOT = "viking://user/default"
 CONFIG = "/api/v1/admin/accounts/default/configuration"
@@ -184,7 +185,7 @@ async def test_expiry_change_supersedes_cleanup_and_preserves_content(
         lambda value, **_: real_expired(value, now=old_expiry + timedelta(seconds=1)),
     )
     cleanup = TTLCleanupService(service=service, service_loop=asyncio.get_running_loop())
-    assert (await cleanup._cleanup_record(record))["skipped"] == "renewed"
+    assert (await _cleanup_once(cleanup, record))["skipped"] == "renewed"
     assert await fs.exists(uri, ctx=ctx)
     monkeypatch.setattr(
         ttl,
@@ -199,9 +200,7 @@ async def test_expiry_change_supersedes_cleanup_and_preserves_content(
         },
     )
     assert response.status_code == 404
-    assert (await cleanup._cleanup_record(await fs.ttl_registry.get(ctx.account_id, uri)))[
-        "deleted"
-    ]
+    assert (await _cleanup_once(cleanup, await fs.ttl_registry.get(ctx.account_id, uri)))["deleted"]
 
 
 @pytest.mark.asyncio

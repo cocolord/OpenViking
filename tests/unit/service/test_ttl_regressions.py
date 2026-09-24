@@ -22,6 +22,7 @@ from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils.config.ttl_config import TTLConfig
 from tests.server.test_content_batch_write import _VFS
 from tests.unit.service.test_ttl_cleanup import (
+    _cleanup_once,
     _make_service,
     _message,
     _record,
@@ -205,12 +206,12 @@ async def test_summary_is_retained_in_all_public_read_forms(monkeypatch, expiry,
     parent = "viking://user/default/memories/events/2026"
     path = fs._uri_to_path(parent, ctx=ctx)
     files = {
-        path + "/.abstract.md": render_abstract_overview(
-            0, parent, "secret"
-        ).replace("---\n", f"---\nexpires_at: {expiry}\n", 1).encode(),
-        path + "/.overview.md": render_abstract_overview(
-            1, parent, "secret"
-        ).replace("---\n", f"---\nexpires_at: {expiry}\n", 1).encode(),
+        path + "/.abstract.md": render_abstract_overview(0, parent, "secret")
+        .replace("---\n", f"---\nexpires_at: {expiry}\n", 1)
+        .encode(),
+        path + "/.overview.md": render_abstract_overview(1, parent, "secret")
+        .replace("---\n", f"---\nexpires_at: {expiry}\n", 1)
+        .encode(),
     }
 
     async def stat(candidate, **kwargs):
@@ -304,7 +305,7 @@ async def test_cleanup_reconciles_persisted_phase2_completion_after_crash(monkey
         return await storage.ls(uri + "/history")
 
     vfs._async_agfs.ls = list_history
-    result = await cleanup._cleanup_record(record)
+    result = await _cleanup_once(cleanup, record)
     assert not result["deleted"], (
         "Phase2 completed at 2026-09-21 23:59 and should renew to 2026-09-23 23:59; "
         f"cleanup instead issued strict recursive rm: {vfs.rm.await_args}"
