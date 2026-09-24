@@ -2660,27 +2660,26 @@ class OpenVikingMemoryProvider(MemoryProvider):
             self._commit_session(sid, turn_count, context="on session end", scope=scope)
 
     def on_session_switch(self, new_session_id: str, *, parent_session_id: str = "", reset: bool = False, **kwargs) -> None:
-        """Commit the old session and rotate cached state to the new session_id.
+        """Rotate cached state to the new session_id; commit only when writes are enabled.
 
         Fires on /resume, /branch, /reset, /new, and context compression. Without it
         ``_session_id`` stays stuck at the initialize() value, later sync_turn writes
         land in the closed session and the new one never gets extracted. The old
         session's drain+commit is offloaded so command threads never block.
+        Read-only contexts still rotate so deep search uses the current session.
 
         The new session never accumulates messages, and memory extraction never fires for it. See
         hermes-agent#28296.
         """
-        if not self._writes_enabled:
-            return
         new_id = str(new_session_id or "").strip()
-        if not new_id or not self._ensure_client():
+        if not new_id or (self._writes_enabled and not self._ensure_client()):
             return
         rewound = bool(kwargs.get("rewound"))
         compression = kwargs.get("reason") == "compression"
 
         # Rotate under the lock so a concurrent sync_turn lands fully under old or new.
         with self._session_state_lock:
-            scope = self._capture_commit_scope()
+            scope = self._capture_commit_scope() if self._writes_enabled else None
             # Rotate cached session state synchronously (cheap, in-memory) and snapshot the old session
             # under the lock so a concurrent sync_turn either lands fully before the rotation (counted under
             # old) or fully after (counted under new) — never split. The OLD session's commit (drain +
@@ -2702,7 +2701,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
             # Re-inject the profile after compression; the prefetch key may be either id.
             self._profile_prefetched_sessions.discard(old_session_id)
             self._profile_prefetched_sessions.discard(new_id)
-            if not rotate and old_session_id:
+            if not rotate and old_session_id and self._writes_enabled:
                 # In-place compression keeps the same (still live) sid, which compress_context()
                 # just committed and latched. Re-arm so later commits aren't rejected. Rotation
                 # mode is untouched: the old id stays latched to dedupe its async finalizer.
@@ -2711,7 +2710,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
         if not rotate:
             logger.debug("OpenViking on_session_switch skipped rotation: session=%s rewound=%s", old_session_id, rewound)
             return
-        if old_session_id:
+        if old_session_id and self._writes_enabled:
             self._finalize_session_async(old_session_id, old_turn_count, context="on switch", scope=scope)
         logger.debug("OpenViking on_session_switch: old=%s new=%s parent=%s reset=%s", old_session_id, new_id, parent_session_id, reset)
 

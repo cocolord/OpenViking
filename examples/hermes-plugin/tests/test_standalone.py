@@ -705,6 +705,36 @@ def test_non_primary_contexts_skip_writes(external_provider, monkeypatch, agent_
     assert provider._pending_sessions() == []
 
 
+@pytest.mark.parametrize("agent_context", ["cron", "subagent", "flush"])
+def test_non_primary_session_switch_keeps_search_on_current_session(external_provider, monkeypatch, agent_context):
+    """A read-only provider must still follow session changes for recall."""
+    from unittest.mock import Mock
+
+    from agent.memory_manager import MemoryManager
+
+    home, provider, module, _ = external_provider(f"read-only-switch-{agent_context}")
+    monkeypatch.setenv("OPENVIKING_ENDPOINT", "http://127.0.0.1:19531")
+    monkeypatch.setattr(module, "_classify_runtime_openviking_health", lambda *_: ("healthy", ""))
+    provider.initialize("old-sid", hermes_home=str(home), agent_context=agent_context)
+    client = Mock()
+    client.post.return_value = {"result": {"memories": []}}
+    provider._client = client
+    provider._ensure_client = lambda: client
+    provider._profile_prefetched_sessions.update({"old-sid", "new-sid"})
+
+    manager = MemoryManager()
+    manager.add_provider(provider)
+    manager.on_session_switch("new-sid", reason="compression")
+    assert provider._session_id == "new-sid"
+    assert provider._profile_prefetched_sessions == set()
+    provider.handle_tool_call("viking_search", {"query": "preferences", "mode": "deep"})
+    provider.on_session_end([])
+
+    client.post.assert_called_once_with(
+        "/api/v1/search/search", {"query": "preferences", "session_id": "new-sid"}
+    )
+
+
 def test_live_commit_does_not_block_next_turn_or_lose_its_pending_marker(external_provider, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
 

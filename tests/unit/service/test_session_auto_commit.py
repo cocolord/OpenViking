@@ -218,7 +218,7 @@ def _session_service_for_auto_commit_test(
 ) -> SessionService:
     service = SessionService()
     service.set_session_auto_commit_config(
-        SessionAutoCommitConfig(idle_enabled=True, check_interval_seconds=60.0)
+        SessionAutoCommitConfig(enabled=True, check_interval_seconds=60.0)
     )
 
     async def fake_get(session_id, ctx, auto_create=False):
@@ -470,7 +470,7 @@ async def test_scheduler_scans_agfs_paths_directly_without_account_user_indices(
     service = _FakeSessionService(tree_entries, metas)
     scheduler = SessionAutoCommitScheduler(
         service,
-        SimpleNamespace(idle_enabled=True, check_interval_seconds=60.0),
+        SimpleNamespace(enabled=True, check_interval_seconds=60.0),
         check_interval=60.0,
     )
 
@@ -504,7 +504,7 @@ async def test_scheduler_skips_sessions_without_uncommitted_content():
     )
     scheduler = SessionAutoCommitScheduler(
         service,
-        SimpleNamespace(idle_enabled=True, check_interval_seconds=60.0),
+        SimpleNamespace(enabled=True, check_interval_seconds=60.0),
         check_interval=60.0,
     )
 
@@ -524,7 +524,7 @@ async def test_scheduler_skips_sessions_without_auto_commit_policy():
     )
     scheduler = SessionAutoCommitScheduler(
         service,
-        SimpleNamespace(idle_enabled=True, check_interval_seconds=60.0),
+        SimpleNamespace(enabled=True, check_interval_seconds=60.0),
         check_interval=60.0,
     )
 
@@ -547,7 +547,7 @@ async def test_scheduler_schedules_idle_sessions_still_within_keep_recent_window
     )
     scheduler = SessionAutoCommitScheduler(
         service,
-        SimpleNamespace(idle_enabled=True, check_interval_seconds=60.0),
+        SimpleNamespace(enabled=True, check_interval_seconds=60.0),
         check_interval=60.0,
     )
 
@@ -570,7 +570,7 @@ async def test_scheduler_logs_scheduled_count_separately_from_due_candidates(cap
     service.schedule_results = [True, False]
     scheduler = SessionAutoCommitScheduler(
         service,
-        SimpleNamespace(idle_enabled=True, check_interval_seconds=60.0),
+        SimpleNamespace(enabled=True, check_interval_seconds=60.0),
         check_interval=60.0,
     )
 
@@ -587,7 +587,7 @@ async def test_scheduler_logs_scheduled_count_separately_from_due_candidates(cap
 
 
 @pytest.mark.asyncio
-async def test_scheduler_reads_session_meta_with_bounded_concurrency():
+async def test_scheduler_reads_session_meta_serially():
     tree_entries = [_session_entry(f"session_{index}") for index in range(6)]
     metas = {
         f"/local/acct_a/user/user_b/sessions/session_{index}/.meta.json": _meta()
@@ -597,23 +597,22 @@ async def test_scheduler_reads_session_meta_with_bounded_concurrency():
     scheduler = SessionAutoCommitScheduler(
         service,
         SimpleNamespace(
-            idle_enabled=True,
+            enabled=True,
             check_interval_seconds=60.0,
-            scan_batch_size=2,
-            scan_batch_pause_seconds=0.0,
+            scan_rate_limit_files_per_second=0.0,
         ),
         check_interval=60.0,
     )
 
     await scheduler._scan_once()
 
-    assert service.viking_fs.max_active_reads == 2
+    assert service.viking_fs.max_active_reads == 1
     assert len(service.viking_fs.read_calls) == 6
     assert len(service.calls) == 6
 
 
 @pytest.mark.asyncio
-async def test_scheduler_pauses_between_scan_batches():
+async def test_scheduler_paces_reads_by_rate_limit():
     tree_entries = [_session_entry(f"session_{index}") for index in range(5)]
     metas = {
         f"/local/acct_a/user/user_b/sessions/session_{index}/.meta.json": _meta()
@@ -628,10 +627,9 @@ async def test_scheduler_pauses_between_scan_batches():
     scheduler = SessionAutoCommitScheduler(
         service,
         SimpleNamespace(
-            idle_enabled=True,
+            enabled=True,
             check_interval_seconds=60.0,
-            scan_batch_size=2,
-            scan_batch_pause_seconds=0.25,
+            scan_rate_limit_files_per_second=2.0,
         ),
         check_interval=60.0,
         sleep=fake_sleep,
@@ -639,11 +637,14 @@ async def test_scheduler_pauses_between_scan_batches():
 
     await scheduler._scan_once()
 
-    assert sleep_calls == [0.25, 0.25]
+    # 5 reads => 4 pacing sleeps (the first read has no prior timestamp, so no
+    # wait is required before it).
+    assert len(sleep_calls) == 4
+    assert all(0.0 <= call <= 0.5 + 1e-6 for call in sleep_calls)
 
 
 @pytest.mark.asyncio
-async def test_scheduler_applies_batch_pause_while_enumerating_sessions():
+async def test_scheduler_paces_reads_across_multiple_users():
     users_by_account = {"acct_a": ["user_1", "user_2", "user_3"]}
     tree_entries_by_user = {
         ("acct_a", "user_1"): [_session_entry("session_1")],
@@ -669,10 +670,9 @@ async def test_scheduler_applies_batch_pause_while_enumerating_sessions():
     scheduler = SessionAutoCommitScheduler(
         service,
         SimpleNamespace(
-            idle_enabled=True,
+            enabled=True,
             check_interval_seconds=60.0,
-            scan_batch_size=2,
-            scan_batch_pause_seconds=0.25,
+            scan_rate_limit_files_per_second=2.0,
         ),
         check_interval=60.0,
         sleep=fake_sleep,
@@ -680,7 +680,7 @@ async def test_scheduler_applies_batch_pause_while_enumerating_sessions():
 
     await scheduler._scan_once()
 
-    assert sleep_calls == [0.25]
+    assert len(sleep_calls) == 2
     assert service.calls == [
         ("session_1", "idle_timeout", "user_1"),
         ("session_2", "idle_timeout", "user_2"),
@@ -700,7 +700,7 @@ async def test_scheduler_does_not_warn_for_missing_meta(caplog):
     )
     scheduler = SessionAutoCommitScheduler(
         service,
-        SimpleNamespace(idle_enabled=True, check_interval_seconds=60.0),
+        SimpleNamespace(enabled=True, check_interval_seconds=60.0),
         check_interval=60.0,
     )
 
@@ -720,7 +720,7 @@ async def test_scheduler_warns_for_invalid_meta_json(caplog):
     )
     scheduler = SessionAutoCommitScheduler(
         service,
-        SimpleNamespace(idle_enabled=True, check_interval_seconds=60.0),
+        SimpleNamespace(enabled=True, check_interval_seconds=60.0),
         check_interval=60.0,
     )
 
@@ -748,7 +748,7 @@ async def test_scheduler_skips_non_object_meta_without_aborting_batch(caplog):
     )
     scheduler = SessionAutoCommitScheduler(
         service,
-        SimpleNamespace(idle_enabled=True, check_interval_seconds=60.0),
+        SimpleNamespace(enabled=True, check_interval_seconds=60.0),
         check_interval=60.0,
     )
 
@@ -771,7 +771,7 @@ async def test_scheduler_skips_malformed_due_fields_without_aborting_batch(caplo
     )
     scheduler = SessionAutoCommitScheduler(
         service,
-        SimpleNamespace(idle_enabled=True, check_interval_seconds=60.0),
+        SimpleNamespace(enabled=True, check_interval_seconds=60.0),
         check_interval=60.0,
     )
 
@@ -791,7 +791,7 @@ async def test_scheduler_warns_for_non_missing_session_scan_errors(caplog):
     )
     scheduler = SessionAutoCommitScheduler(
         service,
-        SimpleNamespace(idle_enabled=True, check_interval_seconds=60.0),
+        SimpleNamespace(enabled=True, check_interval_seconds=60.0),
         check_interval=60.0,
     )
 
@@ -828,7 +828,7 @@ async def test_scheduler_reuses_async_agfs_client_between_scans(monkeypatch):
     monkeypatch.setattr(auto_commit_module, "AsyncAGFSClient", _CountingAsyncAGFSClient)
     scheduler = SessionAutoCommitScheduler(
         service,
-        SimpleNamespace(idle_enabled=True, check_interval_seconds=60.0),
+        SimpleNamespace(enabled=True, check_interval_seconds=60.0),
         check_interval=60.0,
     )
 
