@@ -302,9 +302,15 @@ class TTLCleanupService:
 
 
 class TTLCleanupScheduler(PeriodicTask):
-    """Periodically enqueue due records from the persistent TTL registry."""
+    """Drain daily UTC cleanup batches and due retries through the shared queue.
+
+    Visibility follows expires_at immediately. First deletion attempts are
+    admitted at the next UTC midnight; polling only advances that day's backlog
+    and retries. The persisted due index also resumes work after a restart.
+    """
 
     DEFAULT_CHECK_INTERVAL = 30.0
+    BATCH_SIZE = 100
 
     def __init__(
         self,
@@ -322,13 +328,32 @@ class TTLCleanupScheduler(PeriodicTask):
     async def _scan_once(self) -> None:
         queue_manager = self._service._queue_manager
         queue = queue_manager.get_queue(queue_manager.TTL_CLEANUP)
+        # Drain the durable queue before leasing another page. Otherwise a slow
+        # backend can accumulate repeated deliveries after claim leases expire.
+        if await queue.size():
+            return
+        now = datetime.now(timezone.utc)
+        cutoff = now.replace(hour=0, minute=0, second=0, microsecond=0)
         scheduled = 0
-        async for record, payload in self._service.viking_fs.ttl_registry.claim_due(
-            now=datetime.now(timezone.utc),
-            limit=100,
+        deferred = 0
+        registry = self._service.viking_fs.ttl_registry
+        async for record, payload in registry.claim_due(
+            now=now,
+            limit=self.BATCH_SIZE,
             max_bytes=1_048_576,
             time_budget=5.0,
         ):
+            if not payload.get("retry_count") and not hidden_by_ttl(record.expires_at, now=cutoff):
+                # Reuse the delayed index for the next daily batch, including
+                # records already persisted by the former immediate scheduler.
+                await registry.defer_retry(
+                    record,
+                    retry_count=0,
+                    task_id=payload.get("task_id") or _cleanup_task_id(record),
+                    next_retry_at=format_iso8601(cutoff + timedelta(days=1)),
+                )
+                deferred += 1
+                continue
             await queue.enqueue(
                 _ttl_cleanup_message(
                     record=record,
@@ -337,8 +362,13 @@ class TTLCleanupScheduler(PeriodicTask):
                 )
             )
             scheduled += 1
-        if scheduled:
-            logger.info("TTLCleanupScheduler scheduled=%d", scheduled)
+        if scheduled or deferred:
+            logger.info(
+                "TTLCleanupScheduler cutoff=%s scheduled=%d deferred=%d",
+                format_iso8601(cutoff),
+                scheduled,
+                deferred,
+            )
 
 
 class _TTLCleanupProcessor(DequeueHandlerBase):

@@ -538,7 +538,7 @@ async def test_scheduler_enqueues_only_claimed_due_work_with_original_retry_iden
         calls.append(kwargs)
         yield due, {"task_id": "retry-1", "retry_count": 3}
 
-    queue = SimpleNamespace(enqueue=AsyncMock())
+    queue = SimpleNamespace(enqueue=AsyncMock(), size=AsyncMock(return_value=0))
     service = SimpleNamespace(
         viking_fs=SimpleNamespace(ttl_registry=SimpleNamespace(claim_due=claim_due)),
         _queue_manager=SimpleNamespace(TTL_CLEANUP="ttl_cleanup", get_queue=lambda name: queue),
