@@ -270,6 +270,7 @@ async def import_ovpack(
     on_conflict: Optional[str] = None,
     vector_mode: Optional[str] = None,
     vector_store=None,
+    vector_config_resolver=None,
 ) -> str:
     """
     Import .ovpack file to the specified parent path.
@@ -331,12 +332,14 @@ async def import_ovpack(
                     )
 
             if not is_session_uri(root_uri):
-                vector_action = choose_vector_restore_action(
+                vector_action = await choose_vector_restore_action(
                     manifest,
                     index_records,
                     dense_vectors,
                     vector_store=vector_store,
+                    vector_config_resolver=vector_config_resolver,
                     vector_mode=vector_action_mode,
+                    ctx=ctx,
                 )
 
             if parent != "viking://":
@@ -440,6 +443,8 @@ async def _write_ovpack_archive(
     index_records: list[dict[str, Any]],
     dense_values: list[float],
     ctx: RequestContext,
+    vector_store,
+    vector_config_resolver,
 ) -> str:
     ensure_dir_exists(to)
     manifest_entries = manifest_entries_by_path(manifest)
@@ -491,7 +496,14 @@ async def _write_ovpack_archive(
         zf.writestr(f"{base_name}/{OVPACK_INTERNAL_DIR}/", "")
         zf.writestr(internal_zip_path(base_name, OVPACK_INDEX_RECORDS_PATH), index_bytes)
 
-        dense_snapshot = build_dense_snapshot_manifest(index_records, dense_values)
+        dense_snapshot = None
+        if dense_values:
+            if vector_config_resolver is None:
+                raise RuntimeError("OVPack requires a vector config resolver")
+            settings = await vector_config_resolver.resolve(ctx.account_id)
+            dense_snapshot = build_dense_snapshot_manifest(
+                index_records, dense_values, settings.embedding
+            )
         if dense_snapshot is not None:
             dense_bytes, dense_manifest = dense_snapshot
             manifest["index"]["dense"] = dense_manifest
@@ -510,6 +522,7 @@ async def export_ovpack(
     to: str,
     ctx: RequestContext,
     vector_store=None,
+    vector_config_resolver=None,
     include_vectors: bool = False,
 ) -> str:
     """
@@ -550,7 +563,7 @@ async def export_ovpack(
     # round-trip as ordinary package files. Do not synthesize a root .ttl.json:
     # directories are policy boundaries, not lifecycle owners.
     if include_vectors:
-        ensure_dense_snapshot_supported(vector_store)
+        await ensure_dense_snapshot_supported(vector_store, vector_config_resolver, ctx)
         report = await check_index_consistency(
             viking_fs,
             vector_store,
@@ -582,6 +595,8 @@ async def export_ovpack(
         index_records,
         dense_values,
         ctx,
+        vector_store,
+        vector_config_resolver,
     )
 
     logger.info(f"[ovpack] Exported {uri} to {to}")
@@ -593,6 +608,7 @@ async def backup_ovpack(
     to: str,
     ctx: RequestContext,
     vector_store=None,
+    vector_config_resolver=None,
     include_vectors: bool = False,
 ) -> str:
     """Export all public OpenViking scopes as a restore-only backup package."""
@@ -605,7 +621,7 @@ async def backup_ovpack(
     entries = await _backup_entries(viking_fs, ctx)
     entries = await _filter_existing_optional_sidecars(viking_fs, "viking://", entries, ctx)
     if include_vectors:
-        ensure_dense_snapshot_supported(vector_store)
+        await ensure_dense_snapshot_supported(vector_store, vector_config_resolver, ctx)
         report = await check_index_consistency(
             viking_fs,
             vector_store,
@@ -639,6 +655,8 @@ async def backup_ovpack(
         index_records,
         dense_values,
         ctx,
+        vector_store,
+        vector_config_resolver,
     )
 
     logger.info(f"[ovpack] Backed up OpenViking public scopes to {to}")
@@ -652,6 +670,7 @@ async def restore_ovpack(
     on_conflict: Optional[str] = None,
     vector_mode: Optional[str] = None,
     vector_store=None,
+    vector_config_resolver=None,
 ) -> str:
     """Restore a backup package to its original public scope roots."""
     if not os.path.exists(file_path):
@@ -710,12 +729,14 @@ async def restore_ovpack(
             )
             locks.push_async_callback(viking_fs._async_agfs.pathlock_release, lease)
 
-            vector_action = choose_vector_restore_action(
+            vector_action = await choose_vector_restore_action(
                 manifest,
                 index_records,
                 dense_vectors,
                 vector_store=vector_store,
+                vector_config_resolver=vector_config_resolver,
                 vector_mode=vector_action_mode,
+                ctx=ctx,
             )
 
             content_members = [

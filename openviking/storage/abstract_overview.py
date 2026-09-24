@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
+    Awaitable,
     Callable,
     Dict,
     Mapping,
@@ -21,7 +22,7 @@ from typing import (
     Sequence,
     TypeVar,
 )
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import yaml
 
@@ -37,10 +38,18 @@ logger = get_logger(__name__)
 
 ABSTRACT_OVERVIEW_FILENAMES = frozenset({".abstract.md", ".overview.md"})
 EMBEDDING_METADATA_FIELDS = ("directory",)
-_METADATA_ORDER = ("directory", "source", "generated_by", "freshness")
+_METADATA_ORDER = ("directory", "source", "generated_by", "freshness", "expires_at")
+# A checked dependency set without expiring members has an explicit deadline;
+# absence remains distinguishable from a legacy summary with unknown provenance.
+SUMMARY_NO_EXPIRY = "9999-12-31T23:59:59.999Z"
+_MARKDOWN_URI_SAFE_ASCII = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~/:"
+)
 _MAX_SOURCE_URI_CHARS = 4096
 _MAX_LABEL_CHARS = 128
 _T = TypeVar("_T")
+_VIKING_URI_BODY_DELIMITERS = frozenset(" \t\r\n)]}>,'\"`")
+_VIKING_URI_TRAILING_PUNCTUATION = frozenset(".,;:!?")
 
 
 class AbstractOverviewFormatError(ValueError):
@@ -180,6 +189,16 @@ def _normalize_metadata(metadata: Mapping[str, Any]) -> Dict[str, Any]:
             )
         normalized["freshness"] = counters
 
+    if "expires_at" in metadata:
+        from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
+
+        try:
+            normalized["expires_at"] = format_iso8601(
+                parse_iso_datetime(str(metadata["expires_at"]))
+            )
+        except (TypeError, ValueError) as exc:
+            raise AbstractOverviewFormatError("invalid summary expires_at") from exc
+
     return {field: normalized[field] for field in _METADATA_ORDER if field in normalized}
 
 
@@ -259,6 +278,41 @@ def render_abstract_overview(
     return f"---\n{frontmatter}\n---\n\n{body.strip()}\n"
 
 
+def markdown_safe_viking_uri(uri: str) -> str:
+    """Encode ASCII-only URI syntax hazards while preserving Unicode path text."""
+
+    if not isinstance(uri, str):
+        raise TypeError("URI must be a string")
+    return "".join(
+        char if ord(char) > 127 or char in _MARKDOWN_URI_SAFE_ASCII else f"%{ord(char):02X}"
+        for char in uri
+    )
+
+
+def _normalize_markdown_viking_uris(text: str) -> str:
+    """Normalize embedded Viking URIs to the canonical Markdown-safe form."""
+
+    normalized: list[str] = []
+    cursor = 0
+    while True:
+        start = text.find("viking://", cursor)
+        if start < 0:
+            normalized.append(text[cursor:])
+            return "".join(normalized)
+        normalized.append(text[cursor:start])
+        end = start + len("viking://")
+        while end < len(text) and text[end] not in _VIKING_URI_BODY_DELIMITERS:
+            end += 1
+        raw_uri = text[start:end]
+        trailing = ""
+        while raw_uri and raw_uri[-1] in _VIKING_URI_TRAILING_PUNCTUATION:
+            trailing = raw_uri[-1] + trailing
+            raw_uri = raw_uri[:-1]
+        normalized.append(markdown_safe_viking_uri(unquote(raw_uri)))
+        normalized.append(trailing)
+        cursor = end
+
+
 def rewrite_viking_uri_references(text: str, source_uri: str, target_uri: str) -> str:
     """Rewrite generated raw or URL-encoded URI references within one transfer scope."""
 
@@ -269,9 +323,11 @@ def rewrite_viking_uri_references(text: str, source_uri: str, target_uri: str) -
     if not source or source == target:
         return text
 
+    markdown_safe_target = markdown_safe_viking_uri(target)
     variants = (
-        (quote(source, safe=":/"), quote(target, safe=":/")),
-        (source, target),
+        (quote(source, safe=":/"), markdown_safe_target),
+        (markdown_safe_viking_uri(source), markdown_safe_target),
+        (source, markdown_safe_target),
     )
     rewritten = text
     seen: set[str] = set()
@@ -287,7 +343,7 @@ def rewrite_viking_uri_references(text: str, source_uri: str, target_uri: str) -
             lambda _match, replacement=new: replacement,
             rewritten,
         )
-    return rewritten
+    return _normalize_markdown_viking_uris(rewritten)
 
 
 def rewrite_abstract_overview_for_transfer(
@@ -449,6 +505,7 @@ async def write_abstract_overview(
     abstract: str,
     ctx: Optional[RequestContext],
     is_stale: Callable[[], bool],
+    is_stale_locked: Optional[Callable[[], Awaitable[bool]]] = None,
     metadata: Optional[Mapping[str, Any]] = None,
     consume_pending: Optional[int] = None,
     lock: Optional[Dict[str, Any]] = None,
@@ -477,6 +534,9 @@ async def write_abstract_overview(
     try:
         if is_stale():
             logger.info("%s Skipping stale semantic write for %s", log_prefix, dir_uri)
+            return AbstractOverviewWriteResult(wrote=False)
+        if is_stale_locked is not None and await is_stale_locked():
+            logger.info("%s Skipping changed semantic write for %s", log_prefix, dir_uri)
             return AbstractOverviewWriteResult(wrote=False)
         existing_overview = await _read_existing_document(viking_fs, overview_uri, ctx)
         existing_abstract = await _read_existing_document(viking_fs, abstract_uri, ctx)

@@ -45,6 +45,35 @@ from openviking_cli.exceptions import ConflictError
 from openviking_cli.session.user_id import UserIdentifier
 
 
+class _TestVLMResolver:
+    model = "test-model"
+    max_tokens = None
+
+    async def get_vlm(self, account_id):
+        del account_id
+        return self
+
+
+def _patch_language_config(monkeypatch):
+    config = SimpleNamespace(
+        output_language_override="",
+        language_fallback="en",
+        memory=SimpleNamespace(
+            eager_prefetch=False,
+            prefetch_search_topn=5,
+            link_enabled=False,
+        ),
+    )
+    monkeypatch.setattr(
+        "openviking.session.memory.utils.language.get_openviking_config",
+        lambda: config,
+    )
+    monkeypatch.setattr(
+        "openviking.session.memory.session_extract_context_provider.get_openviking_config",
+        lambda: config,
+    )
+
+
 class InMemoryVikingFS:
     def __init__(self, files: dict[str, str] | None = None):
         self.files = dict(files or {})
@@ -1717,6 +1746,7 @@ async def test_render_operation_after_file_content_persists_source_trace_id():
 
 @pytest.mark.asyncio
 async def test_cross_extraction_merge_preserves_existing_uri_without_explicit_delete(monkeypatch):
+    _patch_language_config(monkeypatch)
     existing_uri = "viking://user/u/memories/notes/existing.md"
     winner_uri = "viking://user/u/memories/notes/winner.md"
     old_file = __import__(
@@ -1749,6 +1779,7 @@ async def test_cross_extraction_merge_preserves_existing_uri_without_explicit_de
     )
 
     async def fake_run(self):
+        assert isinstance(self.context_provider._vlm_config, _TestVLMResolver)
         return (
             ResolvedOperations(
                 upsert_operations=[new_op],
@@ -1779,6 +1810,7 @@ async def test_cross_extraction_merge_preserves_existing_uri_without_explicit_de
         messages=[],
         ctx=_ctx(),
         registry=_registry(),
+        vlm_resolver=_TestVLMResolver(),
     )
 
     assert [op.uris for op in merged.upsert_operations] == [[winner_uri]]
@@ -1787,12 +1819,14 @@ async def test_cross_extraction_merge_preserves_existing_uri_without_explicit_de
 
 @pytest.mark.asyncio
 async def test_force_merge_sends_delete_only_group_through_patch_merge(monkeypatch):
+    _patch_language_config(monkeypatch)
     delete_file = _note_delete_file("obsolete")
     replacement_uri = "viking://user/u/memories/notes/replacement.md"
     merge_called = False
 
     async def fake_run(self):
         nonlocal merge_called
+        assert isinstance(self.context_provider._vlm_config, _TestVLMResolver)
         merge_called = True
         return (
             ResolvedOperations(
@@ -1825,6 +1859,7 @@ async def test_force_merge_sends_delete_only_group_through_patch_merge(monkeypat
         ctx=_ctx(),
         registry=_registry(),
         force_merge=True,
+        vlm_resolver=_TestVLMResolver(),
     )
 
     assert merge_called is True
@@ -1856,6 +1891,7 @@ async def test_force_merge_does_not_drop_add_only_delete():
 
 @pytest.mark.asyncio
 async def test_patch_merge_uses_original_messages_for_output_language(monkeypatch):
+    _patch_language_config(monkeypatch)
     existing_uri = "viking://user/u/memories/notes/code.md"
     old_file = MemoryFile(
         uri=existing_uri,
@@ -1878,6 +1914,7 @@ async def test_patch_merge_uses_original_messages_for_output_language(monkeypatc
     captured_languages = []
 
     async def fake_run(self):
+        assert isinstance(self.context_provider._vlm_config, _TestVLMResolver)
         captured_languages.append(self.context_provider.get_output_language())
         return (
             ResolvedOperations(
@@ -1909,6 +1946,7 @@ async def test_patch_merge_uses_original_messages_for_output_language(monkeypatc
         messages=[Message(id="m1", role="user", parts=[TextPart("请保持中文记忆")])],
         ctx=_ctx(),
         registry=_registry(),
+        vlm_resolver=_TestVLMResolver(),
     )
 
     assert captured_languages == ["zh-CN"]

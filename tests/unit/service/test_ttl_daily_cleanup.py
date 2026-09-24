@@ -12,7 +12,7 @@ import pytest
 from openviking.core.ttl import hidden_by_ttl
 from openviking.service import ttl_cleanup
 from openviking.storage.ttl_registry import TTLRegistry
-from openviking.utils.time_utils import format_iso8601
+from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
 from tests.unit.storage.test_ttl_registry import _MemoryAGFS, _record
 
 
@@ -57,26 +57,29 @@ def clock(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_expired_object_waits_for_daily_batch_across_restart(clock):
+async def test_expired_object_waits_for_stable_jitter_window_across_restart(clock):
     agfs, queue = _MemoryAGFS(), CleanupQueue()
     registry = TTLRegistry(agfs)
     record = replace(_record(), expires_at="2026-09-23T11:00:00.000Z")
     await registry.upsert(record)
+    cleanup_at = parse_iso_datetime(ttl_cleanup.cleanup_not_before(record))
+    clock.current = cleanup_at - timedelta(microseconds=1)
 
-    # Visibility has already expired, but physical deletion waits for midnight.
+    # Visibility has already expired, but physical deletion waits for its
+    # stable per-object jitter window.
     assert hidden_by_ttl(record.expires_at, now=clock.current)
     await scheduler_for(registry, queue)._scan_once()
     assert not queue.items
     assert await registry.get(record.account_id, record.object_uri) == record
 
-    # Ordinary registration and process restarts must retain the daily deadline.
+    # Ordinary registration and process restarts must retain the same deadline.
     registry = TTLRegistry(agfs)
     await registry.upsert(record)
     scheduler = scheduler_for(registry, queue)
-    clock.current = datetime(2026, 9, 23, 23, 59, 59, tzinfo=timezone.utc)
+    clock.current = cleanup_at - timedelta(microseconds=1)
     await scheduler._scan_once()
     assert not queue.items
-    clock.current += timedelta(seconds=1)
+    clock.current = cleanup_at
     await scheduler._scan_once()
     assert [item["target"]["object_uri"] for item in queue.items] == [record.object_uri]
     assert queue.items[0]["retry_count"] == 0
@@ -84,10 +87,15 @@ async def test_expired_object_waits_for_daily_batch_across_restart(clock):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("expires_at", ["2026-09-23T00:00:00.000Z", "2026-09-23T08:00:00+08:00"])
-async def test_midnight_boundary_is_inclusive_and_utc(clock, expires_at):
+async def test_jitter_boundary_is_inclusive_and_normalizes_utc(clock, expires_at):
     registry, queue = TTLRegistry(_MemoryAGFS()), CleanupQueue()
-    await registry.upsert(replace(_record(), expires_at=expires_at))
-    clock.current = datetime(2026, 9, 23, tzinfo=timezone.utc)
+    record = replace(_record(), expires_at=expires_at)
+    await registry.upsert(record)
+    cleanup_at = parse_iso_datetime(ttl_cleanup.cleanup_not_before(record))
+    clock.current = cleanup_at - timedelta(microseconds=1)
+    await scheduler_for(registry, queue)._scan_once()
+    assert not queue.items
+    clock.current = cleanup_at
     await scheduler_for(registry, queue)._scan_once()
     assert len(queue.items) == 1
 
@@ -166,7 +174,13 @@ async def test_daily_backlog_drains_multiple_pages_with_backpressure_and_restart
         await consume(len(queue.items))
         clock.current += timedelta(seconds=30)
 
-    assert removed == [record.object_uri for record in records]
+    expected = [
+        record.object_uri
+        for record in sorted(
+            records, key=lambda item: ttl_cleanup.cleanup_not_before(item)
+        )
+    ]
+    assert removed == expected
     assert queue.peak == 100
     assert await registry.get(future.account_id, future.object_uri) == future
     assert not queue.items

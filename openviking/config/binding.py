@@ -14,11 +14,18 @@ from typing import Optional
 
 from openviking.config.account_config import AccountConfig
 from openviking.config.assembly import build_config_source, resolve_config_source_settings
-from openviking.config.manager import RuntimeConfigManager
+from openviking.config.manager import AccountCandidateValidator, RuntimeConfigManager
 from openviking.config.source.base import ConfigSource
 from openviking.config.source.file_source import FileConfigSource
 from openviking.config.ttl import effective_ttl_config, merge_runtime_settings
-from openviking.config.validate import normalize_config_keys, validate_patch
+from openviking.config.validate import (
+    filter_runtime_fields,
+    normalize_config_keys,
+    validate_patch,
+)
+from openviking.config.vector import (
+    validate_account_vector_candidate,
+)
 from openviking.pyagfs import AsyncAGFSClient
 from openviking_cli.utils.config import get_openviking_config, set_openviking_config
 from openviking_cli.utils.config.config_utils import warn_unknown_config_fields
@@ -27,7 +34,7 @@ from openviking_cli.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# The concrete manager type this module hands back.
+# The concrete manager type this module hands back; business rules are hooks.
 OpenVikingRuntimeConfigManager = RuntimeConfigManager[OpenVikingConfig, AccountConfig]
 
 
@@ -45,14 +52,18 @@ def _build_cluster(old: OpenVikingConfig, override: dict) -> OpenVikingConfig:
     stored override may contain top-level fields from a newer binary, so that
     runtime-only rebuild intentionally ignores those fields.
     """
+    runtime_override = filter_runtime_fields(
+        OpenVikingConfig,
+        normalize_config_keys(OpenVikingConfig, override or {}),
+    )
     merged = merge_runtime_settings(
         old.model_dump(by_alias=True, exclude_unset=True),
-        normalize_config_keys(OpenVikingConfig, override or {}),
+        runtime_override,
     )
     return OpenVikingConfig.from_dict(merged)
 
 
-def _build_account(override: Optional[dict]) -> AccountConfig:
+def _build_account(settings: Optional[dict]) -> AccountConfig:
     """Construct (and thereby validate) an account config from its sparse override.
 
     A persisted account override may carry fields this binary does not declare --
@@ -60,14 +71,19 @@ def _build_account(override: Optional[dict]) -> AccountConfig:
     stay ignored so legacy settings keep loading, and the warning keeps the drop
     visible. Only field names are logged, never values.
     """
-    sparse = override or {}
+    sparse = normalize_config_keys(AccountConfig, settings or {})
     warn_unknown_config_fields(data=sparse, model=AccountConfig, logger=logger)
-    return AccountConfig.model_validate(sparse)
+    runtime_settings = filter_runtime_fields(AccountConfig, sparse)
+    return AccountConfig.model_validate(merge_runtime_settings({}, runtime_settings))
 
 
 def _validate_request(patch: dict, is_account: bool, creating: bool) -> None:
     """Structural gate: which model's RuntimeField surface a patch may touch."""
     model = AccountConfig if is_account else OpenVikingConfig
+    if is_account and isinstance(patch, dict) and isinstance(patch.get("vectordb"), dict):
+        patch = {**patch, "vectordb": dict(patch["vectordb"])}
+        if "project" in patch["vectordb"]:
+            patch["vectordb"]["project_name"] = patch["vectordb"].pop("project")
     validate_patch(model, patch, creating=creating)
 
 
@@ -104,7 +120,7 @@ def manager_over_source(
     ``base_config`` is captured from the current singleton at construction time.
     """
     base = base_config or get_openviking_config()
-    return RuntimeConfigManager(
+    return OpenVikingRuntimeConfigManager(
         source,
         base_config=base,
         get_config=get_openviking_config,
@@ -117,4 +133,10 @@ def manager_over_source(
         normalize_request=lambda patch, account: normalize_config_keys(
             AccountConfig if account else OpenVikingConfig, patch
         ),
+        account_candidate_validators=[
+            AccountCandidateValidator(
+                sections=frozenset({"embedding", "vectordb"}),
+                validate=validate_account_vector_candidate,
+            )
+        ],
     )

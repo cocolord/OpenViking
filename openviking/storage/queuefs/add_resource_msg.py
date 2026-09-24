@@ -113,6 +113,7 @@ class AddResourceMsg:
         task_id = data.get("task_id")
         path = data.get("path")
         root_uri = data.get("root_uri")
+        account_id = data.get("account_id")
         prepared = data.get("prepared") if isinstance(data.get("prepared"), dict) else None
         staged_source = None
         if data.get("staged_source") is not None:
@@ -142,7 +143,13 @@ class AddResourceMsg:
         if prepared is not None:
             args.clear()
         has_source_payload = bool(prepared or staged_source or shared_source)
-        if not task_id or (not path and not has_source_payload) or not root_uri:
+        if (
+            not task_id
+            or (not path and not has_source_payload)
+            or not root_uri
+            or not isinstance(account_id, str)
+            or not account_id.strip()
+        ):
             missing = []
             if not task_id:
                 missing.append("task_id")
@@ -150,6 +157,8 @@ class AddResourceMsg:
                 missing.append("path, prepared, staged_source, or shared_source")
             if not root_uri:
                 missing.append("root_uri")
+            if not isinstance(account_id, str) or not account_id.strip():
+                missing.append("account_id")
             raise ValueError(f"Missing required fields: {missing}")
 
         return cls(
@@ -157,7 +166,7 @@ class AddResourceMsg:
             path=str(path or ""),
             source_path=str(data.get("source_path") or path or ""),
             root_uri=str(root_uri),
-            account_id=str(data.get("account_id", "default")),
+            account_id=account_id,
             user_id=str(data.get("user_id", "default")),
             group_ids=(
                 [str(group_id) for group_id in data["group_ids"]]

@@ -422,6 +422,7 @@ async def vectorize_directory_meta(
     content_is_body: bool = False,
     actions: Optional[Dict[int, IndexAction | str]] = None,
     field_patches: Optional[Dict[int, FieldPatch]] = None,
+    telemetry_id: str | None = None,
 ) -> set[int]:
     """
     Vectorize directory metadata (.abstract.md and .overview.md).
@@ -488,6 +489,7 @@ async def vectorize_directory_meta(
                         IndexAction.MERGE,
                     )
                 ),
+                telemetry_id=telemetry_id,
             )
             level_overrides = (scalar_overrides or {}).get(int(ContextLevel.ABSTRACT.value))
             if msg_abstract is not None:
@@ -555,6 +557,7 @@ async def vectorize_directory_meta(
                         IndexAction.MERGE,
                     )
                 ),
+                telemetry_id=telemetry_id,
             )
             level_overrides = (scalar_overrides or {}).get(int(ContextLevel.OVERVIEW.value))
             if msg_overview is not None:
@@ -618,6 +621,7 @@ async def vectorize_file(
     file_md5: Optional[str] = None,
     file_content: Optional[bytes] = None,
     action: str = "merge",
+    telemetry_id: str | None = None,
 ) -> bool:
     """
     Vectorize a single file.
@@ -677,7 +681,10 @@ async def vectorize_file(
         content_type = await _resolve_resource_content_type(
             file_path, file_name, viking_fs, ctx, file_content=file_content
         )
-        embedding_cfg = get_openviking_config().embedding
+        resolver = getattr(viking_fs, "_vector_config_resolver", None)
+        if resolver is None:
+            raise RuntimeError("Vectorization requires a vector config resolver")
+        embedding_cfg = (await resolver.resolve(ctx.account_id)).embedding
         configured_text_source = embedding_cfg.text_source
         effective_text_source = TEXT_SOURCE_SUMMARY_FIRST if use_summary else configured_text_source
         embed_summary = bool(summary and effective_text_source in SUMMARY_TEXT_SOURCES)
@@ -770,6 +777,7 @@ async def vectorize_file(
         embedding_msg = EmbeddingMsgConverter.from_context(
             context,
             action=resolved_action,
+            telemetry_id=telemetry_id,
         )
         if not embedding_msg:
             return False

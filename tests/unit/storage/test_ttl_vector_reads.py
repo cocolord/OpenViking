@@ -106,7 +106,7 @@ def setup(monkeypatch):
     single = SimpleNamespace(query=query, search_by_random=query, search_by_keywords=query)
     backend = object.__new__(VikingVectorIndexBackend)
     backend.acl_manager = None
-    backend._get_backend_for_context = lambda _: single
+    backend._get_backend_for_context = AsyncMock(return_value=single)
     return SimpleNamespace(
         ctx=ctx,
         fs=fs,

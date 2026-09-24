@@ -985,7 +985,7 @@ class _SnapshotMixin:
         Failures are logged and never propagate.
         """
         try:
-            from openviking.service.reindex_executor import get_reindex_executor
+            from openviking.service.reindex_executor import ReindexExecutor
         except Exception:
             logger.exception("[VikingFS] ReindexExecutor import failed; skipping rebuild")
             return
@@ -1000,7 +1000,10 @@ class _SnapshotMixin:
         if not tasks:
             return
 
-        executor = get_reindex_executor()
+        executor = ReindexExecutor(
+            vlm_resolver=self._vlm_resolver,
+            vector_config_resolver=self._vector_config_resolver,
+        )
         for op, uri, level in tasks:
             loop.create_task(
                 self._run_vector_rebuild(executor, op, uri, level, ctx),
@@ -1020,6 +1023,7 @@ class _SnapshotMixin:
         swallowed (and logged) inside :py:meth:`_run_vector_rebuild`, preserving
         the "failures do not block" semantics.
         """
+        from openviking.service.reindex_executor import ReindexExecutor
         from openviking.service.task_tracker import get_task_tracker
         from openviking.service.task_work_index import bind_task_context
 
@@ -1032,9 +1036,10 @@ class _SnapshotMixin:
                 user_id=ctx.user.user_id,
                 stage="reindexing",
             )
-            from openviking.service.reindex_executor import get_reindex_executor
-
-            executor = get_reindex_executor()
+            executor = ReindexExecutor(
+                vlm_resolver=self._vlm_resolver,
+                vector_config_resolver=self._vector_config_resolver,
+            )
             reindex_ctx = self._restore_reindex_context(ctx)
             with bind_task_context(task_id, ctx.account_id, ctx.user.user_id):
                 await asyncio.gather(
