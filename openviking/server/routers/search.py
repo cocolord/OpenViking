@@ -143,10 +143,7 @@ class FindRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_time_decay(self) -> "FindRequest":
-        validate_event_time_decay_request(
-            self.events_time_decay_protection,
-            score_threshold=self.score_threshold,
-        )
+        validate_event_time_decay_request(self.events_time_decay_protection)
         if self.events_time_decay_protection is not None:
             if not self.query.strip() and not self.image_url:
                 raise ValueError("events_time_decay_protection requires a semantic query or image")
@@ -254,10 +251,7 @@ class SearchRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_mode(self) -> "SearchRequest":
-        validate_event_time_decay_request(
-            self.events_time_decay_protection,
-            score_threshold=self.score_threshold,
-        )
+        validate_event_time_decay_request(self.events_time_decay_protection)
         if self.mode == "list":
             error = context_only_fields_error(self.model_fields_set)
             if error:

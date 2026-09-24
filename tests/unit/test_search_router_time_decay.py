@@ -89,14 +89,15 @@ def test_context_mode_accepts_explicit_null_decay_protection():
         (search_router.SearchRequest, {"mode": "context"}),
     ],
 )
-def test_decay_rejects_negative_threshold_at_request_boundary(model, extra):
-    with pytest.raises(ValidationError, match="score_threshold must be non-negative"):
-        model(
-            query="sample",
-            score_threshold=-0.1,
-            events_time_decay_protection="0",
-            **extra,
-        )
+@pytest.mark.parametrize("protection", [None, "0", "7d"])
+def test_decay_preserves_negative_threshold_at_request_boundary(model, extra, protection):
+    request = model(
+        query="sample",
+        score_threshold=-0.1,
+        events_time_decay_protection=protection,
+        **extra,
+    )
+    assert request.score_threshold == -0.1
 
 
 async def test_context_router_forwards_time_decay_protection(monkeypatch):

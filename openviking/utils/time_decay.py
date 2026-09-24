@@ -45,13 +45,11 @@ def parse_duration_ms(value: Any, *, parameter_name: str = "duration") -> int:
     return duration_ms
 
 
-def validate_event_time_decay_request(protection: Any, *, score_threshold: Optional[float]) -> None:
-    """Validate request fields whose contract changes when decay is enabled."""
+def validate_event_time_decay_request(protection: Any) -> None:
+    """Validate the optional protection period without changing score thresholds."""
     if protection is None:
         return
     parse_duration_ms(protection, parameter_name="events_time_decay_protection")
-    if score_threshold is not None and score_threshold < 0:
-        raise ValueError("score_threshold must be non-negative when event time decay is enabled")
 
 
 def _datetime_to_epoch_ms(value: Any) -> float:
@@ -93,7 +91,10 @@ class TimeDecayFusionSpec:
 
     def fuse(self, origin_score: float, source_time: Any) -> tuple[float, float]:
         """Return ``(final_score, raw_addition_score)`` for one candidate."""
-        distance_ms = max(0.0, self.origin_ms - _datetime_to_epoch_ms(source_time) - self.offset_ms)
+        # Match VikingDB's exp decay operator, including future timestamps.
+        distance_ms = max(
+            0.0, abs(self.origin_ms - _datetime_to_epoch_ms(source_time)) - self.offset_ms
+        )
         addition_score = math.exp(self._decay_rate * distance_ms)
         final_score = origin_score * addition_score
         return final_score, addition_score

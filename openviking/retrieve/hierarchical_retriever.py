@@ -135,10 +135,6 @@ class HierarchicalRetriever:
             request_now = request_now or datetime.now(timezone.utc)
         decay_kwargs = self._time_decay_search_kwargs(events_time_decay_protection, request_now)
         effective_threshold = self._resolve_threshold(score_threshold)
-        if events_time_decay_protection is not None and effective_threshold < 0:
-            raise InvalidArgumentError(
-                "score_threshold must be non-negative when event time decay is enabled"
-            )
         image_query = bool(getattr(query, "image_query", False))
         if mode is None:
             mode = RetrieverMode.QUICK if not self._rerank_client else RetrieverMode.THINKING

@@ -58,10 +58,7 @@ async def assemble_context(
     params: AssembleParams,
 ) -> AssembleResult:
     """Run the full assembly pipeline for one request."""
-    validate_event_time_decay_request(
-        params.events_time_decay_protection,
-        score_threshold=params.score_threshold,
-    )
+    validate_event_time_decay_request(params.events_time_decay_protection)
     quotas = normalize_quotas(params.quotas, params.purpose)
     penalties = normalize_penalties(params.other_peer_penalty)
 

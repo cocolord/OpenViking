@@ -81,7 +81,6 @@ class FieldPatch:
                     resolved[name] = preserve_memory_type_tag(
                         existing.get(name),
                         resolved[name],
-                        uri=existing.get("uri"),
                     )
             else:
                 resolved[name] = value

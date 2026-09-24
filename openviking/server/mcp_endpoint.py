@@ -272,7 +272,7 @@ async def find(
 ) -> str:
     """Fast semantic retrieval without session context. Returns ranked memories, resources, and skills with URI, abstract, and score. context_type="skill" returns one hit per skill package, pointing at its SKILL.md, and without target_uri searches both the user's own and the account-shared skills."""
     try:
-        validate_event_time_decay_request(events_time_decay_protection, score_threshold=min_score)
+        validate_event_time_decay_request(events_time_decay_protection)
     except ValueError as exc:
         raise InvalidArgumentError(str(exc)) from exc
     service = get_service()
@@ -353,7 +353,7 @@ async def search(
     ``target_uri`` is only supported in list mode.
     """
     try:
-        validate_event_time_decay_request(events_time_decay_protection, score_threshold=min_score)
+        validate_event_time_decay_request(events_time_decay_protection)
     except ValueError as exc:
         raise InvalidArgumentError(str(exc)) from exc
     service = get_service()

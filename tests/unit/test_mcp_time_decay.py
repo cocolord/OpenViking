@@ -65,9 +65,12 @@ async def test_skill_only_find_rejects_invalid_event_time_decay(monkeypatch):
         mcp_endpoint._mcp_ctx.reset(token)
 
 
-async def test_skill_only_find_rejects_negative_threshold_with_decay(monkeypatch):
+async def test_skill_only_find_preserves_negative_threshold_with_decay(monkeypatch):
+    captured = {}
+
     async def fake_find_skills(**kwargs):
-        raise AssertionError(f"negative threshold reached skill retrieval: {kwargs}")
+        captured.update(kwargs)
+        return SimpleNamespace(memories=[], resources=[], skills=[])
 
     monkeypatch.setattr(
         mcp_endpoint,
@@ -75,13 +78,20 @@ async def test_skill_only_find_rejects_negative_threshold_with_decay(monkeypatch
         lambda: SimpleNamespace(search=SimpleNamespace(find_skills=fake_find_skills)),
     )
 
-    with pytest.raises(InvalidArgumentError, match="score_threshold must be non-negative"):
+    token = mcp_endpoint._mcp_ctx.set(
+        RequestContext(user=UserIdentifier.the_default_user("test_user"), role=Role.ROOT)
+    )
+    try:
         await mcp_endpoint.find(
             query="skill",
             context_type="skill",
             min_score=-0.1,
             events_time_decay_protection="0",
         )
+    finally:
+        mcp_endpoint._mcp_ctx.reset(token)
+
+    assert captured["score_threshold"] == -0.1
 
 
 @pytest.mark.parametrize("mode", ["list", "context"])
@@ -129,14 +139,20 @@ async def test_search_context_forwards_event_time_decay(monkeypatch):
     assert captured["params"].events_time_decay_protection == "2d"
 
 
-async def test_search_context_rejects_negative_threshold_before_skill_dispatch(monkeypatch):
-    monkeypatch.setattr(
-        mcp_endpoint,
-        "get_service",
-        lambda: (_ for _ in ()).throw(AssertionError("invalid request was dispatched")),
-    )
+async def test_search_context_preserves_negative_threshold(monkeypatch):
+    captured = {}
 
-    with pytest.raises(InvalidArgumentError, match="score_threshold must be non-negative"):
+    async def fake_assemble_context(*, service, ctx, params):
+        captured["threshold"] = params.score_threshold
+        return AssembleResult()
+
+    monkeypatch.setattr(mcp_endpoint, "assemble_context", fake_assemble_context)
+    monkeypatch.setattr(mcp_endpoint, "get_service", lambda: SimpleNamespace())
+
+    token = mcp_endpoint._mcp_ctx.set(
+        RequestContext(user=UserIdentifier.the_default_user("test_user"), role=Role.ROOT)
+    )
+    try:
         await mcp_endpoint.search(
             query="skill",
             mode="context",
@@ -144,3 +160,7 @@ async def test_search_context_rejects_negative_threshold_before_skill_dispatch(m
             quotas={"skills": 1},
             events_time_decay_protection="0",
         )
+    finally:
+        mcp_endpoint._mcp_ctx.reset(token)
+
+    assert captured["threshold"] == -0.1

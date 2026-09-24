@@ -8,7 +8,6 @@ import logging
 from collections import OrderedDict
 from typing import Any, Iterable
 
-from openviking.core.namespace import classify_uri
 from openviking_cli.exceptions import InvalidArgumentError
 
 logger = logging.getLogger(__name__)
@@ -102,10 +101,8 @@ def merge_search_tags(existing: Iterable[str] | None, incoming: Iterable[str] | 
 def preserve_memory_type_tag(
     existing: Iterable[str] | None,
     incoming: Iterable[str] | None,
-    *,
-    uri: Any = None,
 ) -> list[str]:
-    """Keep ``memory_type`` system-owned while updating user search tags."""
+    """Preserve the extracted memory type while updating ordinary search tags."""
     existing_memory_type = next(
         (
             tag
@@ -114,30 +111,14 @@ def preserve_memory_type_tag(
         ),
         None,
     )
-    uri_memory_type = None
-    try:
-        classification = classify_uri(str(uri or ""))
-        if (
-            classification.is_memory
-            and classification.content_index is not None
-            and len(classification.parts) > classification.content_index + 1
-        ):
-            uri_memory_type = (
-                f"memory_type={classification.parts[classification.content_index + 1].lower()}"
-            )
-    except (TypeError, ValueError):
-        pass
-
-    # Callers may edit ordinary tags, but cannot introduce or replace the
-    # routing tag. Prefer the URI contract when available so a malformed
-    # stored tag is repaired on the next scalar update.
-    trusted_memory_type = uri_memory_type or existing_memory_type
+    # Only memory extraction creates or changes this tag. Ordinary writes
+    # preserve it, including its absence on legacy memories.
     user_tags = [
         tag
         for tag in normalize_search_tags(incoming, discard_invalid=True)
         if not tag.startswith("memory_type=")
     ]
     return merge_search_tags(
-        [trusted_memory_type] if trusted_memory_type is not None else [],
+        [existing_memory_type] if existing_memory_type is not None else [],
         user_tags,
     )

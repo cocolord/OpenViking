@@ -16,7 +16,6 @@ from openviking.server.identity import RequestContext, Role
 from openviking.storage.abstract_overview import render_abstract_overview
 from openviking.utils.time_decay import fuse_time_decay_scores
 from openviking.utils.token_estimation import estimate_text_tokens
-from openviking_cli.exceptions import InvalidArgumentError
 from openviking_cli.retrieve.types import ContextType, TypedQuery
 from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils.config import RerankConfig, RetrievalConfig
@@ -801,17 +800,27 @@ async def test_quick_mode_returns_time_decay_scores():
 
 
 @pytest.mark.asyncio
-async def test_time_decay_rejects_a_negative_score_threshold():
-    retriever = HierarchicalRetriever(storage=QuickSearchStorage([]), embedder=DummyEmbedder())
+async def test_time_decay_preserves_a_negative_score_threshold():
+    class DecayAwareStorage(QuickSearchStorage):
+        async def search_in_tenant(self, *args, **kwargs):
+            self.search_calls.append(dict(kwargs))
+            return self.results
 
-    with pytest.raises(InvalidArgumentError, match="score_threshold must be non-negative"):
-        await retriever.retrieve(
-            _memory_query(),
-            ctx=_ctx(),
-            mode=RetrieverMode.QUICK,
-            score_threshold=-0.1,
-            events_time_decay_protection="0",
-        )
+    storage = DecayAwareStorage(
+        [_result("viking://user/user1/memories/events/recent", -0.05, context_type="memory")]
+    )
+    retriever = HierarchicalRetriever(storage=storage, embedder=DummyEmbedder())
+
+    result = await retriever.retrieve(
+        _memory_query(),
+        ctx=_ctx(),
+        mode=RetrieverMode.QUICK,
+        score_threshold=-0.1,
+        events_time_decay_protection="0",
+    )
+
+    assert [item.score for item in result.matched_contexts] == [-0.05]
+    assert storage.search_calls
 
 
 @pytest.mark.asyncio

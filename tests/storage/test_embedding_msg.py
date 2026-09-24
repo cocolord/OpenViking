@@ -327,16 +327,17 @@ def test_memory_write_cannot_override_a_preexisting_type_tag():
     assert result["search_tags"] == ["memory_type=preferences"]
 
 
-def test_memory_write_repairs_type_tag_from_uri():
+@pytest.mark.parametrize("existing_tags", [[], ["memory_type=preferences"]])
+def test_memory_write_does_not_infer_or_replace_type_from_uri(existing_tags):
     patch = FieldPatch(values={"search_tags": ["memory_type=events", "team=new"]})
     result = patch.resolve(
         {
-            "uri": "viking://user/alice/memories/preferences/p.md",
+            "uri": "viking://user/alice/peers/memories/memories/events/event.md",
             "context_type": "memory",
-            "search_tags": ["memory_type=events"],
+            "search_tags": existing_tags,
         }
     )
-    assert result["search_tags"] == ["memory_type=preferences", "team=new"]
+    assert result["search_tags"] == existing_tags + ["team=new"]
 
 
 def test_resource_tags_keep_existing_replace_semantics():
