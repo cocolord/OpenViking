@@ -485,6 +485,11 @@ class FSService:
             **({"verify_only": True} if verify_only else {}),
             **({"lease_ref": lease_ref} if lease_ref is not None else {}),
         )
+        if preserve_summaries:
+            # TTL retires L2 only. Ordinary deletion hooks rewrite linked
+            # long-term memories and disable Watch, preventing changed sources
+            # from being imported later. Neither belongs to expiry cleanup.
+            return result
         await self._sync_watch_after_rm(uri, account_id=ctx.account_id, context_type=context_type)
         # A refresh on a parent that no longer exists would lock its sidecar
         # paths and thereby recreate the deleted directory. Nothing to
@@ -513,14 +518,14 @@ class FSService:
                     resource_uri=uri,
                     recursive=recursive,
                 )
-            if memory_overview_uri and not preserve_summaries:
+            if memory_overview_uri:
                 await MemoryUpdater.refresh_schema_overview(
                     viking_fs=viking_fs,
                     directory_uri=memory_overview_uri,
                     ctx=ctx,
                 )
             for cleanup_overview_uri in self._memory_overview_parent_uris_from_cleanup(
-                cleanup_result if not preserve_summaries else None
+                cleanup_result
             ):
                 await MemoryUpdater.refresh_schema_overview(
                     viking_fs=viking_fs,

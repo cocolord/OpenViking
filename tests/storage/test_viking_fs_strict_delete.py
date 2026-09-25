@@ -44,12 +44,9 @@ async def test_strict_recursive_delete_clears_orphan_vector_subtree_when_source_
         delete_uri_scope=AsyncMock(),
         count=AsyncMock(return_value=0),
     )
-    fs = VikingFS.__new__(VikingFS)
+    fs = VikingFS(agfs=SimpleNamespace(), vector_store=vector_store)
     fs._async_agfs = agfs
-    fs.vector_store = vector_store
-    fs.acl_manager = None
-    fs._deletion_guard = None
-    fs._bound_ctx = SimpleNamespace(get=lambda: None)
+    fs.ttl_registry.get = AsyncMock(return_value=None)
     monkeypatch.setattr(fs, "_ensure_access", AsyncMock())
     monkeypatch.setattr(fs, "_uri_to_path", lambda uri, ctx=None: session_path)
     monkeypatch.setattr(fs, "_path_to_uri", lambda path, ctx=None: session_uri)
@@ -115,8 +112,8 @@ async def test_parent_summary_deletion_preserves_live_descendant_vectors(trailin
         return sum(selected(filter, row) for row in rows if row["account_id"] == ctx.account_id)
 
     backend = object.__new__(VikingVectorIndexBackend)
-    backend._get_backend_for_context = lambda _: SimpleNamespace(
-        delete_by_filter=delete_by_filter, count=count
+    backend._get_backend_for_context = AsyncMock(
+        return_value=SimpleNamespace(delete_by_filter=delete_by_filter, count=count)
     )
     fs = VikingFS(agfs=SimpleNamespace(), vector_store=backend)
     target = parent + "/" if trailing_slash else parent

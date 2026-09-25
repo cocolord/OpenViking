@@ -1520,3 +1520,56 @@ async def test_resource_rm_refreshes_memory_overview_for_cleaned_memories(
         }
     ]
     assert result["memory_cleanup"] == cleanup
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("removal", ["interactive", "ttl", "ttl_confirmation"])
+async def test_resource_ttl_removal_preserves_related_memories_and_watch(
+    request_context, monkeypatch, removal
+):
+    uri = "viking://resources/watched.txt"
+    memory = {"content": "Long-term preference referring to watched.txt"}
+    original = dict(memory)
+
+    class ResourceFS(_FakeVikingFS):
+        async def rm(self, target, **kwargs):
+            self.rm_calls.append(target)
+            return {"estimated_deleted_count": 1}
+
+    class MemoryLinks(_FakeResourceMemoryLinkService):
+        async def before_resource_delete(self, **kwargs):
+            memory["content"] = "Updated after resource deletion"
+            return await super().before_resource_delete(**kwargs)
+
+    fs = ResourceFS()
+    links = MemoryLinks({"memory_uris": [], "deleted_memory_uris": []})
+    watch = _FakeWatchManager()
+    service = FSService(
+        viking_fs=fs,
+        resource_memory_link_service=links,
+        watch_scheduler=_FakeWatchScheduler(watch),
+    )
+    refresh = AsyncMock()
+    monkeypatch.setattr(service, "_enqueue_delete_refresh", refresh)
+    ttl_cleanup = removal != "interactive"
+    result = await service.rm(
+        uri,
+        ctx=request_context,
+        strict=ttl_cleanup,
+        preserve_summaries=ttl_cleanup,
+        verify_only=removal == "ttl_confirmation",
+        lease_ref={"lease_ref": "ttl-object-lock"} if ttl_cleanup else None,
+    )
+
+    assert fs.rm_calls == [uri]
+    assert result["estimated_deleted_count"] == 1
+    if ttl_cleanup:
+        assert memory == original
+        assert watch.deactivate_calls == []
+        assert "memory_cleanup" not in result
+        refresh.assert_not_awaited()
+    else:
+        assert memory != original
+        assert len(watch.deactivate_calls) == 1
+        assert result["memory_cleanup"] == links.result
+        refresh.assert_awaited_once()
