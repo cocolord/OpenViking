@@ -513,7 +513,7 @@ class TestMemoryUpdater:
         )
 
         updater = MemoryUpdater(registry=registry)
-        updater._get_viking_fs = MagicMock(return_value=MagicMock())
+        updater._get_viking_fs = MagicMock(return_value=MagicMock(runtime_config_manager=None))
         updater._apply_upsert = AsyncMock(return_value=None)
         updater._vectorize_memories = AsyncMock()
         updater.generate_overview = AsyncMock()
@@ -562,7 +562,7 @@ class TestMemoryUpdater:
         )
 
         updater = MemoryUpdater(registry=registry)
-        updater._get_viking_fs = MagicMock(return_value=MagicMock())
+        updater._get_viking_fs = MagicMock(return_value=MagicMock(runtime_config_manager=None))
         updater._apply_upsert = AsyncMock(return_value=None)
         updater._sync_resource_refs_for_result = AsyncMock()
         updater._vectorize_memories = AsyncMock()
@@ -604,7 +604,7 @@ class TestMemoryUpdater:
     @pytest.mark.asyncio
     async def test_apply_operations_reports_expected_empty_uri_as_skip(self):
         updater = MemoryUpdater(registry=MagicMock())
-        updater._get_viking_fs = MagicMock(return_value=MagicMock())
+        updater._get_viking_fs = MagicMock(return_value=MagicMock(runtime_config_manager=None))
         updater._apply_upsert = AsyncMock(return_value=None)
         updater._sync_resource_refs_for_result = AsyncMock()
         updater._vectorize_memories = AsyncMock()
@@ -656,7 +656,7 @@ class TestMemoryUpdater:
         )
 
         updater = MemoryUpdater(registry=registry)
-        updater._get_viking_fs = MagicMock(return_value=MagicMock())
+        updater._get_viking_fs = MagicMock(return_value=MagicMock(runtime_config_manager=None))
         updater._apply_upsert = AsyncMock(return_value=None)
         updater._apply_delete = AsyncMock()
         updater._sync_resource_refs_for_result = AsyncMock()
@@ -701,7 +701,7 @@ class TestMemoryUpdater:
     @pytest.mark.asyncio
     async def test_apply_operations_preserves_legacy_delete_suppression_for_expected_skip(self):
         updater = MemoryUpdater(registry=MagicMock())
-        updater._get_viking_fs = MagicMock(return_value=MagicMock())
+        updater._get_viking_fs = MagicMock(return_value=MagicMock(runtime_config_manager=None))
         updater._apply_upsert = AsyncMock(return_value=None)
         updater._apply_delete = AsyncMock()
         updater._sync_resource_refs_for_result = AsyncMock()
@@ -757,7 +757,7 @@ class TestMemoryUpdater:
         registry.list_all.return_value = [schema]
 
         updater = MemoryUpdater(registry=registry)
-        updater._get_viking_fs = MagicMock(return_value=MagicMock())
+        updater._get_viking_fs = MagicMock(return_value=MagicMock(runtime_config_manager=None))
         updater._apply_upsert = AsyncMock(return_value=False)
         updater._vectorize_memories = AsyncMock()
         updater.generate_overview = AsyncMock()
@@ -810,7 +810,7 @@ class TestMemoryUpdater:
         updater._vectorize_memories = AsyncMock()
         updater.generate_overview = AsyncMock()
 
-        mock_viking_fs = MagicMock()
+        mock_viking_fs = MagicMock(runtime_config_manager=None)
 
         async def mock_read_file(uri, **kwargs):
             if uri == deleted_uri:
@@ -877,7 +877,7 @@ class TestMemoryUpdater:
         registry.get.return_value = schema
 
         updater = MemoryUpdater(registry=registry)
-        updater._get_viking_fs = MagicMock(return_value=MagicMock())
+        updater._get_viking_fs = MagicMock(return_value=MagicMock(runtime_config_manager=None))
         updater._apply_upsert = AsyncMock(return_value=None)
         updater._apply_delete = AsyncMock()
         updater._vectorize_memories = AsyncMock()
@@ -969,7 +969,7 @@ class TestMemoryUpdater:
             profile_uri: MemoryFileUtils.write(profile_file),
         }
 
-        mock_viking_fs = MagicMock()
+        mock_viking_fs = MagicMock(runtime_config_manager=None)
         mock_viking_fs.read_file = AsyncMock(side_effect=lambda uri, ctx=None: files[uri])
 
         async def write_file(uri, content, ctx=None, **kwargs):
@@ -1043,7 +1043,7 @@ class TestMemoryUpdater:
         registry.get.return_value = schema
 
         store = {}
-        mock_viking_fs = MagicMock()
+        mock_viking_fs = MagicMock(runtime_config_manager=None)
 
         async def mock_read_file(uri, **kwargs):
             return store.get(uri)
@@ -1110,7 +1110,7 @@ class TestMemoryUpdater:
         registry.get.return_value = schema
 
         store = {}
-        mock_viking_fs = MagicMock()
+        mock_viking_fs = MagicMock(runtime_config_manager=None)
 
         async def mock_read_file(uri, **kwargs):
             if uri == resource_uri:
@@ -1179,7 +1179,7 @@ class TestMemoryUpdater:
         registry.get.return_value = schema
 
         store = {}
-        mock_viking_fs = MagicMock()
+        mock_viking_fs = MagicMock(runtime_config_manager=None)
 
         async def mock_read_file(uri, **kwargs):
             return store.get(uri)
@@ -1249,7 +1249,7 @@ class TestMemoryUpdater:
         registry.get.return_value = schema
 
         store = {}
-        mock_viking_fs = MagicMock()
+        mock_viking_fs = MagicMock(runtime_config_manager=None)
 
         async def mock_read_file(uri, **kwargs):
             return store.get(uri)
@@ -1318,7 +1318,7 @@ class TestApplyEditWithSearchReplacePatch:
     @pytest.mark.asyncio
     async def test_apply_upsert_persists_last_update_trace_id(self):
         updater = self._make_updater_with_registry()
-        mock_viking_fs = MagicMock()
+        mock_viking_fs = MagicMock(runtime_config_manager=None)
         mock_viking_fs.read_file = AsyncMock(side_effect=FileNotFoundError("missing"))
         written_content = None
 
@@ -1357,7 +1357,7 @@ class TestApplyEditWithSearchReplacePatch:
         registry = MemoryTypeRegistry(load_schemas=False)
         registry.register(schema)
         updater = MemoryUpdater(registry=registry)
-        mock_viking_fs = MagicMock()
+        mock_viking_fs = MagicMock(runtime_config_manager=None)
         mock_viking_fs.read_file = AsyncMock(side_effect=FileNotFoundError("missing"))
         written_content = None
 
@@ -1406,7 +1406,7 @@ Line 4"""
         original_full_content = MemoryFileUtils.write(original_mf)
 
         # Mock VikingFS
-        mock_viking_fs = MagicMock()
+        mock_viking_fs = MagicMock(runtime_config_manager=None)
         mock_viking_fs.read_file = AsyncMock(return_value=original_full_content)
         written_content = None
 
@@ -1459,7 +1459,7 @@ Goodbye"""
         original_full_content = MemoryFileUtils.write(original_mf)
 
         # Mock VikingFS
-        mock_viking_fs = MagicMock()
+        mock_viking_fs = MagicMock(runtime_config_manager=None)
         mock_viking_fs.read_file = AsyncMock(return_value=original_full_content)
         written_content = None
 
@@ -1508,7 +1508,7 @@ Goodbye"""
             "-->"
         )
 
-        mock_viking_fs = MagicMock()
+        mock_viking_fs = MagicMock(runtime_config_manager=None)
         mock_viking_fs.read_file = AsyncMock(return_value=original_full_content)
         written_content = None
 
@@ -1571,7 +1571,7 @@ class TestConsecutivePatchesSameURI:
 
         # In-memory VikingFS store
         store: dict[str, str] = {}
-        mock_viking_fs = MagicMock()
+        mock_viking_fs = MagicMock(runtime_config_manager=None)
 
         async def mock_read_file(uri, **kwargs):
             return store.get(uri)
@@ -1632,7 +1632,7 @@ class TestConsecutivePatchesSameURI:
         registry.register(schema)
 
         store: dict[str, str] = {}
-        mock_viking_fs = MagicMock()
+        mock_viking_fs = MagicMock(runtime_config_manager=None)
 
         async def mock_read_file(uri, **kwargs):
             return store.get(uri)
@@ -1681,7 +1681,7 @@ class TestConsecutivePatchesSameURI:
         registry.register(schema)
 
         store: dict[str, str] = {}
-        mock_viking_fs = MagicMock()
+        mock_viking_fs = MagicMock(runtime_config_manager=None)
 
         async def mock_read_file(uri, **kwargs):
             return store.get(uri)
@@ -1753,7 +1753,7 @@ class TestConsecutivePatchesSameURI:
         registry.register(schema)
 
         store: dict[str, str] = {}
-        mock_viking_fs = MagicMock()
+        mock_viking_fs = MagicMock(runtime_config_manager=None)
 
         async def mock_read_file(uri, **kwargs):
             return store.get(uri)
@@ -1824,7 +1824,7 @@ class TestConsecutivePatchesSameURI:
         # In-memory store with initial content
         initial_content = MemoryFileUtils.write(MemoryFile(content="alpha beta gamma"))
         store: dict[str, str] = {uri: initial_content}
-        mock_viking_fs = MagicMock()
+        mock_viking_fs = MagicMock(runtime_config_manager=None)
 
         async def mock_read_file(uri, **kwargs):
             return store.get(uri)

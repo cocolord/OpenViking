@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: AGPL-3.0
 """Resolve the same library TTL policy for every object creation path."""
 
-import inspect
-
 from openviking.config.merge import apply_three_state_patch
 from openviking_cli.utils.config.ttl_config import TTLConfig
 
@@ -78,10 +76,4 @@ async def resolve_ttl_config(fs, account_id: str) -> TTLConfig | None:
     def resolve(view):
         return effective_ttl_config(view.cluster, view.account)
 
-    resolved = manager.resolve_account(account_id, resolve)
-    if not inspect.isawaitable(resolved):
-        # Lightweight/third-party VikingFS facades often expose permissive
-        # dynamic attributes (for example MagicMock). Treat an absent async
-        # runtime manager like startup and retain the static-config fallback.
-        return None
-    return await resolved
+    return await manager.resolve_account(account_id, resolve)

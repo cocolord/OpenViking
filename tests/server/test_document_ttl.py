@@ -21,6 +21,7 @@ from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
 from openviking_cli.utils.config import get_openviking_config, set_openviking_config
 from tests.storage.test_transfer_merge_binding import root_ctx
 from tests.unit.service.test_ttl_cleanup import _cleanup_once
+from tests.unit.storage.test_resource_ttl import fs_ctx as fs_ctx
 
 ROOT = "viking://user/default"
 CONFIG = "/api/v1/admin/accounts/default/configuration"
@@ -188,7 +189,7 @@ async def test_expiry_change_supersedes_cleanup_and_preserves_content(
             "expires_at": new_expiry,
         },
     )
-    assert changed == {**original, "expires_at": new_expiry}
+    assert changed == {**original, "expires_at": new_expiry, "ttl_days": None}
     assert (await fs.ttl_registry.get(ctx.account_id, uri)).expires_at == new_expiry
     if "/events/" in uri:
         before, after = (
@@ -196,7 +197,11 @@ async def test_expiry_change_supersedes_cleanup_and_preserves_content(
             MemoryFileUtils.read(await fs.read_file(uri, ctx=ctx)),
         )
         assert before.content == after.content
-        assert after.extra_fields == {**before.extra_fields, "expires_at": new_expiry}
+        assert after.extra_fields == {
+            **before.extra_fields,
+            "expires_at": new_expiry,
+            "ttl_days": None,
+        }
     else:
         assert await fs.read_file(uri, ctx=ctx) == raw
     real_expired = ttl.is_expired
@@ -251,9 +256,7 @@ async def test_successful_content_update_renews_relative_deadline(
     renewed = await request(client, "get", "/api/v1/content/ttl", params={"uri": uri})
     assert renewed["ttl_generation"] == original["ttl_generation"]
     assert renewed["ttl_days"] == 7
-    assert parse_iso_datetime(renewed["received_at"]) > parse_iso_datetime(
-        original["received_at"]
-    )
+    assert parse_iso_datetime(renewed["received_at"]) > parse_iso_datetime(original["received_at"])
     assert parse_iso_datetime(renewed["expires_at"]) - parse_iso_datetime(
         renewed["received_at"]
     ) == timedelta(days=7)
@@ -268,9 +271,7 @@ async def test_manual_absolute_deadline_does_not_move_on_resource_update(client,
         client,
         "patch",
         CONFIG,
-        json={
-            "settings": {"ttl": {"resources": {"mode": "days", "ttl_days": 7}}}
-        },
+        json={"settings": {"ttl": {"resources": {"mode": "days", "ttl_days": 7}}}},
     )
     uri = ROOT + "/resources/absolute.txt"
     original = await write(client, uri)
@@ -286,7 +287,9 @@ async def test_manual_absolute_deadline_does_not_move_on_resource_update(client,
 
     unchanged = await request(client, "get", "/api/v1/content/ttl", params={"uri": uri})
     assert unchanged["expires_at"] == fixed
-    assert unchanged["received_at"] == original["received_at"]
+    assert parse_iso_datetime(unchanged["received_at"]) >= parse_iso_datetime(
+        original["received_at"]
+    )
     assert unchanged["ttl_generation"] == original["ttl_generation"]
 
 
@@ -428,3 +431,75 @@ async def test_mcp_expiry_edit_uses_request_identity_and_shared_registry(client,
         assert record.expires_at == expiry
     finally:
         mcp_endpoint._mcp_ctx.reset(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "viking://user/u1/memories/events/manual.txt",
+        "viking://user/u1/resources/manual.txt",
+        "viking://resources/manual.txt",
+    ],
+)
+async def test_sdk_and_mcp_set_unmanaged_file_retention_without_global_policy(
+    fs_ctx, monkeypatch, uri
+):
+    """Public SDK -> HTTP -> service -> real VFS, without a native engine dependency."""
+    import ast
+
+    from openviking.server import mcp_endpoint
+    from openviking.server.app import create_app
+    from openviking.server.auth import get_request_context
+    from openviking.server.routers import content, resources
+    from openviking.service.fs_service import FSService
+    from openviking.service.resource_service import ResourceService
+    from openviking_cli.client.http import AsyncHTTPClient
+
+    fs, ctx = fs_ctx
+    service = SimpleNamespace(fs=FSService(viking_fs=fs), resources=ResourceService(viking_fs=fs))
+    for module in (content, resources, mcp_endpoint):
+        monkeypatch.setattr(module, "get_service", lambda: service)
+    app = create_app()
+    app.dependency_overrides[get_request_context] = lambda: ctx
+    await fs.write_file(uri, "retain this body", ctx=ctx)
+    raw_stat = fs._async_agfs.stat
+
+    async def timestamped_stat(path, **kwargs):
+        return {**await raw_stat(path, **kwargs), "modTime": "2997-01-01T00:00:00Z"}
+
+    monkeypatch.setattr(fs._async_agfs, "stat", timestamped_stat)
+    sdk = AsyncHTTPClient(url="http://testserver", account=ctx.account_id, user=ctx.user.user_id)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as http:
+        sdk._http = http
+        first = await sdk.update_ttl(uri, ttl_relative=7)
+        assert first["expires_at"] == "2997-01-08T00:00:00.000Z"
+        assert first["ttl_days"] == 7
+        assert await sdk.get_ttl(uri) == first
+        # Absolute selection must remain fixed even if equal to the relative deadline.
+        absolute = await sdk.update_ttl(uri, first["expires_at"])
+        assert absolute["ttl_days"] is None
+        assert absolute["ttl_generation"] == first["ttl_generation"]
+        token = mcp_endpoint._mcp_ctx.set(ctx)
+        try:
+            changed = ast.literal_eval(await mcp_endpoint.update_ttl(uri, ttl_relative=30))
+        finally:
+            mcp_endpoint._mcp_ctx.reset(token)
+        assert changed["expires_at"] == "2997-01-31T00:00:00.000Z"
+        assert changed["received_at"] == first["received_at"]
+        if "/resources/" in uri:
+            changed = await sdk.update_resource_ttl(uri, ttl_relative=14)
+            assert changed["expires_at"] == "2997-01-15T00:00:00.000Z"
+        assert (await fs.ttl_registry.get(ctx.account_id, uri)).expires_at == changed["expires_at"]
+        assert MemoryFileUtils.read(await fs.read_file(uri, ctx=ctx)).content == "retain this body"
+        for payload in (
+            {},
+            {"ttl_relative": 0},
+            {"ttl_relative": True},
+            {"ttl_relative": 1, "expires_at": first["expires_at"]},
+        ):
+            response = await http.patch("/api/v1/content/ttl", json={"uri": uri, **payload})
+            assert response.status_code == 400, response.text
+        assert await sdk.get_ttl(uri) == changed

@@ -261,3 +261,16 @@ class ResourceTTL(BaseModel):
         if self.ttl_absolute is not None:
             return TTLPolicy(mode="absolute", ttl_absolute=self.ttl_absolute)
         return TTLPolicy(mode="disabled")
+
+
+class DocumentTTL(BaseModel):
+    """Set one live file's relative retention or fixed ISO 8601 deadline."""
+
+    expires_at: Optional[str] = None
+    ttl_relative: Optional[StrictInt] = Field(default=None, ge=1, le=365000)
+
+    @model_validator(mode="after")
+    def _one_policy(self) -> "DocumentTTL":
+        if (self.expires_at is None) == (self.ttl_relative is None):
+            raise ValueError("provide exactly one of expires_at or ttl_relative")
+        return self

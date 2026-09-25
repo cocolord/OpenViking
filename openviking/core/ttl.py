@@ -162,16 +162,16 @@ def freeze_ttl_fields(
         elif ttl_config is not None:
             policy = ttl_config.resolve_uri_policy(uri, "resources")
     ttl_days = policy.ttl_days if policy is not None else resolve_ttl_days(uri, config)
-    if ttl_days is None and (policy is None or policy.mode != "absolute"):
-        return None
     received = received_at or datetime.now(timezone.utc)
     if received.tzinfo is None:
         received = received.replace(tzinfo=timezone.utc)
-    expires = (
-        datetime.fromtimestamp(policy.ttl_absolute, timezone.utc)
-        if policy is not None and policy.mode == "absolute"
-        else compute_expires_at(received, ttl_days)
-    )
+    absolute = policy.ttl_absolute if policy is not None and policy.mode == "absolute" else None
+    if absolute is not None:
+        expires = datetime.fromtimestamp(absolute, timezone.utc)
+    elif ttl_days is not None:
+        expires = compute_expires_at(received, ttl_days)
+    else:
+        return None
     return {
         "ttl_days": ttl_days,
         "received_at": format_iso8601(received),
@@ -216,15 +216,16 @@ def apply_ttl_fields(
     # from that point onward. Infer the legacy representation by verifying that
     # its stored deadline still exactly matches base + ttl_days. This preserves
     # compatibility without introducing a new persisted discriminator.
-    relative = False
+    relative_days = None
     if isinstance(ttl_days, int) and not isinstance(ttl_days, bool) and ttl_days > 0:
         try:
             base = parse_iso_datetime(str(existing["received_at"]))
             expiry = parse_iso_datetime(str(existing["expires_at"]))
-            relative = compute_expires_at(base, ttl_days) == expiry
+            if compute_expires_at(base, ttl_days) == expiry:
+                relative_days = ttl_days
         except (KeyError, TypeError, ValueError):
-            relative = False
-    if relative:
+            relative_days = None
+    if relative_days is not None:
         updated = received_at or datetime.now(timezone.utc)
         if updated.tzinfo is None:
             updated = updated.replace(tzinfo=timezone.utc)
@@ -232,7 +233,7 @@ def apply_ttl_fields(
             {
                 "ttl_days": ttl_days,
                 "received_at": format_iso8601(updated),
-                "expires_at": format_iso8601(compute_expires_at(updated, ttl_days)),
+                "expires_at": format_iso8601(compute_expires_at(updated, relative_days)),
             }
         )
         generation = existing.get(TTL_GENERATION_FIELD)
@@ -240,6 +241,11 @@ def apply_ttl_fields(
             result[TTL_GENERATION_FIELD] = generation
         return result
     result.update(existing)
+    if existing.get("expires_at"):
+        # Preserve a fixed deadline while recording the latest content update,
+        # so switching back to relative retention uses the correct base.
+        result["ttl_days"] = None
+        result["received_at"] = format_iso8601(received_at or datetime.now(timezone.utc))
     return result
 
 

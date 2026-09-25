@@ -116,19 +116,12 @@ async def prepare_resource_ttl(
     """
     if ttl_scope_for_uri(uri) != "resources" or is_dir:
         return {}
-    # Preserve duck-typed/third-party VikingFS compatibility when no TTL
-    # persistence backend is available. These facades historically supported
-    # ordinary resource writes without implementing raw AGFS or a registry.
-    if not hasattr(getattr(fs, "_async_agfs", None), "stat") or not hasattr(
-        fs, "ttl_registry"
-    ):
-        return {}
     object_type = OBJECT_TYPE_RESOURCE_FILE
     fields = await read_resource_fields(fs, object_type, uri, ctx=ctx)
     pending = await fs.ttl_registry.get(ctx.account_id, uri)
-    expired_snapshot = (
-        fields is not None and hidden_by_ttl(fields.get("expires_at"))
-    ) or (fields is None and pending is not None and hidden_by_ttl(pending.expires_at))
+    expired_snapshot = (fields is not None and hidden_by_ttl(fields.get("expires_at"))) or (
+        fields is None and pending is not None and hidden_by_ttl(pending.expires_at)
+    )
     if expired_snapshot and pending is not None:
         # Physical cleanup is still in flight. Never let a writer race the old
         # generation; once cleanup removes the registry entry, a changed Watch
@@ -136,9 +129,7 @@ async def prepare_resource_ttl(
         raise NotFoundError(uri, "resource")
     if fields is not None and not expired_snapshot:
         if existing:
-            renewed = apply_ttl_fields(
-                uri, {}, existing_fields=fields, received_at=received_at
-            )
+            renewed = apply_ttl_fields(uri, {}, existing_fields=fields, received_at=received_at)
             if content_md5:
                 renewed["content_md5"] = content_md5
             elif fields.get("content_md5"):
@@ -225,9 +216,11 @@ async def write_resource_fields(fs, object_type, uri, fields, *, ctx, lease_ref)
         await fs._async_agfs.pathlock_release(metadata_lease)
 
 
-async def update_resource_expiry(fs, uri: str, expires_at: str, *, ctx) -> dict:
+async def update_resource_expiry(
+    fs, uri: str, expires_at: str | None = None, *, ctx, ttl_relative: int | None = None
+) -> dict:
     from openviking.storage.document_ttl import update_document_expiry
 
     if ttl_scope_for_uri(uri) != "resources":
         raise InvalidArgumentError("uri must identify a resource")
-    return await update_document_expiry(fs, uri, expires_at, ctx=ctx)
+    return await update_document_expiry(fs, uri, expires_at, ctx=ctx, ttl_relative=ttl_relative)

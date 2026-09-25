@@ -22,7 +22,7 @@ from openviking.server.temp_upload_store import TempUploadStore
 from openviking.storage.acl import AclSpec
 from openviking.telemetry import TelemetryRequest
 from openviking_cli.exceptions import InvalidArgumentError
-from openviking_cli.utils.config.ttl_config import ResourceTTL
+from openviking_cli.utils.config.ttl_config import DocumentTTL, ResourceTTL
 
 router = APIRouter(prefix="/api/v1", tags=["resources"])
 
@@ -142,10 +142,9 @@ class UpdateResourceConfigRequest(ResourceTTL):
     uri: str
 
 
-class UpdateResourceTTLRequest(BaseModel):
+class UpdateResourceTTLRequest(DocumentTTL):
     model_config = ConfigDict(extra="forbid")
     uri: str
-    expires_at: str
 
 
 @router.patch("/resources/config")
@@ -173,7 +172,9 @@ async def update_resource_ttl(
 ):
     uri = validate_content_target_uri(resolve_path_variables(request.uri), _ctx, kind="resource")
     return response_from_result(
-        await get_service().resources.update_resource_ttl(uri, request.expires_at, _ctx)
+        await get_service().resources.update_resource_ttl(
+            uri, request.expires_at, _ctx, ttl_relative=request.ttl_relative
+        )
     )
 
 

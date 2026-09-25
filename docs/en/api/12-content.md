@@ -829,19 +829,22 @@ Task records are persisted under `/local/{account_id}/_system/tasks/{user_id}/{t
 
 ## Document expiry
 
-`GET /api/v1/content/ttl?uri=...` returns an exact event or resource file's effective deadline; unmanaged files return only `uri`. Resource directories are not deadline-bearing objects and are rejected. `PATCH /api/v1/content/ttl` revises the deadline of one live, managed file:
+`GET /api/v1/content/ttl?uri=...` returns an exact event or resource file's effective deadline; unmanaged files return only `uri`. Resource directories are not deadline-bearing objects and are rejected. `PATCH /api/v1/content/ttl` sets or changes retention for a live file, including previously unmanaged files when global TTL is disabled:
 
 ```json
 {"uri": "viking://user/alice/memories/events/example.txt", "expires_at": "2027-01-01T00:00:00Z"}
 ```
 
-The new deadline must be an ISO 8601 timestamp in the future. Under the object lock, the server rechecks permissions, identity and current expiry, then updates only `expires_at` and the persistent cleanup registration. Content, `received_at`, `ttl_days` and `ttl_generation` remain unchanged. Old cleanup deliveries recheck the source deadline and skip extended objects; no memory extraction or re-embedding is triggered. A later successful content update renews a relative deadline from that update time using the saved `ttl_days`; an absolute deadline remains fixed.
+Provide exactly one of `ttl_relative` (whole days, 1–365000) or `expires_at` (a future ISO 8601 timestamp). Relative retention starts from the latest successful content update; editing retention alone does not reset it, and shortening it may expire the file immediately. Previously unmanaged files use their storage modification time. Later successful content updates renew the saved relative duration. Setting `expires_at` selects a fixed deadline and clears `ttl_days`, even if it equals the previous relative deadline. Both modes preserve the existing generation and body, and update cleanup registration under the object lock without memory extraction or re-embedding.
 
-Resource deadlines are always exact-file deadlines. Updating one file does not affect its siblings, parent directory, or directory default. Use the resource configuration API for defaults applied to future files. This endpoint cannot restore expired objects or add TTL to unmanaged historical documents.
+Resource deadlines are always exact-file deadlines. Updating one file does not affect its siblings, parent directory, or directory default. Use the resource configuration API for defaults applied to future files. Directories, summaries, relations and internal metadata are rejected. This endpoint cannot restore expired files.
 
 ```bash
 ov ttl get viking://user/alice/memories/events/example.txt
+ov ttl set viking://user/alice/memories/events/example.txt --ttl-relative 30
 ov ttl set viking://user/alice/memories/events/example.txt --expires-at 2027-01-01T00:00:00Z
 ```
 
 Python HTTP SDK methods and MCP tools are `get_ttl` and `update_ttl`. See [TTL configuration](../configuration/01-server.md#ttl) for global, scope and directory defaults. TTL clears L2 only; all L0/L1 files, vectors and their directory scaffolding remain.
+
+Relative-retention SDK example: `await client.update_ttl(uri, ttl_relative=30)`.

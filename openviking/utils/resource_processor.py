@@ -355,6 +355,19 @@ class ResourceProcessor:
                     target_root_uri=root_uri,
                     root_is_file=root_is_file,
                 )
+                if root_is_file and not target_preexisting:
+                    # Resolving a missing flat-file target can leave an empty
+                    # placeholder directory at that URI. This is especially
+                    # visible after TTL cleanup retains the sibling tombstone.
+                    # Remove only the placeholder before an added file action.
+                    try:
+                        stat = await get_viking_fs().stat(root_uri, ctx=ctx, skip_count=True)
+                    except Exception:
+                        stat = {}
+                    if stat.get("isDir"):
+                        await get_viking_fs().remove_files(
+                            root_uri, recursive=True, ctx=ctx, lease_ref=lease_ref
+                        )
                 if watch_refresh:
                     from openviking.storage.resource_ttl import (
                         unchanged_expired_resource_paths,
@@ -393,40 +406,10 @@ class ResourceProcessor:
                             # A flat-file Watch has no siblings to carry a plan.
                             # Treat an unchanged expired source as a successful
                             # no-op instead of compiling an empty root snapshot.
-                            # Target resolution may already have reserved this
-                            # missing file URI as an empty directory; remove that
-                            # placeholder so the expired file remains absent.
-                            if not target_preexisting:
-                                try:
-                                    stat = await get_viking_fs().stat(
-                                        root_uri, ctx=ctx, skip_count=True
-                                    )
-                                except Exception:
-                                    stat = {}
-                                if stat.get("isDir"):
-                                    await get_viking_fs().remove_files(
-                                        root_uri,
-                                        recursive=True,
-                                        ctx=ctx,
-                                        lease_ref=lease_ref,
-                                    )
                             return ContextUpdatePlan(
                                 root_uri=root_uri,
                                 context_type=context_type_for_uri(root_uri),
                             )
-                if root_is_file and not target_preexisting:
-                    # Resolving a missing flat-file target can leave an empty
-                    # placeholder directory at that URI. This is especially
-                    # visible after TTL cleanup retains the sibling tombstone.
-                    # Remove only the placeholder before an added file action.
-                    try:
-                        stat = await get_viking_fs().stat(root_uri, ctx=ctx, skip_count=True)
-                    except Exception:
-                        stat = {}
-                    if stat.get("isDir"):
-                        await get_viking_fs().remove_files(
-                            root_uri, recursive=True, ctx=ctx, lease_ref=lease_ref
-                        )
             plan_processing_mode = (
                 processing_mode
                 if processing_mode == VECTORS_ONLY or summarize or vectorize

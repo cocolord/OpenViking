@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -292,8 +293,8 @@ class _TTLTransferRegistry:
 def _ttl_transfer_fs(monkeypatch):
     fields = {
         "ttl_days": 30,
-        "received_at": "2026-01-01T00:00:00.000Z",
-        "expires_at": "2026-01-31T00:00:00.000Z",
+        "received_at": "2030-01-01T00:00:00.000Z",
+        "expires_at": "2030-01-31T00:00:00.000Z",
         "ttl_generation": "generation-1",
     }
     content = f"event\n\n<!-- MEMORY_FIELDS\n{json.dumps(fields)}\n-->".encode()
@@ -314,7 +315,7 @@ async def test_cp_preregisters_frozen_ttl_before_publishing_target(monkeypatch):
     await fs.cp(source, target, ctx=_ctx())
 
     record = fs.ttl_registry.records[("acct", target)]
-    assert record.expires_at == "2026-01-31T00:00:00.000Z"
+    assert record.expires_at == "2030-01-31T00:00:00.000Z"
     assert record.generation == "generation-1"
     assert next(i for i, event in enumerate(agfs.events) if event[0] == "ttl-upsert") < next(
         i for i, event in enumerate(agfs.events) if event[0] == "cp"
@@ -382,7 +383,7 @@ async def test_mv_transfers_frozen_ttl_and_removes_source_projection(monkeypatch
         object_type="event",
         account_id="acct",
         user_id="alice",
-        expires_at="2026-01-31T00:00:00.000Z",
+        expires_at="2030-01-31T00:00:00.000Z",
         generation="generation-1",
     )
     fs.ttl_registry.records[("acct", source)] = source_record
@@ -392,6 +393,315 @@ async def test_mv_transfers_frozen_ttl_and_removes_source_projection(monkeypatch
     assert ("acct", source) not in fs.ttl_registry.records
     assert fs.ttl_registry.records[("acct", target)].generation == "generation-1"
     assert ("ttl-remove", source, "generation-1") in agfs.events
+
+
+class _TTLDirectoryCopyAGFS(_DirectoryCopyAGFS):
+    async def read(self, path, fs_ctx=None):
+        if path not in self.files:
+            raise FileNotFoundError(path)
+        return self.files[path]
+
+    async def rm(self, path, recursive=False, fs_ctx=None, auto_pathlock=True):
+        await super().rm(path, recursive=recursive, fs_ctx=fs_ctx)
+
+
+def _ttl_directory_fs(monkeypatch):
+    agfs = _TTLDirectoryCopyAGFS()
+    agfs.files.clear()
+    agfs.directories.update(
+        {
+            "/local/acct/user/alice/memories/events",
+            "/local/acct/user/alice/memories/experiences",
+        }
+    )
+    fs = _viking_fs(monkeypatch, agfs)
+    fs.ttl_registry = _TTLTransferRegistry(agfs.events)
+    monkeypatch.setattr(fs, "_copy_vector_store_uris", AsyncMock(return_value=None))
+    monkeypatch.setattr(fs, "_update_vector_store_uris", AsyncMock(return_value=None))
+    return fs, agfs
+
+
+async def _install_transfer_ttl(fs, uri, *, expired=False, relative=True):
+    from openviking.core.ttl import OBJECT_TYPE_RESOURCE_FILE, ttl_metadata_uri, ttl_scope_for_uri
+    from openviking.utils.time_utils import format_iso8601
+
+    now = datetime.now(timezone.utc)
+    expires = now + (timedelta(days=-1) if expired else timedelta(hours=1))
+    fields = {
+        "received_at": format_iso8601(expires - timedelta(days=7)),
+        "expires_at": format_iso8601(expires),
+        "ttl_generation": "file-generation",
+    }
+    if relative:
+        fields["ttl_days"] = 7
+    metadata_uri = uri
+    if ttl_scope_for_uri(uri) == "resources":
+        metadata_uri = ttl_metadata_uri(OBJECT_TYPE_RESOURCE_FILE, uri)
+        raw = json.dumps(fields).encode()
+    else:
+        raw = f"event secret\n\n<!-- MEMORY_FIELDS\n{json.dumps(fields)}\n-->".encode()
+    fs._async_agfs.files[fs._uri_to_path(metadata_uri, ctx=_ctx())] = raw
+    record = fs._ttl_record_for_write(metadata_uri, raw, ctx=_ctx())
+    assert record is not None
+    await fs.ttl_registry.upsert(record)
+    return fields
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["cp", "mv"])
+@pytest.mark.parametrize("expired", [False, True])
+async def test_transfer_cannot_escape_event_ttl(monkeypatch, operation, expired):
+    fs, agfs = _ttl_directory_fs(monkeypatch)
+    source = "viking://user/alice/memories/events/source.md"
+    target = "viking://user/alice/memories/experiences/target.md"
+    await _install_transfer_ttl(fs, source, expired=expired)
+    before = dict(agfs.files)
+
+    with pytest.raises(NotFoundError if expired else InvalidArgumentError):
+        await getattr(fs, operation)(source, target, ctx=_ctx())
+
+    assert agfs.files == before
+    fs._copy_vector_store_uris.assert_not_awaited()
+    fs._update_vector_store_uris.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["cp", "mv"])
+async def test_transfer_cannot_turn_managed_resource_into_retained_summary(monkeypatch, operation):
+    fs, agfs = _ttl_directory_fs(monkeypatch)
+    source = "viking://resources/source.md"
+    target = "viking://resources/.abstract.md"
+    agfs.files["/local/acct/resources/source.md"] = b"managed body"
+    await _install_transfer_ttl(fs, source)
+    before = dict(agfs.files)
+
+    with pytest.raises(InvalidArgumentError):
+        await getattr(fs, operation)(source, target, ctx=_ctx())
+
+    assert agfs.files == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["cp", "mv"])
+async def test_recursive_transfer_rejects_expired_child_without_losing_live_files(
+    monkeypatch, operation
+):
+    fs, agfs = _ttl_directory_fs(monkeypatch)
+    source = "viking://resources/source"
+    target = "viking://resources/target"
+    agfs.files["/local/acct/resources/source/expired.md"] = b"expired body"
+    agfs.files["/local/acct/resources/source/live.md"] = b"live body"
+    agfs.files["/local/acct/resources/source/.abstract.md"] = b"retained summary"
+    await _install_transfer_ttl(fs, source + "/expired.md", expired=True)
+    before = dict(agfs.files)
+    kwargs = {"recursive": True} if operation == "cp" else {}
+
+    with pytest.raises(NotFoundError):
+        await getattr(fs, operation)(source, target, ctx=_ctx(), **kwargs)
+
+    assert agfs.files == before
+    assert await fs.read_file_bytes(source + "/live.md", ctx=_ctx()) == b"live body"
+    assert await fs.read_file_bytes(source + "/.abstract.md", ctx=_ctx()) == b"retained summary"
+    fs._copy_vector_store_uris.assert_not_awaited()
+    fs._update_vector_store_uris.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["cp", "mv"])
+@pytest.mark.parametrize("target_body_exists", [False, True])
+async def test_transfer_does_not_revive_expired_resource_target(
+    monkeypatch, operation, target_body_exists
+):
+    fs, agfs = _ttl_directory_fs(monkeypatch)
+    source = "viking://resources/source.md"
+    target = "viking://resources/target.md"
+    agfs.files["/local/acct/resources/source.md"] = b"new body"
+    if target_body_exists:
+        agfs.files["/local/acct/resources/target.md"] = b"old body"
+    await _install_transfer_ttl(fs, target, expired=True)
+    before = dict(agfs.files)
+
+    with pytest.raises(NotFoundError):
+        await getattr(fs, operation)(source, target, ctx=_ctx())
+
+    assert agfs.files == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["cp", "mv"])
+@pytest.mark.parametrize("relative", [False, True])
+@pytest.mark.parametrize("directory", [False, True])
+async def test_unmanaged_resource_overwrite_preserves_target_retention(
+    monkeypatch, operation, relative, directory
+):
+    from openviking.storage.resource_ttl import resource_ttl_fields
+    from openviking.utils.content_hash import content_md5
+    from openviking.utils.time_utils import parse_iso_datetime
+
+    fs, agfs = _ttl_directory_fs(monkeypatch)
+    source = "viking://resources/source" if directory else "viking://resources/source.md"
+    target = "viking://resources/target" if directory else "viking://resources/target.md"
+    source_file = source + "/content.md" if directory else source
+    target_file = target + "/content.md" if directory else target
+    if directory:
+        agfs.directories.add("/local/acct/resources/target")
+        agfs.files["/local/acct/resources/source/.abstract.md"] = b"retained summary"
+    agfs.files[fs._uri_to_path(source_file, ctx=_ctx())] = b"new body"
+    agfs.files[fs._uri_to_path(target_file, ctx=_ctx())] = b"old body"
+    before = await _install_transfer_ttl(fs, target_file, relative=relative)
+    started = parse_iso_datetime(datetime.now(timezone.utc).isoformat(timespec="milliseconds"))
+    kwargs = {"recursive": True} if directory and operation == "cp" else {}
+
+    await getattr(fs, operation)(source, target, ctx=_ctx(), **kwargs)
+
+    assert agfs.files[fs._uri_to_path(target_file, ctx=_ctx())] == b"new body"
+    after = await resource_ttl_fields(fs, target_file, ctx=_ctx())
+    assert after["content_md5"] == content_md5(b"new body")
+    assert after["ttl_generation"] == before["ttl_generation"]
+    if relative:
+        assert after["ttl_days"] == 7
+        assert parse_iso_datetime(after["expires_at"]) >= started + timedelta(days=7)
+    else:
+        assert parse_iso_datetime(after["expires_at"]) == parse_iso_datetime(before["expires_at"])
+    if directory:
+        assert b"retained summary" in agfs.files["/local/acct/resources/target/.abstract.md"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["cp", "mv"])
+@pytest.mark.parametrize("directory", [False, True])
+async def test_managed_resource_transfer_keeps_source_lifetime(monkeypatch, operation, directory):
+    from openviking.storage.resource_ttl import resource_ttl_fields
+    from openviking.utils.time_utils import parse_iso_datetime
+
+    fs, agfs = _ttl_directory_fs(monkeypatch)
+    source = "viking://resources/source" if directory else "viking://resources/source.md"
+    target = "viking://resources/target" if directory else "viking://resources/target.md"
+    source_file = source + "/content.md" if directory else source
+    target_file = target + "/content.md" if directory else target
+    agfs.files[fs._uri_to_path(source_file, ctx=_ctx())] = b"managed body"
+    before = await _install_transfer_ttl(fs, source_file)
+    kwargs = {"recursive": True} if directory and operation == "cp" else {}
+
+    await getattr(fs, operation)(source, target, ctx=_ctx(), **kwargs)
+
+    assert agfs.files[fs._uri_to_path(target_file, ctx=_ctx())] == b"managed body"
+    after = await resource_ttl_fields(fs, target_file, ctx=_ctx())
+    assert after["ttl_generation"] == before["ttl_generation"]
+    assert parse_iso_datetime(after["expires_at"]) == parse_iso_datetime(before["expires_at"])
+    assert (await fs.ttl_registry.get("acct", target_file)).generation == before["ttl_generation"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["cp", "mv"])
+async def test_recursive_transfer_does_not_recreate_legacy_directory_owner(monkeypatch, operation):
+    fs, agfs = _ttl_directory_fs(monkeypatch)
+    source = "viking://resources/source"
+    target = "viking://resources/target"
+    agfs.files["/local/acct/resources/source/content.md"] = b"live body"
+    agfs.files["/local/acct/resources/source/.ttl.json"] = json.dumps(
+        {"expires_at": "2000-01-01T00:00:00Z", "ttl_generation": "legacy-owner"}
+    ).encode()
+    kwargs = {"recursive": True} if operation == "cp" else {}
+
+    await getattr(fs, operation)(source, target, ctx=_ctx(), **kwargs)
+
+    assert agfs.files["/local/acct/resources/target/content.md"] == b"live body"
+    assert "/local/acct/resources/target/.ttl.json" not in agfs.files
+    assert await fs.ttl_registry.get("acct", target) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["cp", "mv"])
+async def test_failed_resource_overwrite_does_not_renew_target(monkeypatch, operation):
+    from openviking.storage.resource_ttl import resource_ttl_fields
+    from openviking.utils.time_utils import parse_iso_datetime
+
+    fs, agfs = _ttl_directory_fs(monkeypatch)
+    source = "viking://resources/source.md"
+    target = "viking://resources/target.md"
+    agfs.files["/local/acct/resources/source.md"] = b"new body"
+    agfs.files["/local/acct/resources/target.md"] = b"old body"
+    before = await _install_transfer_ttl(fs, target)
+    monkeypatch.setattr(agfs, "cp", AsyncMock(side_effect=RuntimeError("copy failed")))
+
+    with pytest.raises(RuntimeError, match="copy failed"):
+        await getattr(fs, operation)(source, target, ctx=_ctx())
+
+    after = await resource_ttl_fields(fs, target, ctx=_ctx())
+    assert agfs.files["/local/acct/resources/target.md"] == b"old body"
+    assert parse_iso_datetime(after["expires_at"]) == parse_iso_datetime(before["expires_at"])
+    assert after["ttl_generation"] == before["ttl_generation"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["cp", "mv"])
+@pytest.mark.parametrize("relative", [False, True])
+async def test_unmanaged_event_overwrite_preserves_target_retention(
+    monkeypatch, operation, relative
+):
+    from openviking.session.memory.utils.memory_file_utils import MemoryFileUtils
+    from openviking.utils.time_utils import parse_iso_datetime
+
+    fs, agfs = _ttl_directory_fs(monkeypatch)
+    source = "viking://user/alice/memories/events/source.md"
+    target = "viking://user/alice/memories/events/target.md"
+    agfs.files[fs._uri_to_path(source, ctx=_ctx())] = b"replacement event"
+    before = await _install_transfer_ttl(fs, target, relative=relative)
+    started = parse_iso_datetime(datetime.now(timezone.utc).isoformat(timespec="milliseconds"))
+
+    await getattr(fs, operation)(source, target, ctx=_ctx())
+
+    after = MemoryFileUtils.read(
+        agfs.files[fs._uri_to_path(target, ctx=_ctx())].decode(), uri=target
+    )
+    assert after.content == "replacement event"
+    assert after.extra_fields["ttl_generation"] == before["ttl_generation"]
+    expiry = parse_iso_datetime(after.extra_fields["expires_at"])
+    if relative:
+        assert after.extra_fields["ttl_days"] == 7
+        assert expiry >= started + timedelta(days=7)
+    else:
+        assert expiry == parse_iso_datetime(before["expires_at"])
+    record = await fs.ttl_registry.get("acct", target)
+    assert record.generation == before["ttl_generation"]
+    assert parse_iso_datetime(record.expires_at) == expiry
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["cp", "mv"])
+async def test_failed_event_overwrite_keeps_target_policy(monkeypatch, operation):
+    fs, agfs = _ttl_directory_fs(monkeypatch)
+    source = "viking://user/alice/memories/events/source.md"
+    target = "viking://user/alice/memories/events/target.md"
+    agfs.files[fs._uri_to_path(source, ctx=_ctx())] = b"replacement event"
+    await _install_transfer_ttl(fs, target)
+    before = dict(agfs.files)
+    record = await fs.ttl_registry.get("acct", target)
+    monkeypatch.setattr(agfs, "write", AsyncMock(side_effect=RuntimeError("write failed")))
+
+    with pytest.raises(RuntimeError, match="write failed"):
+        await getattr(fs, operation)(source, target, ctx=_ctx())
+
+    assert agfs.files == before
+    assert await fs.ttl_registry.get("acct", target) == record
+
+
+@pytest.mark.asyncio
+async def test_mv_expiring_during_copy_keeps_existing_source_vectors(monkeypatch):
+    fs, agfs = _ttl_directory_fs(monkeypatch)
+    source = "viking://resources/source.md"
+    target = "viking://resources/target.md"
+    agfs.files["/local/acct/resources/source.md"] = b"source body"
+    monkeypatch.setattr(fs, "_copy_for_mv", AsyncMock(side_effect=NotFoundError(source, "file")))
+    delete_vectors = AsyncMock()
+    monkeypatch.setattr(fs, "_delete_from_vector_store", delete_vectors)
+
+    with pytest.raises(NotFoundError):
+        await fs.mv(source, target, ctx=_ctx())
+
+    assert agfs.files["/local/acct/resources/source.md"] == b"source body"
+    delete_vectors.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

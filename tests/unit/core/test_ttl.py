@@ -215,7 +215,12 @@ def test_apply_ttl_fields_preserves_explicit_absolute_deadline_on_update():
         existing_fields=existing,
         received_at=datetime(2026, 1, 10, tzinfo=timezone.utc),
     )
-    assert updated == {"title": "changed", **existing}
+    assert updated == {
+        "title": "changed",
+        **existing,
+        "received_at": "2026-01-10T00:00:00.000Z",
+        "ttl_days": None,
+    }
 
 
 def test_compute_expires_at_day_granularity():

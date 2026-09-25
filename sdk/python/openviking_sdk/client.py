@@ -806,12 +806,20 @@ class AsyncHTTPClient:
         )
         return self._handle_response_data(response).get("result", {})
 
-    async def update_ttl(self, uri: str, expires_at: str) -> Dict[str, Any]:
+    async def update_ttl(
+        self, uri: str, expires_at: Optional[str] = None, *, ttl_relative: Optional[int] = None
+    ) -> Dict[str, Any]:
         """Change a live document's expiry; policy changes remain incremental."""
         response = await self._request(
             "PATCH",
             "/api/v1/content/ttl",
-            json={"uri": VikingURI.normalize(uri), "expires_at": expires_at},
+            json=self._compact_request_body(
+                {
+                    "uri": VikingURI.normalize(uri),
+                    "expires_at": expires_at,
+                    "ttl_relative": ttl_relative,
+                }
+            ),
         )
         return self._handle_response_data(response).get("result", {})
 
@@ -831,11 +839,19 @@ class AsyncHTTPClient:
         )
         return self._handle_response_data(response).get("result", {})
 
-    async def update_resource_ttl(self, uri: str, expires_at: str) -> Dict[str, Any]:
+    async def update_resource_ttl(
+        self, uri: str, expires_at: Optional[str] = None, *, ttl_relative: Optional[int] = None
+    ) -> Dict[str, Any]:
         response = await self._request(
             "PATCH",
             "/api/v1/resources/ttl",
-            json={"uri": VikingURI.normalize(uri), "expires_at": expires_at},
+            json=self._compact_request_body(
+                {
+                    "uri": VikingURI.normalize(uri),
+                    "expires_at": expires_at,
+                    "ttl_relative": ttl_relative,
+                }
+            ),
         )
         return self._handle_response_data(response).get("result", {})
 
@@ -2362,8 +2378,10 @@ class SyncHTTPClient:
     def get_ttl(self, uri: str) -> Dict[str, Any]:
         return run_async(self._async_client.get_ttl(uri))
 
-    def update_ttl(self, uri: str, expires_at: str) -> Dict[str, Any]:
-        return run_async(self._async_client.update_ttl(uri, expires_at))
+    def update_ttl(
+        self, uri: str, expires_at: Optional[str] = None, *, ttl_relative: Optional[int] = None
+    ) -> Dict[str, Any]:
+        return run_async(self._async_client.update_ttl(uri, expires_at, ttl_relative=ttl_relative))
 
     def admin_get_configuration(self, account_id: Optional[str] = None) -> Dict[str, Any]:
         return run_async(self._async_client.admin_get_configuration(account_id))
@@ -2373,8 +2391,12 @@ class SyncHTTPClient:
     ) -> Dict[str, Any]:
         return run_async(self._async_client.admin_patch_configuration(settings, account_id))
 
-    def update_resource_ttl(self, uri: str, expires_at: str) -> Dict[str, Any]:
-        return run_async(self._async_client.update_resource_ttl(uri, expires_at))
+    def update_resource_ttl(
+        self, uri: str, expires_at: Optional[str] = None, *, ttl_relative: Optional[int] = None
+    ) -> Dict[str, Any]:
+        return run_async(
+            self._async_client.update_resource_ttl(uri, expires_at, ttl_relative=ttl_relative)
+        )
 
     def batch_add_messages(
         self,

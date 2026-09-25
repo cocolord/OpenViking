@@ -1963,13 +1963,20 @@ enum PrivacyCommands {
 
 #[derive(Subcommand)]
 enum TtlCommands {
-    /// Read a live document's received time, cleanup time and resource owner
+    /// Read a live document's content update time and retention policy
     Get { uri: String },
-    /// Change a live document's cleanup time; requires a future ISO 8601 timestamp
+    /// Set a live document's retention, independently of global TTL
     Set {
         uri: String,
-        #[arg(long)]
-        expires_at: String,
+        #[arg(
+            long,
+            conflicts_with = "ttl_relative",
+            required_unless_present = "ttl_relative"
+        )]
+        expires_at: Option<String>,
+        /// Retain for this many whole days after the last content update
+        #[arg(long, conflicts_with = "expires_at", required_unless_present = "expires_at", value_parser = clap::value_parser!(i64).range(1..=365000))]
+        ttl_relative: Option<i64>,
     },
 }
 
@@ -3383,11 +3390,11 @@ async fn main() {
                         .get("/api/v1/content/ttl", &[("uri".into(), uri)])
                         .await
                 }
-                TtlCommands::Set { uri, expires_at } => {
+                TtlCommands::Set { uri, expires_at, ttl_relative } => {
                     client
                         .patch(
                             "/api/v1/content/ttl",
-                            &serde_json::json!({"uri": uri, "expires_at": expires_at}),
+                            &serde_json::json!({"uri": uri, "expires_at": expires_at, "ttl_relative": ttl_relative}),
                             &[],
                         )
                         .await
@@ -3964,7 +3971,7 @@ async fn main() {
 mod tests {
     use super::{
         Cli, CliContext, Commands, ConfigAddTarget, ConfigCommands, LanguageGateAction,
-        ObserverCommands, PrivacyCommands, SkillCommands, SnapshotCmd, UploadCliOptions,
+        ObserverCommands, PrivacyCommands, SkillCommands, SnapshotCmd, TtlCommands, UploadCliOptions,
         find_command_index, first_command_token, is_language_command_request,
         language_command_can_run_picker, language_gate_action, language_required_message,
         legacy_upload_option_error, plain_help_misuse, pre_parse_output_options,
@@ -4030,6 +4037,44 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn document_ttl_accepts_exactly_one_retention_mode() {
+        let cli = Cli::try_parse_from([
+            "ov",
+            "ttl",
+            "set",
+            "viking://resources/a.txt",
+            "--ttl-relative",
+            "30",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Ttl {
+                action: TtlCommands::Set {
+                    ttl_relative: Some(30),
+                    expires_at: None,
+                    ..
+                }
+            }
+        ));
+        for tail in [
+            vec![],
+            vec!["--ttl-relative", "0"],
+            vec!["--ttl-relative", "365001"],
+            vec![
+                "--ttl-relative",
+                "1",
+                "--expires-at",
+                "2999-01-01T00:00:00Z",
+            ],
+        ] {
+            let mut args = vec!["ov", "ttl", "set", "viking://resources/a.txt"];
+            args.extend(tail);
+            assert!(Cli::try_parse_from(args).is_err());
+        }
     }
 
     #[test]

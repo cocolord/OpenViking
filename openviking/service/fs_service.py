@@ -365,11 +365,20 @@ class FSService:
         self._reject_storage_internal_target(uri)
         return await get_document_ttl(self._ensure_initialized(), uri, ctx=ctx)
 
-    async def update_ttl(self, uri: str, expires_at: str, ctx: RequestContext) -> dict:
+    async def update_ttl(
+        self,
+        uri: str,
+        expires_at: str | None,
+        ctx: RequestContext,
+        *,
+        ttl_relative: int | None = None,
+    ) -> dict:
         from openviking.storage.document_ttl import update_document_expiry
 
         self._reject_storage_internal_target(uri)
-        return await update_document_expiry(self._ensure_initialized(), uri, expires_at, ctx=ctx)
+        return await update_document_expiry(
+            self._ensure_initialized(), uri, expires_at, ctx=ctx, ttl_relative=ttl_relative
+        )
 
     async def mkdir(
         self,

@@ -81,6 +81,72 @@ async def install(fs, ctx, uri, *, is_dir, expires_at=FUTURE):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "uri", [ROOT + "/manual.txt", "viking://user/u1/memories/events/manual.txt"]
+)
+async def test_set_relative_ttl_without_global_policy_preserves_content_time(fs_ctx, uri):
+    from openviking.session.memory.utils.memory_file_utils import MemoryFileUtils
+    from openviking.storage.document_ttl import update_document_expiry
+
+    fs, ctx = fs_ctx
+    await fs.write_file(uri, "keep this body", ctx=ctx)
+    stat = fs._async_agfs.stat
+
+    async def with_mtime(path, **kwargs):
+        return {**await stat(path, **kwargs), "modTime": "2997-01-01T00:00:00Z"}
+
+    fs._async_agfs.stat = with_mtime
+    first = await update_document_expiry(fs, uri, ctx=ctx, ttl_relative=7)
+    assert first["expires_at"] == "2997-01-08T00:00:00.000Z"
+    changed = await update_document_expiry(fs, uri, ctx=ctx, ttl_relative=30)
+    assert changed["expires_at"] == "2997-01-31T00:00:00.000Z"
+    assert changed["received_at"] == first["received_at"]
+    assert changed["ttl_generation"] == first["ttl_generation"]
+    assert (await fs.ttl_registry.get(ctx.account_id, uri)).expires_at == changed["expires_at"]
+    assert MemoryFileUtils.read(await fs.read_file(uri, ctx=ctx)).content == "keep this body"
+
+
+@pytest.mark.asyncio
+async def test_absolute_edit_equal_to_relative_expiry_does_not_renew(fs_ctx):
+    fs, ctx = fs_ctx
+    uri = ROOT + "/absolute-edit.txt"
+    await fs.write_file(uri, "keep", ctx=ctx)
+    fields = await prepare_resource_ttl(
+        fs,
+        uri,
+        is_dir=False,
+        existing=False,
+        ctx=ctx,
+        lease_ref=None,
+        resource_ttl={"ttl_relative": 7},
+        received_at=ttl.parse_iso_datetime("2997-01-01T00:00:00Z"),
+    )
+    await update_resource_expiry(fs, uri, fields["expires_at"], ctx=ctx)
+    renewed = await prepare_resource_ttl(
+        fs,
+        uri,
+        is_dir=False,
+        existing=True,
+        ctx=ctx,
+        lease_ref=None,
+        received_at=ttl.parse_iso_datetime("2997-01-03T00:00:00Z"),
+    )
+    assert renewed["expires_at"] == fields["expires_at"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", [".abstract.md", ".overview.md", ".relations.json"])
+async def test_resource_metadata_cannot_become_ttl_document(fs_ctx, name):
+    from openviking.storage.document_ttl import get_document_ttl
+
+    fs, ctx = fs_ctx
+    uri = ROOT + "/" + name
+    await fs.write_file(uri, "summary", ctx=ctx)
+    with pytest.raises(InvalidArgumentError):
+        await get_document_ttl(fs, uri, ctx=ctx)
+
+
+@pytest.mark.asyncio
 async def test_retry_after_registry_only_write_keeps_pending_deadline(fs_ctx):
     fs, ctx = fs_ctx
     uri = ROOT + "/interrupted"
@@ -119,11 +185,7 @@ async def test_file_lifecycle_hides_only_its_exact_bytes(fs_ctx, root):
         await fs.read_file_bytes(uri, ctx=ctx)
     assert await fs.read_file(ROOT + "/sibling", ctx=ctx) == "keep"
     # Removing metadata during a failed strict cleanup must not revive bytes.
-    fs._async_agfs.files.pop(
-        fs._uri_to_path(
-            ttl.ttl_metadata_uri("resource_file", uri), ctx=ctx
-        )
-    )
+    fs._async_agfs.files.pop(fs._uri_to_path(ttl.ttl_metadata_uri("resource_file", uri), ctx=ctx))
     assert not await resource_ttl_visible(fs, uri, ctx=ctx)
 
 
@@ -211,7 +273,39 @@ async def test_relative_resource_update_renews_but_absolute_deadline_does_not(fs
         lease_ref=None,
         received_at=ttl.parse_iso_datetime("2026-01-10T00:00:00Z"),
     )
-    assert unchanged == absolute
+    assert unchanged == {**absolute, "received_at": "2026-01-10T00:00:00.000Z", "ttl_days": None}
+
+
+@pytest.mark.asyncio
+async def test_switch_absolute_back_to_relative_uses_latest_content_update(fs_ctx):
+    from openviking.storage.document_ttl import update_document_expiry
+
+    fs, ctx = fs_ctx
+    uri = ROOT + "/switch.txt"
+    await fs.write_file(uri, "updated body", ctx=ctx)
+    await prepare_resource_ttl(
+        fs,
+        uri,
+        is_dir=False,
+        existing=False,
+        ctx=ctx,
+        lease_ref=None,
+        resource_ttl={"ttl_relative": 7},
+        received_at=ttl.parse_iso_datetime("2997-01-01T00:00:00Z"),
+    )
+    await update_document_expiry(fs, uri, FUTURE, ctx=ctx)
+    await prepare_resource_ttl(
+        fs,
+        uri,
+        is_dir=False,
+        existing=True,
+        ctx=ctx,
+        lease_ref=None,
+        received_at=ttl.parse_iso_datetime("2997-01-10T00:00:00Z"),
+    )
+    relative = await update_document_expiry(fs, uri, ctx=ctx, ttl_relative=7)
+    assert relative["expires_at"] == "2997-01-17T00:00:00.000Z"
+    assert relative["received_at"] == "2997-01-10T00:00:00.000Z"
 
 
 @pytest.mark.asyncio
@@ -288,9 +382,12 @@ async def test_watch_tombstone_only_suppresses_same_expired_content(fs_ctx):
     assert await unchanged_expired_resource_paths(
         fs, ROOT + "/watched", {"doc.txt": "old-md5"}, ctx=ctx
     ) == {"doc.txt"}
-    assert await unchanged_expired_resource_paths(
-        fs, ROOT + "/watched", {"doc.txt": "new-md5"}, ctx=ctx
-    ) == set()
+    assert (
+        await unchanged_expired_resource_paths(
+            fs, ROOT + "/watched", {"doc.txt": "new-md5"}, ctx=ctx
+        )
+        == set()
+    )
 
 
 @pytest.mark.asyncio

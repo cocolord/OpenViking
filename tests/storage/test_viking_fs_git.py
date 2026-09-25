@@ -13,7 +13,12 @@ from openviking.server.identity import RequestContext, Role
 from openviking.storage import viking_fs as viking_fs_module
 from openviking.storage.ttl_registry import TTLRecord
 from openviking.storage.viking_fs import VikingFS
-from openviking_cli.exceptions import PermissionDeniedError, ResourceExhaustedError
+from openviking_cli.exceptions import (
+    ConflictError,
+    NotFoundError,
+    PermissionDeniedError,
+    ResourceExhaustedError,
+)
 from openviking_cli.session.user_id import UserIdentifier
 
 pytestmark = pytest.mark.asyncio
@@ -316,9 +321,7 @@ async def test_diff_uses_bounded_native_diff_builder():
             {
                 "before": "old\n",
                 "after": "new\n",
-                "fromfile": (
-                    "viking://user/user/memories/experiences/example.md@from"
-                ),
+                "fromfile": ("viking://user/user/memories/experiences/example.md@from"),
                 "tofile": "viking://user/user/memories/experiences/example.md@to",
                 "timeout_ms": viking_fs_module.SNAPSHOT_DIFF_TIMEOUT_MS,
                 "max_output_bytes": viking_fs_module.SNAPSHOT_DIFF_MAX_OUTPUT_BYTES,
@@ -404,12 +407,23 @@ class _MemoryTTLRegistry:
 
 
 class _RestoreAGFS:
-    def __init__(self, *, plan, blobs, result=None, error=None):
+    def __init__(self, *, plan, blobs, result=None, error=None, current=None):
         self.plan = plan
         self.blobs = blobs
         self.result = result
         self.error = error
         self.calls = []
+        self.current = current or {}
+
+    async def stat(self, path, **kwargs):
+        if path not in self.current:
+            raise FileNotFoundError(path)
+        return {"isDir": False}
+
+    async def read(self, path, **kwargs):
+        if path not in self.current:
+            raise FileNotFoundError(path)
+        return self.current[path]
 
     async def pathlock_acquire_tree(self, path):
         self.calls.append(("lock", path))
@@ -421,6 +435,8 @@ class _RestoreAGFS:
     async def run(self, operation, **kwargs):
         self.calls.append((operation, kwargs))
         if operation == "git_show":
+            if kwargs["path"] not in self.blobs:
+                raise AGFSPathNotFoundError(kwargs["path"])
             data = self.blobs[kwargs["path"]]
             return {"oid": "b" * 40, "size": len(data), "bytes": data}
         assert operation == "git_restore"
@@ -504,7 +520,7 @@ async def test_restore_registers_ttl_event_and_session_before_writeback():
     assert agfs.calls[apply_index][1]["source_commit"] == "a" * 40
 
 
-async def test_restore_removes_registry_only_after_successful_nonttl_write_or_delete():
+async def test_restore_rejects_nonttl_overwrite_before_any_mutation():
     overwritten_path = "user/user/memories/events/old.md"
     deleted_meta = "user/user/sessions/deleted/.meta.json"
     overwritten_uri = "viking://user/user/memories/events/old.md"
@@ -524,13 +540,15 @@ async def test_restore_removes_registry_only_after_successful_nonttl_write_or_de
     )
     vfs = _restore_vfs(agfs, registry)
 
-    await VikingFS.restore(vfs, source_commit="source", ctx=_request_context())
-
-    assert registry.records == {}
-    assert registry.mutations == [
-        ("remove", overwritten_uri, "old-event"),
-        ("remove", deleted_uri, "old-session"),
-    ]
+    with pytest.raises(ConflictError, match="existing TTL lifecycle"):
+        await VikingFS.restore(vfs, source_commit="source", ctx=_request_context())
+    assert len(registry.records) == 2
+    assert registry.mutations == []
+    assert not any(
+        op == "git_restore" and not args.get("dry_run")
+        for op, args in agfs.calls
+        if isinstance(args, dict)
+    )
 
 
 async def test_partial_restore_rolls_back_preregistration_for_failed_write():
@@ -538,9 +556,7 @@ async def test_partial_restore_rolls_back_preregistration_for_failed_write():
     failed_path = "user/user/memories/events/failed.md"
     success_uri = f"viking://{success_path}"
     failed_uri = f"viking://{failed_path}"
-    old_success = _record(success_uri, "success-old")
-    old_failed = _record(failed_uri, "failed-old")
-    registry = _MemoryTTLRegistry([old_success, old_failed])
+    registry = _MemoryTTLRegistry()
     plan = _restore_plan(to_write=(success_path, failed_path))
     partial = GitRestoreWritebackPartialError(
         "partial",
@@ -561,16 +577,14 @@ async def test_partial_restore_rolls_back_preregistration_for_failed_write():
         await VikingFS.restore(vfs, source_commit="source", ctx=_request_context())
 
     assert registry.records[("account", success_uri)].generation == "success-new"
-    assert registry.records[("account", failed_uri)].generation == "failed-old"
+    assert ("account", failed_uri) not in registry.records
 
 
-async def test_restore_overwrite_keeps_old_generation_until_writeback_succeeds():
+async def test_restore_rejects_replacing_a_live_generation():
     path = "user/user/memories/events/e.md"
     uri = f"viking://{path}"
     old = _record(uri, "old")
-    old = TTLRecord(
-        **{**old.__dict__, "expires_at": "2040-01-01T00:00:00.000Z"}
-    )
+    old = TTLRecord(**{**old.__dict__, "expires_at": "2040-01-01T00:00:00.000Z"})
     registry = _MemoryTTLRegistry([old])
     plan = _restore_plan(to_write=(path,))
     agfs = _RestoreAGFS(
@@ -580,16 +594,13 @@ async def test_restore_overwrite_keeps_old_generation_until_writeback_succeeds()
     )
     vfs = _restore_vfs(agfs, registry)
 
-    await VikingFS.restore(vfs, source_commit="source", ctx=_request_context())
-
-    assert registry.mutations == [
-        ("upsert", uri, "old"),
-        ("upsert", uri, "new"),
-    ]
-    assert registry.records[("account", uri)].generation == "new"
+    with pytest.raises(ConflictError, match="existing TTL lifecycle"):
+        await VikingFS.restore(vfs, source_commit="source", ctx=_request_context())
+    assert registry.mutations == []
+    assert registry.records[("account", uri)] == old
 
 
-async def test_partial_restore_keeps_session_registry_when_child_delete_fails():
+async def test_restore_rejects_removing_managed_session_metadata():
     session_uri = "viking://user/user/sessions/s1"
     session_meta = "user/user/sessions/s1/.meta.json"
     session_child = "user/user/sessions/s1/messages.jsonl"
@@ -607,7 +618,7 @@ async def test_partial_restore_keeps_session_registry_when_child_delete_fails():
     agfs = _RestoreAGFS(plan=plan, blobs={}, error=partial)
     vfs = _restore_vfs(agfs, registry)
 
-    with pytest.raises(GitRestoreWritebackPartialError):
+    with pytest.raises(ConflictError, match="existing TTL lifecycle"):
         await VikingFS.restore(vfs, source_commit="source", ctx=_request_context())
 
     assert registry.records[("account", session_uri)] == old
@@ -631,3 +642,148 @@ async def test_restore_dry_run_does_not_touch_ttl_registry():
     assert registry.records == {}
     assert registry.mutations == []
     assert [call[0] for call in agfs.calls] == ["git_restore"]
+
+
+@pytest.mark.parametrize("scope", ["event", "resource", "session"])
+@pytest.mark.parametrize("expires_at", ["2000-01-01T00:00:00Z", "2040-01-01T00:00:00Z"])
+async def test_restore_old_content_preserves_current_lifecycle(scope, expires_at):
+    from openviking.core.ttl import ttl_metadata_uri
+
+    paths = {
+        "event": "user/user/memories/events/e.md",
+        "resource": "resources/demo/e.md",
+        "session": "user/user/sessions/s1/messages.jsonl",
+    }
+    path = paths[scope]
+    uri = f"viking://{path}"
+    kind = "resource_file" if scope == "resource" else scope
+    owner = uri.rsplit("/", 1)[0] if scope == "session" else uri
+    metadata_uri = ttl_metadata_uri(kind, owner)
+    metadata = (
+        _ttl_event("current", expires_at)
+        if scope == "event"
+        else json.dumps({"expires_at": expires_at, "ttl_generation": "current"}).encode()
+    )
+    current = {"/local/account/" + metadata_uri.removeprefix("viking://"): metadata}
+    agfs = _RestoreAGFS(
+        plan=_restore_plan(to_write=(path,)),
+        blobs={path: b"old unmanaged content"},
+        current=current,
+    )
+    registry = _MemoryTTLRegistry()  # Metadata also protects a missing projection.
+    vfs = _restore_vfs(agfs, registry)
+    expected = NotFoundError if expires_at.startswith("2000") else ConflictError
+    with pytest.raises(expected):
+        await vfs.restore(source_commit="source", ctx=_request_context())
+    assert agfs.current == current
+    assert registry.mutations == []
+    assert not any(
+        op == "git_restore" and not args.get("dry_run")
+        for op, args in agfs.calls
+        if isinstance(args, dict)
+    )
+
+
+@pytest.mark.parametrize("managed_source", [False, True])
+async def test_restore_unmanaged_resource_target_accepts_complete_source(managed_source):
+    path = "resources/demo/e.md"
+    sidecar = "resources/demo/.e.md.ttl.json"
+    blobs = {path: b"restored body"}
+    if managed_source:
+        blobs[sidecar] = _ttl_session("new")
+    agfs = _RestoreAGFS(
+        plan=_restore_plan(to_write=tuple(blobs)),
+        blobs=blobs,
+        result={"result": "applied", "written_paths": list(blobs), "deleted_paths": []},
+    )
+    registry = _MemoryTTLRegistry()
+    await _restore_vfs(agfs, registry).restore(source_commit="source", ctx=_request_context())
+    assert bool(registry.records) is managed_source
+    assert any(
+        op == "git_restore" and not args.get("dry_run")
+        for op, args in agfs.calls
+        if isinstance(args, dict)
+    )
+
+
+@pytest.mark.parametrize("expired", [False, True])
+async def test_restore_content_only_cannot_omit_source_resource_fence(expired):
+    path = "resources/demo/e.md"
+    sidecar = "resources/demo/.e.md.ttl.json"
+    expiry = "2000-01-01T00:00:00Z" if expired else "2040-01-01T00:00:00Z"
+    agfs = _RestoreAGFS(
+        plan=_restore_plan(to_write=(path,)),
+        blobs={
+            path: b"body",
+            sidecar: json.dumps({"expires_at": expiry, "ttl_generation": "source"}).encode(),
+        },
+    )
+    registry = _MemoryTTLRegistry()
+    with pytest.raises(NotFoundError if expired else ConflictError):
+        await _restore_vfs(agfs, registry).restore(source_commit="source", ctx=_request_context())
+    assert registry.mutations == []
+    assert not any(
+        op == "git_restore" and not args.get("dry_run")
+        for op, args in agfs.calls
+        if isinstance(args, dict)
+    )
+
+
+@pytest.mark.parametrize("operation", ["show", "show_blob_raw", "diff"])
+@pytest.mark.parametrize("scope", ["event", "resource", "session"])
+@pytest.mark.parametrize("current_expired", [False, True])
+async def test_snapshot_reads_enforce_historical_and_current_expiry(
+    monkeypatch, operation, scope, current_expired
+):
+    from types import SimpleNamespace
+
+    from openviking.core import ttl
+    from openviking.storage.ttl_registry import TTLRegistry
+    from openviking_cli.exceptions import NotFoundError
+    from openviking_cli.utils.config.ttl_config import TTLConfig
+    from tests.unit.storage.test_resource_ttl import MemoryAGFS
+
+    monkeypatch.setattr(ttl, "get_openviking_config", lambda: SimpleNamespace(ttl=TTLConfig()))
+    fs = VikingFS(agfs=SimpleNamespace())
+    agfs = MemoryAGFS()
+    fs._async_agfs = agfs
+    fs.ttl_registry = TTLRegistry(agfs)
+    ctx = _request_context()
+    paths = {
+        "event": "viking://user/user/memories/events/snapshot.md",
+        "resource": "viking://resources/snapshot.md",
+        "session": "viking://user/user/sessions/s1/messages.jsonl",
+    }
+    uri = paths[scope]
+    kind = {"event": "event", "resource": "resource_file", "session": "session"}[scope]
+    owner = uri.rsplit("/", 1)[0] if scope == "session" else uri
+    meta_uri = ttl.ttl_metadata_uri(kind, owner)
+    fields = {"expires_at": "2000-01-01T00:00:00Z", "ttl_generation": "old"}
+    metadata = (
+        _ttl_event("old", fields["expires_at"]) if scope == "event" else json.dumps(fields).encode()
+    )
+    blobs = {
+        uri.removeprefix("viking://"): b"expired body",
+        meta_uri.removeprefix("viking://"): metadata,
+    }
+    if current_expired:
+        await fs.write_file(meta_uri, metadata, ctx=ctx)
+        # Even a snapshot predating TTL adoption must obey the current fence.
+        blobs = {uri.removeprefix("viking://"): b"old unmanaged body"}
+
+    async def run(operation, **kwargs):
+        assert operation == "git_show"
+        path = kwargs.get("path")
+        if path is None:
+            return {"oid": "a" * 40}
+        if path not in blobs:
+            raise AGFSPathNotFoundError(path)
+        value = blobs[path]
+        return {"oid": "blob", "bytes": value, "size": len(value)}
+
+    agfs.run = run
+    with pytest.raises(NotFoundError):
+        if operation == "diff":
+            await fs.diff(path=uri, from_ref=None, to_ref="main", ctx=ctx)
+        else:
+            await getattr(fs, operation)("main", path=uri, ctx=ctx)

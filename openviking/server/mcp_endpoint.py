@@ -1168,17 +1168,20 @@ async def get_ttl(uri: str) -> str:
 
 
 @mcp.tool()
-async def update_ttl(uri: str, expires_at: str) -> str:
+async def update_ttl(
+    uri: str, expires_at: Optional[str] = None, ttl_relative: Optional[int] = None
+) -> str:
     """Set a live event/resource document's cleanup time (ISO 8601 with timezone).
 
-    Requires an existing TTL and a future timestamp. Resource files have
+    Provide relative whole days or a future absolute timestamp. Works with
+    global TTL disabled and on previously unmanaged files. Resource files have
     independent lifetimes; directory defaults are changed with
     update_resource_config. Does not revive expired data or change policy for
     future documents.
     """
     ctx = _get_ctx()
     uri = validate_request_viking_uri(uri, ctx)
-    return str(await get_service().fs.update_ttl(uri, expires_at, ctx))
+    return str(await get_service().fs.update_ttl(uri, expires_at, ctx, ttl_relative=ttl_relative))
 
 
 @mcp.tool()
