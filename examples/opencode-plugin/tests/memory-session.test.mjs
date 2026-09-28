@@ -6,6 +6,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createMemorySessionManager } from "../lib/memory-session.mjs"
+import { contextMessageEvents } from "../lib/v2-events.mjs"
 import { initLogger } from "../lib/utils.mjs"
 
 async function withTempDir(prefix, fn) {
@@ -335,6 +336,133 @@ test("OpenCode tool parts preserve completed and error state fields", async () =
           ],
         },
       ])
+      await manager.flushAll({ commit: false })
+    })
+  })
+})
+
+test("captured message parts are not retained in the session state file", async () => {
+  await withCaptureServer(async ({ endpoint }) => {
+    await withTempDir("ov-oc-session-", async (dir) => {
+      const manager = createMemorySessionManager({ config: baseConfig(endpoint), pluginRoot: dir })
+
+      await manager.init()
+      await manager.handleEvent({ type: "session.created", properties: { info: { id: "oc-state-retention" } } })
+      await manager.handleEvent({
+        type: "message.updated",
+        properties: {
+          info: {
+            id: "msg-captured",
+            sessionID: "oc-state-retention",
+            role: "user",
+          },
+        },
+      })
+      await manager.handleEvent({
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "part-captured",
+            messageID: "msg-captured",
+            sessionID: "oc-state-retention",
+            type: "text",
+            text: "This payload was already sent and is not needed for a future flush.".repeat(20),
+          },
+        },
+      })
+
+      await manager.handleEvent({ type: "session.idle", sessionID: "oc-state-retention" })
+      await manager.flushAll({ commit: false })
+
+      await manager.handleEvent({
+        type: "message.updated",
+        properties: {
+          info: {
+            id: "msg-pending",
+            sessionID: "oc-state-retention",
+            role: "user",
+          },
+        },
+      })
+      await manager.handleEvent({
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "part-pending",
+            messageID: "msg-pending",
+            sessionID: "oc-state-retention",
+            type: "text",
+            text: "This payload is still pending and must remain recoverable.",
+          },
+        },
+      })
+      await new Promise((resolve) => setTimeout(resolve, 350))
+
+      const state = JSON.parse(await fs.promises.readFile(join(dir, "openviking-session-state.json"), "utf8"))
+      const persistedSession = Object.values(state.sessions)[0]
+      const persistedMessages = new Map(persistedSession.messages)
+      const capturedMessage = persistedMessages.get("msg-captured")
+      const pendingMessage = persistedMessages.get("msg-pending")
+      assert.equal(capturedMessage.captured, true)
+      assert.deepEqual(capturedMessage.parts, [])
+      assert.equal(pendingMessage.parts.length, 1)
+    })
+  })
+})
+
+test("OpenCode capture filters sanitized text before sending", async () => {
+  await withCaptureServer(async ({ endpoint, requests }) => {
+    await withTempDir("ov-oc-filters-", async (dir) => {
+      const manager = createMemorySessionManager({
+        config: { ...baseConfig(endpoint), captureFilters: ["k/approved/", "s/secret/[redacted]/g"] },
+        pluginRoot: dir,
+      })
+      await manager.init()
+      for (const [id, text] of [
+        ["removed", "<openviking-context>approved</openviking-context>Remember secret details."],
+        ["kept", "Remember approved secret details."],
+      ]) {
+        for (const event of contextMessageEvents("oc-filters", { id, type: "user", text })) {
+          await manager.handleEvent(event)
+        }
+      }
+      await manager.handleEvent({ type: "session.idle", sessionID: "oc-filters" })
+      const sent = requests.find((request) => request.url === "/api/v1/sessions/oc-oc-filters/messages/batch")
+      assert.ok(sent)
+      assert.deepEqual(JSON.parse(sent.body).messages, [
+        { role: "user", content: "Remember approved [redacted] details." },
+      ])
+      await manager.flushAll({ commit: false })
+    })
+  })
+})
+
+test("OpenCode caps mixed-message text and omits low-signal text", async () => {
+  await withCaptureServer(async ({ endpoint, requests }) => {
+    await withTempDir("ov-oc-mixed-", async (dir) => {
+      const manager = createMemorySessionManager({ config: baseConfig(endpoint), pluginRoot: dir })
+      await manager.init()
+      for (const [id, text] of [["long", "x".repeat(40000)], ["ack", "ok"]]) {
+        const message = {
+          id, type: "assistant", content: [
+            { type: "text", text },
+            { type: "tool", id: `tool-${id}`, name: "lookup", state: {
+              status: "completed", input: { id }, content: [{ type: "text", text: "result" }],
+            } },
+          ],
+        }
+        for (const event of contextMessageEvents("oc-mixed", message)) await manager.handleEvent(event)
+      }
+      await manager.handleEvent({ type: "session.idle", sessionID: "oc-mixed" })
+      const sent = requests.find((request) => request.url === "/api/v1/sessions/oc-oc-mixed/messages/batch")
+      assert.ok(sent)
+      const messages = JSON.parse(sent.body).messages
+      assert.equal(messages.length, 2)
+      assert.equal(messages[0].parts[0].type, "text")
+      assert.ok(messages[0].parts[0].text.length <= 24000)
+      assert.match(messages[0].parts[0].text, /\[truncated\]$/)
+      assert.equal(messages[0].parts[1].type, "tool")
+      assert.deepEqual(messages[1].parts.map((part) => part.type), ["tool"])
       await manager.flushAll({ commit: false })
     })
   })

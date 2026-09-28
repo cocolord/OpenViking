@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
+// SPDX-License-Identifier: AGPL-3.0
+
 import { OpenVikingError } from "./errors.js";
 import {
   nodeImagePathToDataURI,
@@ -514,7 +517,11 @@ export class OpenVikingClient {
         uri: normalizeURI(uri),
         output: options.output ?? "original",
         abs_limit: options.absLimit ?? 128,
+        include_abstract: options.includeAbstract,
+        include_overview: options.includeOverview,
+        overview_limit: options.overviewLimit ?? 4000,
         show_all_hidden: options.showAllHidden ?? false,
+        directories_only: options.directoriesOnly || undefined,
         node_limit: options.nodeLimit ?? 1000,
         level_limit: options.levelLimit ?? 3,
         offset: options.offset,

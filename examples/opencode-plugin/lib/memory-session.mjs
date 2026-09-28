@@ -1,10 +1,9 @@
 import fs from "fs"
 import path from "path"
 import {
-  extractPartsFromPayload,
   extractTextFromPayload,
   isCaptureEnabled,
-  shouldCaptureText,
+  shapeCapturePayload,
 } from "./shared/capture-utils.mjs"
 import {
   deriveHarnessSessionId,
@@ -126,7 +125,9 @@ export function createMemorySessionManager({ config, pluginRoot }) {
         {
           role: message.role,
           captured: message.captured,
-          parts: Array.from(message.parts.entries()),
+          // Captured messages are never read by flushPendingMessages again; retain
+          // only their metadata so completed payloads cannot grow the state file.
+          parts: message.captured ? [] : Array.from(message.parts.entries()),
         },
       ])),
     }
@@ -381,18 +382,17 @@ export function createMemorySessionManager({ config, pluginRoot }) {
     if (!role) return null
     if (role === "assistant" && !config.captureAssistantTurns) return null
 
-    const rawText = partsRaw
-      .map((part) => extractTextFromPayload(part, { toolMaxChars: config.captureToolMaxChars }))
-      .filter(Boolean)
-      .join("\n\n")
-    const captureParts = partsRaw.flatMap((part) => extractPartsFromPayload(part, {
-      toolMaxChars: config.captureToolMaxChars,
-    }))
-    const decision = shouldCaptureText(rawText, role, config)
-    if (!decision.shouldCapture && captureParts.length === 0) return null
-    const body = captureParts.length > 0
-      ? { role, parts: captureParts }
-      : { role, content: decision.text }
+    const shaped = shapeCapturePayload({ role, content: partsRaw }, role, config)
+    const toolParts = shaped.parts.filter((part) => part.type !== "text")
+    if (shaped.dropped || (!shaped.text && toolParts.length === 0)) return null
+    const body = toolParts.length > 0
+      ? { role, parts: [
+        ...(shaped.text && shaped.parts.some((part) => part.type === "text")
+          ? [{ type: "text", text: shaped.text }]
+          : []),
+        ...toolParts,
+      ] }
+      : { role, content: shaped.text }
     const peerId = effectivePeerId(config)
     if (peerId) body.peer_id = peerId
     return body

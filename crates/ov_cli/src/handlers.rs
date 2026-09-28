@@ -1734,7 +1734,11 @@ pub async fn handle_ls(
 pub async fn handle_tree(
     uri: String,
     abs_limit: i32,
+    include_abstract: Option<bool>,
+    include_overview: Option<bool>,
+    overview_limit: i32,
     show_all_hidden: bool,
+    directories_only: bool,
     node_limit: i32,
     offset: i32,
     limit: Option<i32>,
@@ -1752,6 +1756,18 @@ pub async fn handle_tree(
     ];
     if show_all_hidden {
         params.push("-a".to_string());
+    }
+    if directories_only {
+        params.push("--directories-only".to_string());
+    }
+    if let Some(value) = include_abstract {
+        params.push(format!("--include-abstract={value}"));
+    }
+    if let Some(value) = include_overview {
+        params.push(format!("--include-overview={value}"));
+    }
+    if include_overview == Some(true) {
+        params.push(format!("--overview-limit {overview_limit}"));
     }
     if simple {
         params.push("-s".to_string());
@@ -1776,12 +1792,28 @@ pub async fn handle_tree(
     } else {
         "agent"
     };
+    let include_abstract = include_abstract.or_else(|| {
+        fields
+            .as_ref()
+            .is_some_and(|items| items.iter().any(|item| item == "abstract"))
+            .then_some(true)
+    });
+    let include_overview = include_overview.or_else(|| {
+        fields
+            .as_ref()
+            .is_some_and(|items| items.iter().any(|item| item == "overview"))
+            .then_some(true)
+    });
     commands::filesystem::tree(
         &client,
         &uri,
         api_output,
         abs_limit,
+        include_abstract,
+        include_overview,
+        overview_limit,
         show_all_hidden,
+        directories_only,
         node_limit,
         level_limit,
         offset,

@@ -8,6 +8,7 @@ Provides file system operations: ls, mkdir, rm, mv, tree, stat, read, abstract, 
 
 import asyncio
 from collections.abc import Coroutine
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Literal, Optional
 
 from openviking.core.context import ContextLevel
@@ -60,6 +61,12 @@ from openviking_cli.utils import VikingURI, get_logger
 from openviking_cli.utils.config import get_openviking_config
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class ListingPage:
+    entries: List[Any]
+    has_more: bool
 
 
 def _may_include_memory_content(uri: str) -> bool:
@@ -202,7 +209,7 @@ class FSService:
         include_tags: bool,
         offset: int,
         node_limit: int,
-    ) -> List[Dict[str, Any]]:
+    ) -> ListingPage:
         """Collect a visible page after tag filtering.
 
         Args:
@@ -214,31 +221,32 @@ class FSService:
             node_limit: Maximum matched entries to return.
 
         Returns:
-            The requested page of tag-filtered entries.
+            The requested page and whether more matched entries are available.
         """
         if node_limit <= 0:
             entries = await fetch_page(0, None)
             entries = await self._attach_and_filter_tags(entries, ctx, tags, include_tags)
-            return entries[offset:]
+            return ListingPage(entries=entries[offset:], has_more=False)
 
         batch_size = max(node_limit, 256)
+        probe_limit = node_limit + 1
         source_offset = 0
         remaining_offset = offset
         result: List[Dict[str, Any]] = []
-        while len(result) < node_limit:
+        while len(result) < probe_limit:
             entries = await fetch_page(source_offset, batch_size)
             filtered = await self._attach_and_filter_tags(entries, ctx, tags, include_tags)
             if remaining_offset >= len(filtered):
                 remaining_offset -= len(filtered)
             else:
                 result.extend(
-                    filtered[remaining_offset : remaining_offset + node_limit - len(result)]
+                    filtered[remaining_offset : remaining_offset + probe_limit - len(result)]
                 )
                 remaining_offset = 0
             if len(entries) < batch_size:
                 break
             source_offset += len(entries)
-        return result
+        return ListingPage(entries=result[:node_limit], has_more=len(result) > node_limit)
 
     async def ls(
         self,
@@ -257,7 +265,7 @@ class FSService:
         tags: Optional[List[str]] = None,
         include_tags: bool = False,
         offset: int = 0,
-    ) -> List[Any]:
+    ) -> ListingPage:
         """List directory contents.
 
         Args:
@@ -306,7 +314,7 @@ class FSService:
             )
 
         if tags:
-            entries = await self._collect_tagged_page(
+            page = await self._collect_tagged_page(
                 fetch_page,
                 ctx,
                 tags,
@@ -315,22 +323,33 @@ class FSService:
                 node_limit,
             )
         else:
-            entries = await fetch_page(offset, node_limit)
+            fetch_limit = node_limit + 1 if node_limit > 0 else node_limit
+            entries = await fetch_page(offset, fetch_limit)
             entries = await self._attach_and_filter_tags(
                 entries, ctx, None, include_tags or "tags" in extra_fields
             )
-        if use_simple_paths:
-            return [entry.get("uri", "") for entry in entries]
-        if tags and (output != "original" or extra_fields):
-            return await viking_fs._finalize_listing_entries(
-                entries,
-                output,
-                abs_limit,
-                extra_fields,
-                recursive,
-                ctx=ctx,
+            page = ListingPage(
+                entries=entries[:node_limit] if node_limit > 0 else entries,
+                has_more=node_limit > 0 and len(entries) > node_limit,
             )
-        return entries
+        if use_simple_paths:
+            return ListingPage(
+                entries=[entry.get("uri", "") for entry in page.entries],
+                has_more=page.has_more,
+            )
+        if tags and (output != "original" or extra_fields):
+            return ListingPage(
+                entries=await viking_fs._finalize_listing_entries(
+                    page.entries,
+                    output,
+                    abs_limit,
+                    extra_fields,
+                    recursive,
+                    ctx=ctx,
+                ),
+                has_more=page.has_more,
+            )
+        return page
 
     @staticmethod
     def _reject_storage_internal_target(uri: str) -> None:
@@ -935,7 +954,11 @@ class FSService:
         tags: Optional[List[str]] = None,
         include_tags: bool = False,
         offset: int = 0,
-    ) -> List[Dict[str, Any]]:
+        directories_only: bool = False,
+        include_abstract: Optional[bool] = None,
+        include_overview: Optional[bool] = None,
+        overview_limit: int = 4000,
+    ) -> ListingPage:
         """Get directory tree."""
         viking_fs = self._ensure_initialized()
 
@@ -946,7 +969,11 @@ class FSService:
                 ctx=ctx,
                 output="original" if tags else output,
                 abs_limit=abs_limit,
+                include_abstract=None if tags else include_abstract,
+                include_overview=False if tags else include_overview is True,
+                overview_limit=overview_limit,
                 show_all_hidden=show_all_hidden,
+                directories_only=directories_only,
                 node_limit=page_limit,
                 level_limit=level_limit,
                 extra_fields=None if tags else extra_fields,
@@ -954,7 +981,7 @@ class FSService:
             )
 
         if tags:
-            result = await self._collect_tagged_page(
+            page = await self._collect_tagged_page(
                 fetch_page,
                 ctx,
                 tags,
@@ -962,20 +989,36 @@ class FSService:
                 offset,
                 node_limit,
             )
-            if output != "original" or extra_fields:
-                return await viking_fs._finalize_listing_entries(
-                    result,
-                    output,
-                    abs_limit,
-                    extra_fields,
-                    True,
-                    ctx=ctx,
+            if (
+                output != "original"
+                or extra_fields
+                or include_abstract is True
+                or include_overview is True
+            ):
+                return ListingPage(
+                    entries=await viking_fs._finalize_listing_entries(
+                        page.entries,
+                        output,
+                        abs_limit,
+                        extra_fields,
+                        True,
+                        ctx=ctx,
+                        include_abstract=include_abstract,
+                        include_overview=include_overview is True,
+                        overview_limit=overview_limit,
+                    ),
+                    has_more=page.has_more,
                 )
-            return result
+            return page
 
-        result = await fetch_page(offset, node_limit)
-        return await self._attach_and_filter_tags(
-            result, ctx, None, include_tags or "tags" in (extra_fields or [])
+        fetch_limit = node_limit + 1 if node_limit > 0 else node_limit
+        entries = await fetch_page(offset, fetch_limit)
+        entries = await self._attach_and_filter_tags(
+            entries, ctx, None, include_tags or "tags" in (extra_fields or [])
+        )
+        return ListingPage(
+            entries=entries[:node_limit] if node_limit > 0 else entries,
+            has_more=node_limit > 0 and len(entries) > node_limit,
         )
 
     async def stat(

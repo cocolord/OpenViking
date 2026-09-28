@@ -41,6 +41,12 @@ presets. Shared Agent changes gateway session settings only after confirmation;
 Personal Agent preserves them. An upgrade with no recall scope set retains the
 previous recall requests. No Hermes core patch is required.
 
+Profile-bound connection and recall settings adapt
+[starship-s's Hermes PR #83647](https://github.com/NousResearch/hermes-agent/pull/83647),
+with the original author retained. This port leaves memory URI handling as it
+is: the original PR's UID-less `viking://user/memories/...` rewrite is not
+accepted by current OpenViking servers.
+
 ## Migration coordination
 
 After this directory is merged, submit a Hermes catalog entry with:
@@ -61,6 +67,21 @@ those helpers require compatibility checks. The plugin uses HTTP and does not
 install or package the OpenViking server.
 
 ## Validation
+
+The `Hermes Plugin Tests` workflow runs this directory's complete external-provider
+suite on plugin changes, pushes to `main`/`develop`, and manual dispatch.
+It uses Python 3.14 and a reviewed Hermes commit, with test retries disabled.
+When updating the host SHA in `.github/workflows/hermes-plugin-tests.yml`, check
+the host dependency pins and run the suite before submitting the change.
+These regression tests use mock responses and local test servers; live-service
+validation remains part of release testing.
+
+CI also runs `scripts/check-hermes-plugin-install.py` through the real Hermes
+CLI in an isolated profile. It installs this repository's plugin subdirectory,
+enables it through Hermes's dependency manager, validates the installed directory,
+and checks that the external provider loads. The bundled OpenViking copy is
+temporarily removed from the test checkout. This catches dependency conflicts
+across supported platforms that runtime tests alone do not exercise.
 
 Use a Hermes checkout with its development dependencies installed.
 

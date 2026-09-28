@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
+// SPDX-License-Identifier: AGPL-3.0
+
 import { describe, expect, it, vi } from "vitest";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -594,6 +597,10 @@ describe("OpenVikingClient", () => {
       levelLimit: 2,
       offset: 6,
       limit: 7,
+      directoriesOnly: true,
+      includeAbstract: false,
+      includeOverview: true,
+      overviewLimit: 512,
     });
     await client.tree("viking://resources/docs", { levelLimit: 0 });
     await client.tree("viking://resources/docs");
@@ -612,6 +619,13 @@ describe("OpenVikingClient", () => {
     );
     expect(treeLimits).toEqual(["2", "0", "3"]);
     expect(treeUrls[0]!.searchParams.get("offset")).toBe("6");
+    expect(treeUrls[0]!.searchParams.get("directories_only")).toBe("true");
+    expect(treeUrls[0]!.searchParams.get("include_abstract")).toBe("false");
+    expect(treeUrls[0]!.searchParams.get("include_overview")).toBe("true");
+    expect(treeUrls[0]!.searchParams.get("overview_limit")).toBe("512");
+    expect(treeUrls[2]!.searchParams.has("include_abstract")).toBe(false);
+    expect(treeUrls[2]!.searchParams.has("include_overview")).toBe(false);
+    expect(treeUrls[2]!.searchParams.get("overview_limit")).toBe("4000");
     expect(treeUrls[0]!.searchParams.get("limit")).toBe("7");
     expect(treeUrls[1]!.searchParams.has("offset")).toBe(false);
     expect(treeUrls[1]!.searchParams.has("limit")).toBe(false);

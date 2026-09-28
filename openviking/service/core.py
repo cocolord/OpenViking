@@ -580,7 +580,7 @@ class OpenVikingService:
         except Exception:
             session_auto_commit_config = SessionAutoCommitConfig()
         self._session_service.set_session_auto_commit_config(session_auto_commit_config)
-        if session_auto_commit_config.idle_enabled:
+        if session_auto_commit_config.enabled:
             self._session_auto_commit_scheduler = SessionAutoCommitScheduler(
                 self._session_service,
                 session_auto_commit_config,
@@ -600,6 +600,7 @@ class OpenVikingService:
             vikingdb=self._vikingdb_manager,
             viking_fs=self._viking_fs,
         )
+        self._compile_service.configure_memory_runner(vikingdb=self._vikingdb_manager)
 
         if self._queue_manager:
             for queue_name in (

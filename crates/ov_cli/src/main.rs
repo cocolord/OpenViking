@@ -580,7 +580,7 @@ enum Commands {
         /// Viking URI to get tree for
         #[arg(value_name = "uri")]
         uri: String,
-        /// Abstract content limit (only for agent output)
+        /// Maximum returned abstract length
         #[arg(
             long = "abs-limit",
             short = 'l',
@@ -589,9 +589,43 @@ enum Commands {
             help_heading = "Advanced options"
         )]
         abs_limit: i32,
+        /// Include directory L0 abstracts (defaults to the selected output mode)
+        #[arg(
+            long = "include-abstract",
+            default_missing_value = "true",
+            num_args = 0..=1,
+            require_equals = true,
+            action = ArgAction::Set,
+            value_name = "bool",
+            help_heading = "Output options"
+        )]
+        include_abstract: Option<bool>,
+        /// Include directory L1 overviews
+        #[arg(
+            long = "include-overview",
+            default_missing_value = "true",
+            num_args = 0..=1,
+            require_equals = true,
+            action = ArgAction::Set,
+            value_name = "bool",
+            help_heading = "Output options"
+        )]
+        include_overview: Option<bool>,
+        /// Maximum overview content length
+        #[arg(
+            long = "overview-limit",
+            default_value = "4000",
+            value_parser = clap::value_parser!(i32).range(1..),
+            value_name = "n",
+            help_heading = "Advanced options"
+        )]
+        overview_limit: i32,
         /// Show all hidden files
         #[arg(short, long, help_heading = "Common options")]
         all: bool,
+        /// Only include directories
+        #[arg(long = "directories-only", help_heading = "Common options")]
+        directories_only: bool,
         /// Maximum number of nodes to list
         #[arg(
             long = "node-limit",
@@ -631,7 +665,7 @@ enum Commands {
         /// Simple path output (just paths, no tree formatting)
         #[arg(short, long, help_heading = "Common options")]
         simple: bool,
-        /// Comma-separated fields to display (name,uri,path,type,size,mode,mtime,locked,id,count,tags)
+        /// Comma-separated fields to display (name,uri,path,type,size,mode,mtime,locked,id,count,tags,abstract,overview)
         #[arg(short = 'f', long = "fields", value_delimiter = ',', value_name = "FIELDS", help_heading = "Output options")]
         fields: Option<Vec<String>>,
         /// Comma-separated k=v retrieval tags; all tags must match
@@ -1202,10 +1236,10 @@ enum Commands {
     },
     /// [Interactive] Compile source materials with a VikingBot Skill
     Compile {
-        /// Source file or directory; repeat the flag or separate entries with commas
+        /// Source file or directory; repeat the flag or separate entries with commas.
+        /// Omitted with `--skill memory`, which consolidates `--to` in place.
         #[arg(
             long = "from",
-            required = true,
             value_delimiter = ',',
             value_name = "uri"
         )]
@@ -1213,7 +1247,7 @@ enum Commands {
         /// Target Wiki directory or skills namespace
         #[arg(long, value_name = "uri")]
         to: String,
-        /// Skill directory or SKILL.md Viking URI
+        /// Skill directory or SKILL.md Viking URI; the literal `memory` runs memory consolidation
         #[arg(long, value_name = "uri")]
         skill: String,
         /// Additional instructions for this Compile task
@@ -3611,7 +3645,11 @@ async fn main() {
         Commands::Tree {
             uri,
             abs_limit,
+            include_abstract,
+            include_overview,
+            overview_limit,
             all,
+            directories_only,
             node_limit,
             offset,
             limit,
@@ -3623,7 +3661,11 @@ async fn main() {
             handlers::handle_tree(
                 uri,
                 abs_limit,
+                include_abstract,
+                include_overview,
+                overview_limit,
                 all,
+                directories_only,
                 node_limit,
                 offset,
                 limit,
@@ -4275,6 +4317,28 @@ mod tests {
     }
 
     #[test]
+    fn cli_compile_memory_mode_parses_without_from() {
+        let cli = Cli::try_parse_from([
+            "ov",
+            "compile",
+            "--to",
+            "viking://user/u1/memories/entities",
+            "--skill",
+            "memory",
+        ])
+        .expect("memory-mode compile should parse without --from");
+        match cli.command {
+            Commands::Compile {
+                from_uris, skill, ..
+            } => {
+                assert!(from_uris.is_empty());
+                assert_eq!(skill, "memory");
+            }
+            _ => panic!("expected compile command"),
+        }
+    }
+
+    #[test]
     fn cli_parses_system_backend_sync_status() {
         let cli = Cli::try_parse_from(["ov", "system", "backend", "sync-status", "viking://a"])
             .expect("system backend sync-status should parse");
@@ -4315,6 +4379,11 @@ mod tests {
             "6",
             "--limit",
             "7",
+            "--directories-only",
+            "--include-abstract",
+            "--include-overview=false",
+            "--overview-limit",
+            "512",
         ])
         .expect("paged tree should parse");
         let health = Cli::try_parse_from(["ov", "health"]).expect("health should parse");
@@ -4341,11 +4410,19 @@ mod tests {
                 offset,
                 limit,
                 node_limit,
+                directories_only,
+                include_abstract,
+                include_overview,
+                overview_limit,
                 ..
             } => {
                 assert_eq!(offset, 6);
                 assert_eq!(limit, Some(7));
                 assert_eq!(node_limit, 256);
+                assert!(directories_only);
+                assert_eq!(include_abstract, Some(true));
+                assert_eq!(include_overview, Some(false));
+                assert_eq!(overview_limit, 512);
             }
             _ => panic!("expected tree command"),
         }
