@@ -415,6 +415,10 @@ Event time decay applies to semantic `find()` and both `search(mode="list")` and
 
 New and updated memories produced by memory extraction automatically receive a `memory_type=<type>` search tag. With decay enabled, both local and cloud backends recall tagged event L2 memories separately and merge them with the remaining results, without requiring a peer ID. Existing data is not backfilled; untagged memories keep their original scores. Direct content refreshes and ordinary tag updates preserve the existing memory type without inferring it from the URI.
 
+The local vector engine expands the requested event window by at most 3x internally (capped at 100,000), computes decay and sorts in C++, then returns top-k before any abstract or payload fields are fetched. This is a bounded candidate approximation, so events outside that semantic window are not guaranteed to be promoted. The HTTP vector service forwards the same native rule. Cloud adapters use VikingDB score fusion and request only the required limit plus offset, without a fixed 100,000-input override. cuVS collections use their native scalar/vector index for decay requests; openGauss performs bounded recall, decay sorting and pagination in SQL before joining payloads.
+
+When model rerank or parent-score propagation is needed, the retriever explicitly requests a separate semantic candidate window. The engine preserves semantic order and attaches time scores without amplification or decay-based truncation. The retriever then runs model rerank (when enabled), propagates the parent score for recursive results, multiplies by time_score exactly once, and applies the final threshold/top-k. Global leaf prefetch has no parent score and therefore fuses immediately after rerank.
+
 #### 3. Usage Examples
 
 **HTTP API**

@@ -487,6 +487,43 @@ class CollectionAdapter(ABC):
         advance: Optional[Dict[str, Any]] = None,
         return_detail_info: bool = False,
     ) -> list[Dict[str, Any]]:
+        decay_request = (advance or {}).get("time_decay")
+        deferred_spec = None
+        if decay_request is not None:
+            from openviking.utils.time_decay import (
+                build_time_decay_fusion_spec,
+                build_time_decay_post_process_ops,
+            )
+            from openviking.utils.time_utils import parse_iso_datetime
+
+            protection = decay_request["protection"]
+            origin = parse_iso_datetime(decay_request["origin"])
+            deferred = decay_request.get("defer_fusion", False)
+            spec = build_time_decay_fusion_spec(protection=protection, origin=origin)
+            if self.mode in {"local", "cuvs", "http", "opengauss"}:
+                advance = {
+                    "time_decay": {
+                        "field": spec.field,
+                        "origin_ms": spec.origin_ms,
+                        "offset_ms": spec.offset_ms,
+                        "scale_ms": spec.scale_ms,
+                        "decay": spec.decay,
+                        "defer_fusion": deferred,
+                    }
+                }
+            elif self.mode in {"vikingdb", "volcengine"}:
+                if deferred:
+                    advance = None
+                    deferred_spec = spec
+                else:
+                    advance = {
+                        "post_process_ops": build_time_decay_post_process_ops(
+                            protection=protection, origin=origin
+                        )
+                    }
+            else:
+                raise NotImplementedError(f"Time decay is not supported by {self.mode}")
+            return_detail_info = True
         coll = self.get_collection()
         vectordb_filter = self._compile_filter(filter)
 
@@ -547,6 +584,14 @@ class CollectionAdapter(ABC):
             if item.addition_score is not None:
                 record["_time_score"] = _normalize_result_score(item.addition_score)
             record = self._normalize_record_for_read(record)
+            if deferred_spec is not None:
+                origin_score = record["_score"]
+                _, time_score = deferred_spec.fuse_optional(
+                    origin_score, record.get(deferred_spec.field)
+                )
+                record["_origin_score"] = origin_score
+                if time_score is not None:
+                    record["_time_score"] = time_score
             records.append(record)
         return records
 

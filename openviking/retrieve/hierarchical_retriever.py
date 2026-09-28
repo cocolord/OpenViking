@@ -60,6 +60,9 @@ class HierarchicalRetriever:
     MAX_CONVERGENCE_ROUNDS = 3  # Stop after multiple rounds with unchanged topk
     DIRECTORY_DOMINANCE_RATIO = 1.2  # Directory score must exceed max child score
     GLOBAL_SEARCH_TOPK = 10  # Global retrieval count (more candidates = better rerank precision)
+    # Semantic window retained for model rerank or parent-score propagation.
+    # This is independent of the native engine's internal decay candidates.
+    SCORE_FUSION_WINDOW_FACTOR = 3
     MAX_PARALLEL_CHILD_SEARCHES = 4  # Limit per-request fan-out against remote vector stores
     LEVEL_URI_SUFFIX = {0: ".abstract.md", 1: ".overview.md"}
 
@@ -257,7 +260,14 @@ class HierarchicalRetriever:
                     target_directories=target_dirs,
                     extra_filter=scope_dsl,
                     level=[2],
-                    limit=max(limit, self.GLOBAL_SEARCH_TOPK),
+                    limit=(
+                        min(
+                            max(limit, self.GLOBAL_SEARCH_TOPK) * self.SCORE_FUSION_WINDOW_FACTOR,
+                            100_000,
+                        )
+                        if leaf_decay_kwargs.get("for_rerank")
+                        else max(limit, self.GLOBAL_SEARCH_TOPK)
+                    ),
                     **leaf_decay_kwargs,
                 )
                 telemetry.count("vector.searches", 1)
@@ -546,7 +556,9 @@ class HierarchicalRetriever:
                 context_type=context_type,
                 target_directories=target_dirs,
                 extra_filter=scope_dsl,
-                limit=max(limit * 2, 20),
+                limit=min(max(limit * 2, 20) * self.SCORE_FUSION_WINDOW_FACTOR, 100_000)
+                if decay_kwargs
+                else max(limit * 2, 20),
                 **decay_kwargs,
             )
 

@@ -16,7 +16,7 @@ from openviking.storage.viking_vector_index_backend import (
     VikingVectorIndexBackend,
     _SingleAccountBackend,
 )
-from openviking.utils.time_decay import MAX_TIME_DECAY_CANDIDATES
+from openviking.utils.time_decay import build_time_decay_fusion_spec
 from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils.config.vectordb_config import VectorDBBackendConfig
 
@@ -83,10 +83,26 @@ def _backend_with_type(backend_type: str) -> VikingVectorIndexBackend:
     backend = object.__new__(VikingVectorIndexBackend)
     backend.acl_manager = None
     backend._backend_type = backend_type
-    backend._get_backend_for_context = AsyncMock(
-        return_value=SimpleNamespace(_mode=backend_type)
-    )
+    backend._get_backend_for_context = AsyncMock(return_value=SimpleNamespace(_mode=backend_type))
     return backend
+
+
+def _adapter_results(records, kwargs):
+    rule = (kwargs.get("advance") or {}).get("time_decay")
+    if rule is None:
+        return records
+    spec = build_time_decay_fusion_spec(
+        protection=rule["protection"], origin=datetime.fromisoformat(rule["origin"])
+    )
+    for item in records:
+        score = item["_score"]
+        final, time = spec.fuse_optional(score, item.get("updated_at"))
+        item["_origin_score"] = score
+        if time is not None:
+            item["_time_score"] = time
+        if not rule.get("defer_fusion"):
+            item["_score"] = final
+    return records
 
 
 def _contains_expr(expr, expected) -> bool:
@@ -122,8 +138,8 @@ async def test_cloud_event_scope_uses_cloud_decay_and_semantic_queries():
     cloud_call = next(call for call in calls if call.get("advance"))
     assert cloud_call["limit"] == 10
     assert cloud_call["return_detail_info"] is True
-    assert cloud_call["advance"]["post_process_input_limit"] == MAX_TIME_DECAY_CANDIDATES
-    assert cloud_call["advance"]["post_process_ops"][0]["fusion_by"] == "multiply"
+    assert cloud_call["advance"]["time_decay"]["protection"] == "0"
+    assert "post_process_input_limit" not in cloud_call["advance"]
     semantic_call = next(call for call in calls if call.get("advance") is None)
     assert semantic_call["limit"] == 10
     assert _contains_expr(
@@ -154,7 +170,7 @@ async def test_cloud_decay_keeps_operator_scores_without_local_fusion(backend_ty
 
     backend.search = fake_search
     with patch(
-        "openviking.storage.viking_vector_index_backend.build_time_decay_fusion_spec",
+        "openviking.storage.vectordb_adapters.base.CollectionAdapter.query",
         side_effect=AssertionError("Cloud results must not be fused in Python"),
     ):
         results = await backend.search_in_tenant(
@@ -203,7 +219,7 @@ async def test_event_directory_does_not_override_memory_type_tag(backend_type):
 
 
 @pytest.mark.asyncio
-async def test_local_decay_considers_candidates_beyond_the_final_window():
+async def test_local_scope_requests_final_window_and_accepts_engine_ranking():
     backend = _backend_with_type("local")
     calls = []
     candidates = [
@@ -230,7 +246,7 @@ async def test_local_decay_considers_candidates_beyond_the_final_window():
         calls.append(kwargs)
         if not _contains_expr(kwargs["filter"], Eq("search_tags", "memory_type=events")):
             return []
-        return [dict(candidate) for candidate in candidates[: kwargs["limit"]]]
+        return [dict(candidates[-1], _origin_score=0.96, _time_score=1.0)]
 
     backend.search = fake_search
     results = await backend.search_in_tenant(
@@ -244,7 +260,8 @@ async def test_local_decay_considers_candidates_beyond_the_final_window():
         request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
     )
 
-    assert max(call["limit"] for call in calls) == MAX_TIME_DECAY_CANDIDATES
+    assert max(call["limit"] for call in calls) == 1
+    assert calls[1]["advance"]["time_decay"]["defer_fusion"] is False
     assert results[0]["uri"] == "viking://user/alice/memories/events/fresh.md"
 
 
@@ -317,13 +334,16 @@ async def test_cloud_mixed_rerank_prefetch_keeps_one_origin_score_window():
             {"uri": "viking://user/alice/memories/preferences/c", "_score": 0.1},
         ]
 
-    backend.search = fake_search
+    async def adapter_search(**kwargs):
+        return _adapter_results(await fake_search(**kwargs), kwargs)
+
+    backend.search = adapter_search
     results = await backend.search_in_tenant(
         ctx=_ctx(),
         query_vector=[1.0],
         context_type="memory",
         target_directories=["viking://user/alice/memories"],
-        limit=1,
+        limit=3,
         events_time_decay_protection="0",
         for_rerank=True,
         request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
@@ -355,7 +375,7 @@ async def test_cloud_default_user_scope_splits_tagged_events_without_a_peer():
 
     assert len(calls) == 2
     cloud_call = next(call for call in calls if call.get("advance"))
-    assert cloud_call["advance"]["post_process_input_limit"] == MAX_TIME_DECAY_CANDIDATES
+    assert cloud_call["advance"]["time_decay"]["protection"] == "0"
     assert _contains_expr(cloud_call["filter"], Eq("search_tags", "memory_type=events"))
     semantic_call = next(call for call in calls if call.get("advance") is None)
     assert semantic_call["limit"] == 10
@@ -828,7 +848,7 @@ async def test_decay_leaves_untagged_user_and_peer_events_unchanged(backend_type
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend_type", ["local", "cuvs", "http", "opengauss"])
-async def test_non_cloud_decay_never_passes_advanced_ranking_options(backend_type):
+async def test_scope_passes_backend_neutral_decay_rule(backend_type):
     backend = _backend_with_type(backend_type)
     calls = []
 
@@ -847,12 +867,13 @@ async def test_non_cloud_decay_never_passes_advanced_ranking_options(backend_typ
     )
 
     assert len(calls) == 2
-    assert all(call["advance"] is None for call in calls)
-    assert all(call["return_detail_info"] is False for call in calls)
+    assert calls[0]["advance"] is None
+    assert calls[1]["advance"]["time_decay"]["protection"] == "0"
+    assert all(call["limit"] == 3 for call in calls)
 
 
 @pytest.mark.asyncio
-async def test_decay_uses_the_resolved_account_backend_capabilities():
+async def test_scope_leaves_capability_selection_to_account_adapter():
     backend = _backend_with_type("vikingdb")
     backend._get_backend_for_context = AsyncMock(return_value=SimpleNamespace(_mode="http"))
     calls = []
@@ -872,8 +893,9 @@ async def test_decay_uses_the_resolved_account_backend_capabilities():
     )
 
     assert len(calls) == 2
-    assert all(call["advance"] is None for call in calls)
-    assert all(call["return_detail_info"] is False for call in calls)
+    assert calls[0]["advance"] is None
+    assert calls[1]["advance"]["time_decay"]["protection"] == "0"
+    assert all(call["limit"] == 3 for call in calls)
 
 
 @pytest.mark.asyncio
@@ -901,14 +923,17 @@ async def test_decay_rerank_prefetch_keeps_expanded_origin_candidates():
         ]
         return candidates[: kwargs["limit"]]
 
-    backend.search = fake_search
+    async def adapter_search(**kwargs):
+        return _adapter_results(await fake_search(**kwargs), kwargs)
+
+    backend.search = adapter_search
     results = await backend.search_in_tenant(
         ctx=_ctx(),
         query_vector=[1.0],
         context_type="memory",
         target_directories=["viking://user/alice"],
         level=[2],
-        limit=1,
+        limit=3,
         events_time_decay_protection="0",
         for_rerank=True,
         request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
@@ -979,7 +1004,10 @@ async def test_decay_applies_to_a_peer_only_target():
             }
         ]
 
-    backend.search = fake_search
+    async def adapter_search(**kwargs):
+        return _adapter_results(await fake_search(**kwargs), kwargs)
+
+    backend.search = adapter_search
     results = await backend.search_in_tenant(
         ctx=_ctx(),
         query_vector=[1.0],
@@ -991,7 +1019,7 @@ async def test_decay_applies_to_a_peer_only_target():
     )
 
     assert len(calls) == 2
-    assert calls[1]["limit"] == MAX_TIME_DECAY_CANDIDATES
+    assert calls[1]["limit"] == 10
     assert results[0]["_score"] == pytest.approx(0.2)
     assert results[0]["_origin_score"] == pytest.approx(0.2)
     assert results[0]["_time_score"] == pytest.approx(1.0)
@@ -1041,7 +1069,10 @@ async def test_decay_applies_to_children_of_a_peer_event_directory():
             }
         ]
 
-    backend.search = fake_search
+    async def adapter_search(**kwargs):
+        return _adapter_results(await fake_search(**kwargs), kwargs)
+
+    backend.search = adapter_search
     results = await backend.search_children_in_tenant(
         ctx=_ctx(),
         parent_uri="viking://user/alice/peers/peer-a/memories/events",
@@ -1053,7 +1084,7 @@ async def test_decay_applies_to_children_of_a_peer_event_directory():
     )
 
     assert len(calls) == 2
-    assert calls[0]["limit"] == 6
+    assert calls[0]["limit"] == 2
     assert results[0]["_score"] == pytest.approx(0.2)
     assert results[0]["_origin_score"] == pytest.approx(0.2)
     assert results[0]["_time_score"] == pytest.approx(1.0)
@@ -1096,11 +1127,7 @@ async def test_tagged_events_use_the_same_split_and_scores_across_backends(
             return [dict(preference)]
         event = dict(new_event)
         old = dict(old_event)
-        if kwargs.get("advance"):
-            # The cloud adapter returns the already fused score and explanations.
-            event.update(_score=0.2, _origin_score=0.2, _time_score=1.0)
-            old.update(_score=0.3, _origin_score=0.6, _time_score=0.5)
-        return [old, event]
+        return _adapter_results([old, event], kwargs)
 
     backend.search = fake_search
     ctx = _ctx(actor_peer_id=actor_peer_id)
@@ -1109,7 +1136,7 @@ async def test_tagged_events_use_the_same_split_and_scores_across_backends(
         query_vector=[1.0],
         context_type="memory",
         extra_filter=Eq("search_tags", "team=search"),
-        limit=2,
+        limit=3 if for_rerank else 2,
         events_time_decay_protection="0",
         request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
         for_rerank=for_rerank,
@@ -1121,7 +1148,7 @@ async def test_tagged_events_use_the_same_split_and_scores_across_backends(
     )
     assert all(_contains_expr(call["filter"], expected_scope) for call in calls)
     if for_rerank:
-        assert all(call["advance"] is None for call in calls)
+        assert calls[1]["advance"]["time_decay"]["defer_fusion"] is True
         assert [result["_score"] for result in results] == pytest.approx([0.75, 0.6, 0.2])
         assert results[1]["_time_score"] == pytest.approx(0.5)
         assert results[2]["_time_score"] == pytest.approx(1.0)

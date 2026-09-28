@@ -44,11 +44,7 @@ from openviking.storage.vectordb.utils.logging_init import init_cpp_logging
 from openviking.storage.vectordb_adapters import create_collection_adapter
 from openviking.utils.tags import merge_search_tags, preserve_memory_type_tag
 from openviking.utils.time_decay import (
-    MAX_TIME_DECAY_CANDIDATES,
-    build_time_decay_fusion_spec,
-    build_time_decay_post_process_ops,
     parse_duration_ms,
-    time_decay_candidate_limit,
 )
 from openviking.utils.time_utils import get_current_timestamp
 from openviking_cli.exceptions import InvalidArgumentError
@@ -2070,10 +2066,6 @@ class VikingVectorIndexBackend:
     ) -> List[Dict[str, Any]]:
         request_now = request_now or datetime.now(timezone.utc)
         final_window = limit + offset
-        rerank_candidate_limit = time_decay_candidate_limit(limit, offset)
-        # Decay can promote events beyond the semantic top-k. Evaluate the
-        # supported event budget before truncating the final ranking.
-        candidate_limit = rerank_candidate_limit if defer_fusion else MAX_TIME_DECAY_CANDIDATES
         event_filter = self._merge_filters(
             scope_filter,
             Eq("context_type", "memory"),
@@ -2092,55 +2084,36 @@ class VikingVectorIndexBackend:
                 ]
             ),
         )
-        # Model reranking needs semantic candidates; fuse once after reranking
-        # and parent-score propagation in the retriever.
-        account_backend = await self._get_backend_for_context(ctx)
-        use_cloud_decay = account_backend._mode in {"vikingdb", "volcengine"} and not defer_fusion
-        advance = (
-            {
-                "post_process_ops": build_time_decay_post_process_ops(
-                    protection=events_time_decay_protection, origin=request_now
-                ),
-                "post_process_input_limit": candidate_limit,
+        # The adapter owns backend parameters and the engine owns amplification.
+        # Deferred calls request the retriever's semantic/rerank window unchanged.
+        advance = {
+            "time_decay": {
+                "protection": events_time_decay_protection,
+                "origin": request_now.isoformat(),
+                "defer_fusion": defer_fusion,
             }
-            if use_cloud_decay
-            else None
-        )
+        }
         remaining_results, event_results = await asyncio.gather(
             self._search_retrieval_scope(
                 ctx,
                 query_vector,
                 sparse_query_vector,
                 non_event_filter,
-                candidate_limit if defer_fusion else final_window,
+                final_window,
             ),
             self._search_retrieval_scope(
                 ctx,
                 query_vector,
                 sparse_query_vector,
                 event_filter,
-                final_window if use_cloud_decay else candidate_limit,
+                final_window,
                 advance=advance,
-                return_detail_info=use_cloud_decay,
+                return_detail_info=True,
             ),
         )
 
-        if not use_cloud_decay:
-            spec = build_time_decay_fusion_spec(
-                protection=events_time_decay_protection, origin=request_now
-            )
-            for result in event_results:
-                origin_score = float(result.get("_score", 0.0))
-                final_score, time_score = spec.fuse_optional(origin_score, result.get(spec.field))
-                result["_origin_score"] = origin_score
-                if time_score is not None:
-                    result["_time_score"] = time_score
-                result["_score"] = origin_score if defer_fusion else final_score
-
         results = remaining_results + event_results
         results.sort(key=lambda item: item.get("_score", 0.0), reverse=True)
-        if defer_fusion:
-            return results[:candidate_limit]
         return results[offset : offset + limit]
 
     async def _search_retrieval_scope(

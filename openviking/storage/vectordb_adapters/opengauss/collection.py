@@ -1064,10 +1064,11 @@ class OpenGaussCollection(ICollection):
         advance: Optional[Dict[str, Any]] = None,
         return_detail_info: bool = False,
     ) -> SearchResult:
-        if advance is not None or return_detail_info:
-            raise NotImplementedError(
-                "Advanced vector ranking options are not supported by openGauss"
-            )
+        time_decay = (advance or {}).get("time_decay")
+        if advance is not None and (
+            set(advance) != {"time_decay"} or not isinstance(time_decay, dict)
+        ):
+            raise NotImplementedError("openGauss advanced ranking supports time_decay only")
         # Sparse support is checked before the dense emptiness short-circuit:
         # a pure sparse query must fail loudly instead of returning an empty
         # result set that looks like "no recall".
@@ -1103,6 +1104,61 @@ class OpenGaussCollection(ICollection):
         """
         params = [vector_str] + where_params + [limit, offset]
 
+        if time_decay is not None:
+            import math
+
+            from openviking.utils.time_decay import TimeDecayFusionSpec, time_decay_candidate_limit
+
+            spec = TimeDecayFusionSpec(
+                **{
+                    key: time_decay[key]
+                    for key in ("field", "origin_ms", "offset_ms", "scale_ms", "decay")
+                }
+            )
+            if spec.field not in self._date_time_fields:
+                raise ValueError("Time-decay field must be a date_time column")
+            quoted = _quote_identifier(spec.field)
+            deferred = time_decay.get("defer_fusion", False)
+            candidate_limit = (
+                limit + offset if deferred else time_decay_candidate_limit(limit, offset)
+            )
+            similarity = {"cosine": "1.0 - _distance", "ip": "-_distance"}.get(
+                distance_metric, "1.0 / (1.0 + GREATEST(_distance, 0.0))"
+            )
+            final_score = "_origin_score" if deferred else "_origin_score * _time_score"
+            # Keep only IDs, distance and date in the ANN window; join payloads
+            # after decay sorting and pagination inside the database.
+            sql = f"""
+                WITH candidates AS (
+                    SELECT id, {quoted}, vector {op} %s::vector AS _distance
+                    FROM "{self._name}" {where_clause}
+                    ORDER BY _distance, id LIMIT %s
+                ), scored AS (
+                    SELECT id, ({similarity}) AS _origin_score,
+                           CASE WHEN {quoted} IS NULL THEN 1.0 ELSE
+                           EXP(%s * GREATEST(0.0, ABS(%s - {quoted}) - %s)) END AS _time_score
+                    FROM candidates
+                ), ranked AS (
+                    SELECT *, ({final_score}) AS _final_score FROM scored
+                    ORDER BY _final_score DESC, id LIMIT %s OFFSET %s
+                ), payloads AS (SELECT {select_cols} FROM "{self._name}")
+                SELECT payloads.*, ranked._origin_score, ranked._time_score, ranked._final_score
+                FROM ranked JOIN payloads ON ranked.id = payloads.id
+                ORDER BY ranked._final_score DESC, ranked.id
+            """
+            params = (
+                [vector_str]
+                + where_params
+                + [
+                    candidate_limit,
+                    math.log(spec.decay) / spec.scale_ms,
+                    spec.origin_ms,
+                    spec.offset_ms,
+                    limit,
+                    offset,
+                ]
+            )
+
         try:
             with self._lock:
                 cur = self._cursor()
@@ -1130,7 +1186,18 @@ class OpenGaussCollection(ICollection):
             distance = record.pop("_distance", 0.0)
             record_id = record.pop("id", None)
             similarity = _distance_to_similarity(distance_metric, distance)
-            items.append(SearchItemResult(id=record_id, fields=record, score=similarity))
+            if time_decay is not None:
+                items.append(
+                    SearchItemResult(
+                        id=record_id,
+                        fields=record,
+                        score=record.pop("_final_score"),
+                        origin_score=record.pop("_origin_score"),
+                        addition_score=record.pop("_time_score"),
+                    )
+                )
+            else:
+                items.append(SearchItemResult(id=record_id, fields=record, score=similarity))
         return SearchResult(data=items)
 
     def search_by_scalar(

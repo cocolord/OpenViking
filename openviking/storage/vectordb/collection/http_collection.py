@@ -396,10 +396,6 @@ class HttpCollection(ICollection):
         advance: Optional[Dict[str, Any]] = None,
         return_detail_info: bool = False,
     ) -> SearchResult:
-        if advance is not None or return_detail_info:
-            raise NotImplementedError(
-                "Advanced vector ranking options are not supported by the HTTP collection"
-            )
         url = self.url_prefix + "api/vikingdb/data/search/vector"
         response = requests.post(
             url,
@@ -414,6 +410,8 @@ class HttpCollection(ICollection):
                 "output_fields": json.dumps(output_fields) if output_fields else None,
                 "limit": limit,
                 "offset": offset,
+                **({"advance": advance} if advance is not None else {}),
+                **({"return_detail_info": True} if return_detail_info else {}),
             },
             timeout=DEFAULT_TIMEOUT,
         )
@@ -429,6 +427,8 @@ class HttpCollection(ICollection):
                     id=item.get("id"),
                     fields=item.get("fields"),
                     score=item.get("score"),
+                    origin_score=item.get("origin_score"),
+                    addition_score=item.get("addition_score"),
                 )
                 for item in data.get("data", [])
             ]
