@@ -15,7 +15,11 @@ from openviking.storage.vectordb_adapters.opengauss.collection import OpenGaussC
 
 @pytest.mark.parametrize("mode", ["local", "cuvs", "http", "vikingdb", "volcengine"])
 @pytest.mark.parametrize("deferred", [False, True])
-def test_adapter_owns_decay_parameters_and_keeps_requested_window(mode, deferred):
+def test_adapter_owns_decay_parameters_and_keeps_requested_window(mode, deferred, monkeypatch):
+    from openviking.storage.vectordb import engine
+
+    native_time_scores = Mock(wraps=engine._BACKEND._time_decay_scores)
+    monkeypatch.setattr(engine._BACKEND, "_time_decay_scores", native_time_scores)
     adapter = LocalCollectionAdapter("context", "", "default")
     adapter.mode = mode
     coll = Mock()
@@ -49,6 +53,7 @@ def test_adapter_owns_decay_parameters_and_keeps_requested_window(mode, deferred
         rule = kwargs["advance"]["time_decay"]
         assert rule["defer_fusion"] == deferred
         assert rule["offset_ms"] == 0 and rule["scale_ms"] == 7 * 24 * 3600 * 1000
+    assert native_time_scores.call_count == int(deferred and mode in {"vikingdb", "volcengine"})
 
 
 @pytest.mark.asyncio

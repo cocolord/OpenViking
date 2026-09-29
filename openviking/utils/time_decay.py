@@ -7,7 +7,6 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
-from dataclasses import field as dataclass_field
 from datetime import datetime, timezone
 from numbers import Real
 from typing import Any, Optional
@@ -78,38 +77,37 @@ class TimeDecayFusionSpec:
     offset_ms: int
     scale_ms: int
     decay: float
-    _decay_rate: float = dataclass_field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        # Validate and compile request constants once, outside the candidate loop.
+        # Validate request constants before translating them for each backend.
         if self.scale_ms <= 0:
             raise ValueError("time-decay scale must be greater than zero")
         if not 0.0 < self.decay < 1.0:
             raise ValueError("time-decay decay must be in (0, 1)")
         object.__setattr__(self, "origin_ms", _datetime_to_epoch_ms(self.origin_ms))
-        object.__setattr__(self, "_decay_rate", math.log(self.decay) / self.scale_ms)
 
-    def fuse(self, origin_score: float, source_time: Any) -> tuple[float, float]:
-        """Return ``(final_score, raw_addition_score)`` for one candidate."""
-        # Match VikingDB's exp decay operator, including future timestamps.
-        distance_ms = max(
-            0.0, abs(self.origin_ms - _datetime_to_epoch_ms(source_time)) - self.offset_ms
+    def time_scores(self, source_times: list[Any]) -> list[Optional[float]]:
+        """Deserialize timestamps, then compute the whole batch in C++."""
+        from openviking.storage.vectordb import engine
+
+        timestamps = []
+        for source_time in source_times:
+            try:
+                timestamps.append(_datetime_to_epoch_ms(source_time))
+            except (TypeError, ValueError, OverflowError):
+                timestamps.append(None)
+        return engine.time_decay_scores(
+            timestamps, self.origin_ms, self.offset_ms, self.scale_ms, self.decay
         )
-        addition_score = math.exp(self._decay_rate * distance_ms)
-        final_score = origin_score * addition_score
-        return final_score, addition_score
-
-    def fuse_optional(self, origin_score: float, source_time: Any) -> tuple[float, Optional[float]]:
-        """Fuse only reliable source times; otherwise preserve the origin score."""
-        try:
-            return self.fuse(origin_score, source_time)
-        except (TypeError, ValueError, OverflowError):
-            return origin_score, None
 
 
-def fuse_time_decay_scores(*, origin_score: float, addition_score: float) -> float:
-    """Multiply the semantic score by the time score."""
-    return origin_score * addition_score
+def rank_time_decay_scores(
+    scores: list[float], time_scores: list[Optional[float]], limit: int
+) -> list[tuple[int, float]]:
+    """Return candidate indices and fused scores in native top-k order."""
+    from openviking.storage.vectordb import engine
+
+    return engine.rank_time_decay(scores, time_scores, limit)
 
 
 def build_time_decay_fusion_spec(

@@ -479,7 +479,9 @@ async def test_convert_to_matched_contexts_defaults_tags_and_body_previews():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rerank_scores", [[0.8, 0.6], None])
-async def test_decay_fuses_once_after_global_rerank_or_fallback(rerank_scores):
+async def test_decay_fuses_once_after_global_rerank_or_fallback(rerank_scores, monkeypatch):
+    from openviking.storage.vectordb import engine
+
     storage = DummyStorage(
         [
             _result(
@@ -495,6 +497,15 @@ async def test_decay_fuses_once_after_global_rerank_or_fallback(rerank_scores):
     retriever = HierarchicalRetriever(storage=storage, embedder=DummyEmbedder())
     client = FakeRerankClient(rerank_scores or [])
     retriever._rerank_client = client
+    native_rank = engine._BACKEND._rank_time_decay
+    native_calls = []
+
+    def rank_after_model(scores, time_scores, limit):
+        assert len(client.calls) == 1
+        native_calls.append((list(scores), list(time_scores), limit))
+        return native_rank(scores, time_scores, limit)
+
+    monkeypatch.setattr(engine._BACKEND, "_rank_time_decay", rank_after_model)
     result = await retriever.retrieve(
         _query(),
         ctx=_ctx(),
@@ -506,6 +517,7 @@ async def test_decay_fuses_once_after_global_rerank_or_fallback(rerank_scores):
     assert storage.search_calls[0]["for_rerank"] is True
     assert storage.search_calls[0]["request_now"] is not None
     assert len(client.calls) == 1
+    assert native_calls == [(rerank_scores or [0.9, 0.7], [0.5, None], 2)]
     assert [item.score for item in result.matched_contexts] == pytest.approx(
         [0.6, 0.4] if rerank_scores else [0.7, 0.45]
     )

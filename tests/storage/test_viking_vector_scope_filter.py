@@ -94,14 +94,14 @@ def _adapter_results(records, kwargs):
     spec = build_time_decay_fusion_spec(
         protection=rule["protection"], origin=datetime.fromisoformat(rule["origin"])
     )
-    for item in records:
+    time_scores = spec.time_scores([item.get("updated_at") for item in records])
+    for item, time in zip(records, time_scores, strict=True):
         score = item["_score"]
-        final, time = spec.fuse_optional(score, item.get("updated_at"))
         item["_origin_score"] = score
         if time is not None:
             item["_time_score"] = time
         if not rule.get("defer_fusion"):
-            item["_score"] = final
+            item["_score"] = score * time if time is not None else score
     return records
 
 

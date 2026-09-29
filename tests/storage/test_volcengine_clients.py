@@ -36,11 +36,9 @@ def test_collection_vector_search_contract_includes_remote_ranking_options(colle
     assert parameters["return_detail_info"].default is False
 
 
-@pytest.mark.parametrize(
-    "collection_type", [LocalCollection, HttpCollection, OpenGaussCollection]
-)
-def test_non_vikingdb_collections_reject_remote_ranking_options(collection_type):
-    with pytest.raises(NotImplementedError, match="Advanced vector ranking options"):
+@pytest.mark.parametrize("collection_type", [LocalCollection, OpenGaussCollection])
+def test_local_and_opengauss_reject_vikingdb_post_process_ops(collection_type):
+    with pytest.raises(NotImplementedError, match="supports time_decay only"):
         collection_type.search_by_vector(None, "default", advance={"post_process_ops": []})
 
 

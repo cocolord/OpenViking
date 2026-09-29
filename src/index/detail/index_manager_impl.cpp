@@ -11,6 +11,7 @@
 #include <thread>
 #include "spdlog/spdlog.h"
 #include "common/ann_utils.h"
+#include "index/time_decay.h"
 #include "index/detail/scalar/filter/op_base.h"
 #include "index/detail/scalar/filter/filter_ops.h"
 #include "index/detail/scalar/filter/sort_ops.h"
@@ -557,9 +558,9 @@ int IndexManagerImpl::perform_vector_recall(const SearchRequest& req,
   }
   const auto time_values = scalar_index_->get_field_sets()->get_rangedmap_ptr(
       decay["field"].GetString());
-  const double origin = decay["origin_ms"].GetDouble();
-  const double protection = decay["offset_ms"].GetDouble();
-  const double rate = std::log(decay["decay"].GetDouble()) / decay["scale_ms"].GetDouble();
+  const TimeDecayScorer time_score(
+      decay["origin_ms"].GetDouble(), decay["offset_ms"].GetDouble(),
+      decay["scale_ms"].GetDouble(), decay["decay"].GetDouble());
   std::vector<float> fused = recall_result.scores;
   std::vector<double> time_scores(fused.size(), std::numeric_limits<double>::quiet_NaN());
   for (size_t i = 0; i < fused.size(); ++i) {
@@ -567,15 +568,9 @@ int IndexManagerImpl::perform_vector_recall(const SearchRequest& req,
     if (!time_values || offset < 0 || static_cast<uint32_t>(offset) >= time_values->size()) continue;
     const double updated = time_values->get_score_by_offset(offset);
     if (!std::isfinite(updated)) continue;
-    time_scores[i] = std::exp(rate * std::max(0.0, std::abs(origin - updated) - protection));
-    if (!deferred) fused[i] *= time_scores[i];
+    time_scores[i] = time_score(updated);
   }
-  std::vector<size_t> order(fused.size());
-  std::iota(order.begin(), order.end(), 0);
-  std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-    return fused[a] > fused[b];
-  });
-  order.resize(std::min(order.size(), static_cast<size_t>(req.topk)));
+  const auto order = fuse_and_rank_time_decay(fused, time_scores, req.topk, !deferred);
   JsonDoc details;
   details.SetObject();
   auto& allocator = details.GetAllocator();

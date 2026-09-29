@@ -584,15 +584,15 @@ class CollectionAdapter(ABC):
             if item.addition_score is not None:
                 record["_time_score"] = _normalize_result_score(item.addition_score)
             record = self._normalize_record_for_read(record)
-            if deferred_spec is not None:
-                origin_score = record["_score"]
-                _, time_score = deferred_spec.fuse_optional(
-                    origin_score, record.get(deferred_spec.field)
-                )
-                record["_origin_score"] = origin_score
+            records.append(record)
+        if deferred_spec is not None:
+            time_scores = deferred_spec.time_scores(
+                [record.get(deferred_spec.field) for record in records]
+            )
+            for record, time_score in zip(records, time_scores, strict=True):
+                record["_origin_score"] = record["_score"]
                 if time_score is not None:
                     record["_time_score"] = time_score
-            records.append(record)
         return records
 
     def search_by_random(

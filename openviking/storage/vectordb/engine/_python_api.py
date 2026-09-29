@@ -639,7 +639,15 @@ def build_abi3_exports(backend: Any) -> dict[str, Any]:
     ):
         return backend._init_logging(log_level, log_output, log_format)
 
+    def time_decay_scores(timestamps, origin_ms, offset_ms, scale_ms, decay):
+        return backend._time_decay_scores(timestamps, origin_ms, offset_ms, scale_ms, decay)
+
+    def rank_time_decay(scores, time_scores, limit):
+        return backend._rank_time_decay(scores, time_scores, limit)
+
     return {
+        "time_decay_scores": time_decay_scores,
+        "rank_time_decay": rank_time_decay,
         "FieldType": FieldType,
         "StorageOpType": StorageOpType,
         "Schema": SchemaExport,
