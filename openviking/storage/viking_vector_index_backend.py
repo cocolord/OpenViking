@@ -43,9 +43,7 @@ from openviking.storage.vectordb.collection.result import UpdateResult
 from openviking.storage.vectordb.utils.logging_init import init_cpp_logging
 from openviking.storage.vectordb_adapters import create_collection_adapter
 from openviking.utils.tags import merge_search_tags, preserve_memory_type_tag
-from openviking.utils.time_decay import (
-    parse_duration_ms,
-)
+from openviking.utils.time_decay import parse_duration_ms
 from openviking.utils.time_utils import get_current_timestamp
 from openviking_cli.exceptions import InvalidArgumentError
 from openviking_cli.utils import get_logger
@@ -810,7 +808,6 @@ class _SingleAccountBackend:
         order_by: Optional[str] = None,
         order_desc: bool = False,
         advance: Optional[Dict[str, Any]] = None,
-        return_detail_info: bool = False,
     ) -> List[Dict[str, Any]]:
         self._validate_vector_dimension(query_vector)
         try:
@@ -840,7 +837,6 @@ class _SingleAccountBackend:
                 order_by=order_by,
                 order_desc=order_desc,
                 advance=advance,
-                return_detail_info=return_detail_info,
             )
         except Exception as e:
             logger.error("Error querying collection: %s", e, exc_info=True)
@@ -878,7 +874,6 @@ class _SingleAccountBackend:
         offset: int = 0,
         output_fields: Optional[List[str]] = None,
         advance: Optional[Dict[str, Any]] = None,
-        return_detail_info: bool = False,
     ) -> List[Dict[str, Any]]:
         return await self.query(
             query_vector=query_vector,
@@ -888,7 +883,6 @@ class _SingleAccountBackend:
             offset=offset,
             output_fields=output_fields,
             advance=advance,
-            return_detail_info=return_detail_info,
         )
 
     @_backend_operation
@@ -1581,7 +1575,6 @@ class VikingVectorIndexBackend:
         order_by: Optional[str] = None,
         order_desc: bool = False,
         advance: Optional[Dict[str, Any]] = None,
-        return_detail_info: bool = False,
         *,
         ctx: RequestContext,
     ) -> List[Dict[str, Any]]:
@@ -1596,7 +1589,6 @@ class VikingVectorIndexBackend:
             order_by=order_by,
             order_desc=order_desc,
             advance=advance,
-            return_detail_info=return_detail_info,
         )
 
     async def search_by_random(
@@ -1632,7 +1624,6 @@ class VikingVectorIndexBackend:
         offset: int = 0,
         output_fields: Optional[List[str]] = None,
         advance: Optional[Dict[str, Any]] = None,
-        return_detail_info: bool = False,
         *,
         ctx: RequestContext,
     ) -> List[Dict[str, Any]]:
@@ -1644,7 +1635,6 @@ class VikingVectorIndexBackend:
             offset=offset,
             output_fields=output_fields,
             advance=advance,
-            return_detail_info=return_detail_info,
             ctx=ctx,
         )
 
@@ -2000,52 +1990,22 @@ class VikingVectorIndexBackend:
                 "origin": request_now.isoformat(),
             }
         }
+        search_kwargs: Dict[str, Any] = {
+            "ctx": ctx,
+            "query_vector": query_vector,
+            "sparse_query_vector": sparse_query_vector,
+            "limit": final_window,
+            "offset": 0,
+            "output_fields": RETRIEVAL_OUTPUT_FIELDS,
+        }
         remaining_results, event_results = await asyncio.gather(
-            self._search_retrieval_scope(
-                ctx,
-                query_vector,
-                sparse_query_vector,
-                non_event_filter,
-                final_window,
-            ),
-            self._search_retrieval_scope(
-                ctx,
-                query_vector,
-                sparse_query_vector,
-                event_filter,
-                final_window,
-                advance=advance,
-                return_detail_info=True,
-            ),
+            self.search(filter=non_event_filter, **search_kwargs),
+            self.search(filter=event_filter, advance=advance, **search_kwargs),
         )
 
         results = remaining_results + event_results
         results.sort(key=lambda item: item.get("_score", 0.0), reverse=True)
         return results[offset : offset + limit]
-
-    async def _search_retrieval_scope(
-        self,
-        ctx: RequestContext,
-        query_vector: Optional[List[float]],
-        sparse_query_vector: Optional[Dict[str, float]],
-        scope_filter: Optional[FilterExpr],
-        limit: int,
-        offset: int = 0,
-        *,
-        advance: Optional[Dict[str, Any]] = None,
-        return_detail_info: bool = False,
-    ) -> List[Dict[str, Any]]:
-        return await self.search(
-            query_vector=query_vector,
-            sparse_query_vector=sparse_query_vector,
-            filter=scope_filter,
-            limit=limit,
-            offset=offset,
-            output_fields=RETRIEVAL_OUTPUT_FIELDS,
-            advance=advance,
-            return_detail_info=return_detail_info,
-            ctx=ctx,
-        )
 
     async def get_context_by_uri(
         self,

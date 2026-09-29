@@ -485,7 +485,6 @@ class CollectionAdapter(ABC):
         order_by: Optional[str] = None,
         order_desc: bool = False,
         advance: Optional[Dict[str, Any]] = None,
-        return_detail_info: bool = False,
     ) -> list[Dict[str, Any]]:
         decay_request = (advance or {}).get("time_decay")
         if decay_request is not None:
@@ -516,7 +515,6 @@ class CollectionAdapter(ABC):
                 }
             else:
                 raise NotImplementedError(f"Time decay is not supported by {self.mode}")
-            return_detail_info = True
         coll = self.get_collection()
         vectordb_filter = self._compile_filter(filter)
 
@@ -530,7 +528,7 @@ class CollectionAdapter(ABC):
                 filters=vectordb_filter,
                 output_fields=output_fields,
                 advance=advance,
-                return_detail_info=return_detail_info,
+                return_detail_info=decay_request is not None,
             )
         elif order_by:
             result = coll.search_by_scalar(

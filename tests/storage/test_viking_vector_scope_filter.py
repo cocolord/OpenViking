@@ -4,7 +4,7 @@
 import threading
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -79,11 +79,9 @@ class _RecordingAsyncAdapter:
         return []
 
 
-def _backend_with_type(backend_type: str) -> VikingVectorIndexBackend:
+def _scope_backend() -> VikingVectorIndexBackend:
     backend = object.__new__(VikingVectorIndexBackend)
     backend.acl_manager = None
-    backend._backend_type = backend_type
-    backend._get_backend_for_context = AsyncMock(return_value=SimpleNamespace(_mode=backend_type))
     return backend
 
 
@@ -117,8 +115,8 @@ def _contains_expr(expr, expected) -> bool:
 
 
 @pytest.mark.asyncio
-async def test_cloud_event_scope_uses_cloud_decay_and_semantic_queries():
-    backend = _backend_with_type("vikingdb")
+async def test_event_scope_splits_decay_and_ordinary_queries():
+    backend = _scope_backend()
     calls = []
 
     async def fake_search(**kwargs):
@@ -140,7 +138,6 @@ async def test_cloud_event_scope_uses_cloud_decay_and_semantic_queries():
     assert len(calls) == 2
     cloud_call = next(call for call in calls if call.get("advance"))
     assert cloud_call["limit"] == 10
-    assert cloud_call["return_detail_info"] is True
     assert cloud_call["advance"]["time_decay"]["protection"] == "0"
     assert "post_process_input_limit" not in cloud_call["advance"]
     semantic_call = next(call for call in calls if call.get("advance") is None)
@@ -152,9 +149,8 @@ async def test_cloud_event_scope_uses_cloud_decay_and_semantic_queries():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend_type", ["vikingdb", "volcengine"])
-async def test_cloud_decay_keeps_operator_scores_without_local_fusion(backend_type):
-    backend = _backend_with_type(backend_type)
+async def test_scope_merge_preserves_engine_scores():
+    backend = _scope_backend()
     cloud_result = {
         "uri": "viking://user/alice/peers/assistant/memories/events/past.md",
         "context_type": "memory",
@@ -172,26 +168,21 @@ async def test_cloud_decay_keeps_operator_scores_without_local_fusion(backend_ty
         return []
 
     backend.search = fake_search
-    with patch(
-        "openviking.storage.vectordb_adapters.base.CollectionAdapter.query",
-        side_effect=AssertionError("Cloud results must not be fused in Python"),
-    ):
-        results = await backend.search_in_tenant(
-            ctx=_ctx(),
-            query_vector=[1.0],
-            context_type="memory",
-            limit=2,
-            events_time_decay_protection="0",
-            request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
-        )
+    results = await backend.search_in_tenant(
+        ctx=_ctx(),
+        query_vector=[1.0],
+        context_type="memory",
+        limit=2,
+        events_time_decay_protection="0",
+        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
+    )
 
     assert results == [cloud_result]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend_type", ["local", "vikingdb", "volcengine"])
-async def test_event_directory_does_not_override_memory_type_tag(backend_type):
-    backend = _backend_with_type(backend_type)
+async def test_event_directory_does_not_override_memory_type_tag():
+    backend = _scope_backend()
     result = {
         "uri": "viking://user/alice/memories/events/old.md",
         "context_type": "memory",
@@ -222,8 +213,8 @@ async def test_event_directory_does_not_override_memory_type_tag(backend_type):
 
 
 @pytest.mark.asyncio
-async def test_local_scope_requests_final_window_and_accepts_engine_ranking():
-    backend = _backend_with_type("local")
+async def test_scope_requests_final_window_and_accepts_engine_ranking():
+    backend = _scope_backend()
     calls = []
     candidates = [
         {
@@ -270,8 +261,8 @@ async def test_local_scope_requests_final_window_and_accepts_engine_ranking():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("offset", [0, 1])
-async def test_cloud_mixed_scope_splits_event_and_non_event_queries(offset):
-    backend = _backend_with_type("vikingdb")
+async def test_mixed_scope_splits_event_and_non_event_queries(offset):
+    backend = _scope_backend()
     calls = []
 
     async def fake_search(**kwargs):
@@ -300,14 +291,13 @@ async def test_cloud_mixed_scope_splits_event_and_non_event_queries(offset):
     )
 
     assert len(calls) == 2
-    assert sum(call.get("return_detail_info", False) for call in calls) == 1
     assert all(call["limit"] == 1 + offset and call["offset"] == 0 for call in calls)
     assert [item["_score"] for item in results] == [[0.8], [0.7]][offset]
 
 
 @pytest.mark.asyncio
-async def test_cloud_mixed_scope_merges_decayed_recall_window():
-    backend = _backend_with_type("vikingdb")
+async def test_mixed_scope_merges_decayed_recall_window():
+    backend = _scope_backend()
 
     async def fake_search(**kwargs):
         if _contains_expr(kwargs["filter"], Eq("search_tags", "memory_type=events")):
@@ -357,8 +347,8 @@ async def test_cloud_mixed_scope_merges_decayed_recall_window():
 
 
 @pytest.mark.asyncio
-async def test_cloud_default_user_scope_splits_tagged_events_without_a_peer():
-    backend = _backend_with_type("vikingdb")
+async def test_default_user_scope_splits_tagged_events_without_a_peer():
+    backend = _scope_backend()
     calls = []
 
     async def fake_search(**kwargs):
@@ -385,7 +375,6 @@ async def test_cloud_default_user_scope_splits_tagged_events_without_a_peer():
         semantic_call["filter"],
         RawDSL({"op": "must_not", "field": "search_tags", "conds": ["memory_type=events"]}),
     )
-    assert semantic_call["return_detail_info"] is False
 
 
 def _single_account_backend(async_adapter, account_id: str | None):
@@ -802,9 +791,8 @@ async def test_null_decay_protection_keeps_the_original_single_search_call():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend_type", ["local", "vikingdb", "volcengine"])
-async def test_decay_leaves_untagged_user_and_peer_events_unchanged(backend_type):
-    backend = _backend_with_type(backend_type)
+async def test_decay_leaves_untagged_user_and_peer_events_unchanged():
+    backend = _scope_backend()
     calls = []
 
     async def fake_search(**kwargs):
@@ -849,9 +837,8 @@ async def test_decay_leaves_untagged_user_and_peer_events_unchanged(backend_type
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend_type", ["local", "cuvs", "http", "opengauss"])
-async def test_scope_passes_backend_neutral_decay_rule(backend_type):
-    backend = _backend_with_type(backend_type)
+async def test_scope_passes_backend_neutral_decay_rule():
+    backend = _scope_backend()
     calls = []
 
     async def fake_search(**kwargs):
@@ -869,40 +856,14 @@ async def test_scope_passes_backend_neutral_decay_rule(backend_type):
     )
 
     assert len(calls) == 2
-    assert calls[0]["advance"] is None
-    assert calls[1]["advance"]["time_decay"]["protection"] == "0"
-    assert all(call["limit"] == 3 for call in calls)
-
-
-@pytest.mark.asyncio
-async def test_scope_leaves_capability_selection_to_account_adapter():
-    backend = _backend_with_type("vikingdb")
-    backend._get_backend_for_context = AsyncMock(return_value=SimpleNamespace(_mode="http"))
-    calls = []
-
-    async def fake_search(**kwargs):
-        calls.append(kwargs)
-        return []
-
-    backend.search = fake_search
-    await backend.search_in_tenant(
-        ctx=_ctx(),
-        query_vector=[1.0],
-        context_type="memory",
-        limit=3,
-        events_time_decay_protection="0",
-        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
-    )
-
-    assert len(calls) == 2
-    assert calls[0]["advance"] is None
+    assert calls[0].get("advance") is None
     assert calls[1]["advance"]["time_decay"]["protection"] == "0"
     assert all(call["limit"] == 3 for call in calls)
 
 
 @pytest.mark.asyncio
 async def test_decay_recall_returns_fused_scores_in_requested_window():
-    backend = _backend_with_type("local")
+    backend = _scope_backend()
     calls = []
 
     async def fake_search(**kwargs):
@@ -941,16 +902,15 @@ async def test_decay_recall_returns_fused_scores_in_requested_window():
     )
 
     assert calls[0]["limit"] == 3
-    assert calls[0]["advance"] is None
-    assert calls[0]["return_detail_info"] is False
+    assert calls[0].get("advance") is None
     assert [result["_score"] for result in results] == pytest.approx([0.9, 0.4])
     assert [result["_origin_score"] for result in results] == pytest.approx([0.9, 0.8])
     assert [result["_time_score"] for result in results] == pytest.approx([1.0, 0.5])
 
 
 @pytest.mark.asyncio
-async def test_cloud_decay_keeps_directory_levels_that_share_a_uri():
-    backend = _backend_with_type("vikingdb")
+async def test_decay_keeps_directory_levels_that_share_a_uri():
+    backend = _scope_backend()
     directory_uri = "viking://user/alice/memories/events/project"
 
     async def fake_search(**kwargs):
@@ -989,7 +949,7 @@ async def test_cloud_decay_keeps_directory_levels_that_share_a_uri():
 
 @pytest.mark.asyncio
 async def test_decay_applies_to_a_peer_only_target():
-    backend = _backend_with_type("local")
+    backend = _scope_backend()
     calls = []
 
     async def fake_search(**kwargs):
@@ -1028,7 +988,7 @@ async def test_decay_applies_to_a_peer_only_target():
 
 @pytest.mark.asyncio
 async def test_decay_applies_under_bare_user_target():
-    backend = _backend_with_type("local")
+    backend = _scope_backend()
     calls = []
 
     async def fake_search(**kwargs):
@@ -1054,7 +1014,7 @@ async def test_decay_applies_under_bare_user_target():
 
 @pytest.mark.asyncio
 async def test_decay_applies_to_scoped_peer_event_directory():
-    backend = _backend_with_type("local")
+    backend = _scope_backend()
     calls = []
 
     async def fake_search(**kwargs):
@@ -1092,12 +1052,9 @@ async def test_decay_applies_to_scoped_peer_event_directory():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend_type", ["local", "vikingdb", "volcengine"])
 @pytest.mark.parametrize("actor_peer_id", [None, "peer-a"])
-async def test_tagged_events_use_the_same_split_and_scores_across_backends(
-    backend_type, actor_peer_id
-):
-    backend = _backend_with_type(backend_type)
+async def test_tagged_events_keep_scope_and_merge_decayed_scores(actor_peer_id):
+    backend = _scope_backend()
     calls = []
     new_event = {
         "uri": "viking://user/alice/peers/peer-a/memories/events/new.md",
@@ -1266,7 +1223,7 @@ async def test_local_tag_split_does_not_boost_fresh_events(vector_backend_factor
     "context_type,level", [(None, None), ("memory", [0, 1]), ("resource", [2])]
 )
 async def test_decay_split_adds_only_complementary_event_tag_predicates(context_type, level):
-    backend = _backend_with_type("local")
+    backend = _scope_backend()
     calls = []
 
     async def search(**kwargs):
