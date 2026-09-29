@@ -958,7 +958,7 @@ mod tests {
             {
                 "context_type": "memory",
                 "uri": "viking://user/default/memories/events/recent.md",
-                "score": 0.675,
+                "score": 0.54,
                 "origin_score": 0.6,
                 "time_score": 0.9,
                 "abstract": "Recent event."
@@ -967,7 +967,7 @@ mod tests {
 
         let rendered = strip_ansi(&render_search_results_for_table(&results).expect("cards"));
 
-        assert!(rendered.contains("1. memory · semantic 0.600 · time 0.900 · final 0.675"));
+        assert!(rendered.contains("1. memory · semantic 0.600 · time 0.900 · final 0.540"));
         assert!(!rendered.contains("origin_score"));
         assert!(!rendered.contains("time_score"));
     }

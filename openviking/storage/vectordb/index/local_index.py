@@ -143,7 +143,10 @@ class IndexEngineProxy:
         sparse_values: Optional[List[float]] = None,
         *,
         time_decay: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[List[int], List[float]]:
+    ) -> Union[
+        Tuple[List[int], List[float]],
+        Tuple[List[int], List[float], Dict[str, Any]],
+    ]:
         if not self.index_engine:
             raise RuntimeError("Index engine not initialized")
 
