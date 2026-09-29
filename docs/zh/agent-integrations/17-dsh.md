@@ -53,7 +53,7 @@ bash <(curl -fsSL https://ovrelease.tos-cn-beijing.volces.com/memory-plugin-shar
 
 启动 `dsh --profile web` 打开一个会话，会话开头应该能看到一条 OpenViking 上下文注入，模型也应该具备 `mcp__openviking__*` 工具。问一句更早会话里聊过的事，确认召回生效。
 
-如果什么都没有，设置 `OV_DEBUG_LOG=/tmp/ov-dsh.log` 后查看该文件。
+排查 MCP 代理问题时，在启动 DSH 前设置 `OPENVIKING_DEBUG=1` 和 `OPENVIKING_DEBUG_LOG=/tmp/ov-dsh.log`，然后查看该文件。自动记忆回调使用 DSH 自身的日志系统。旧别名 `OV_DEBUG_LOG=/tmp/ov-dsh.log` 仍然支持，并且优先于这两个规范配置项。
 
 ## 工作方式
 
@@ -78,7 +78,9 @@ bash <(curl -fsSL https://ovrelease.tos-cn-beijing.volces.com/memory-plugin-shar
 | `OPENVIKING_PEER_ID` | — | 显式指定 actor peer |
 | `OPENVIKING_WORKSPACE_PEER` | `true` | 按每个会话的工作区推导 peer；设为 `0` 则不发送 peer |
 | `OPENVIKING_RECALL_PEER_SCOPE` | `all` | 设为 `actor` 可将召回限制在当前工作区 |
-| `OV_DEBUG_LOG` | — | 把调试日志写到该路径 |
+| `OPENVIKING_DEBUG` | `false` | 启用 MCP 代理调试日志；还需配置日志路径 |
+| `OPENVIKING_DEBUG_LOG` | `""` | MCP 代理调试日志的文件路径 |
+| `OV_DEBUG_LOG` | — | 旧别名：启用 MCP 代理日志，并覆盖规范的调试开关和日志路径 |
 
 行为参数写在 profile 的 Cordis patch 条目里：
 

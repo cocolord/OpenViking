@@ -684,7 +684,7 @@ export class OpenVikingClient {
   /** Set retrieval tags. */
   setTags(
     uri: string,
-    tags: string[],
+    tags?: string[],
     options: SetTagsOptions = {},
   ): Promise<JsonObject> {
     const body = compact({
@@ -710,7 +710,7 @@ export class OpenVikingClient {
       uri: normalizeURI(uri),
       mode: options.mode ?? "vectors_only",
       wait: options.wait ?? true,
-      dry_run: options.dryRun ?? false,
+      force: options.force || undefined,
       recursive: options.recursive ?? true,
       tags: options.tags,
       tag_mode:
@@ -719,7 +719,7 @@ export class OpenVikingClient {
           : undefined,
     });
     return this.request("POST", "/api/v1/content/reindex", {
-      body: mergeExtra(body, options.extra, ["tags", "tag_mode"]),
+      body: mergeExtra(body, options.extra, ["force", "tags", "tag_mode"]),
     });
   }
 

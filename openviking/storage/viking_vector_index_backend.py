@@ -1925,11 +1925,6 @@ class VikingVectorIndexBackend:
         parse_duration_ms(
             events_time_decay_protection, parameter_name="events_time_decay_protection"
         )
-        if context_type not in (None, "memory") or (level is not None and 2 not in level):
-            return await self._search_retrieval_scope(
-                ctx, query_vector, sparse_query_vector, scope_filter, limit, offset
-            )
-
         return await self._search_with_event_time_decay(
             ctx=ctx,
             query_vector=query_vector,
@@ -1981,76 +1976,6 @@ class VikingVectorIndexBackend:
             ctx=ctx,
         )
 
-    async def search_children_in_tenant(
-        self,
-        ctx: RequestContext,
-        parent_uri: str,
-        query_vector: Optional[List[float]],
-        sparse_query_vector: Optional[Dict[str, float]] = None,
-        context_type: Optional[str] = None,
-        target_directories: Optional[List[str]] = None,
-        extra_filter: Optional[FilterExpr | Dict[str, Any]] = None,
-        limit: int = 10,
-        events_time_decay_protection: Optional[str] = None,
-        request_now: Optional[datetime] = None,
-    ) -> List[Dict[str, Any]]:
-        # TODO：Better Alternative to Current Temporary Fix
-
-        # If parent_uri is already under the requested target_directories,
-        # adding a redundant scope prefix filter can slow down the backend.
-        # Keep tenant/context filters but skip target_directories in that case.
-        effective_target_directories = target_directories
-        if target_directories:
-            parent_norm = parent_uri.rstrip("/")
-            for target_dir in target_directories:
-                if not target_dir:
-                    continue
-                target_norm = target_dir.rstrip("/")
-                if parent_norm == target_norm or parent_norm.startswith(target_norm + "/"):
-                    effective_target_directories = None
-                    break
-
-        acl_enabled = await self._acl_enabled(ctx)
-        merged_filter = self._merge_filters(
-            PathScope("uri", parent_uri, depth=1),
-            self._build_scope_filter(
-                ctx=ctx,
-                context_type=context_type,
-                target_directories=effective_target_directories,
-                extra_filter=extra_filter,
-                acl_enabled=acl_enabled,
-            ),
-        )
-        if events_time_decay_protection is None:
-            return await self.search(
-                query_vector=query_vector,
-                sparse_query_vector=sparse_query_vector,
-                filter=merged_filter,
-                limit=limit,
-                output_fields=RETRIEVAL_OUTPUT_FIELDS,
-                ctx=ctx,
-            )
-
-        parse_duration_ms(
-            events_time_decay_protection, parameter_name="events_time_decay_protection"
-        )
-        if context_type not in (None, "memory"):
-            return await self._search_retrieval_scope(
-                ctx, query_vector, sparse_query_vector, merged_filter, limit
-            )
-
-        return await self._search_with_event_time_decay(
-            ctx=ctx,
-            query_vector=query_vector,
-            sparse_query_vector=sparse_query_vector,
-            scope_filter=merged_filter,
-            limit=limit,
-            offset=0,
-            events_time_decay_protection=events_time_decay_protection,
-            request_now=request_now,
-            defer_fusion=True,
-        )
-
     async def _search_with_event_time_decay(
         self,
         *,
@@ -2066,23 +1991,10 @@ class VikingVectorIndexBackend:
     ) -> List[Dict[str, Any]]:
         request_now = request_now or datetime.now(timezone.utc)
         final_window = limit + offset
-        event_filter = self._merge_filters(
-            scope_filter,
-            Eq("context_type", "memory"),
-            Eq("level", 2),
-            Eq("search_tags", "memory_type=events"),
-        )
+        event_filter = self._merge_filters(scope_filter, Eq("search_tags", "memory_type=events"))
         non_event_filter = self._merge_filters(
             scope_filter,
-            Or(
-                [
-                    In("context_type", ["resource", "skill"]),
-                    In("level", [0, 1]),
-                    RawDSL(
-                        {"op": "must_not", "field": "search_tags", "conds": ["memory_type=events"]}
-                    ),
-                ]
-            ),
+            RawDSL({"op": "must_not", "field": "search_tags", "conds": ["memory_type=events"]}),
         )
         # The adapter owns backend parameters and the engine owns amplification.
         # Deferred calls request the retriever's semantic/rerank window unchanged.
@@ -2297,8 +2209,10 @@ class VikingVectorIndexBackend:
         ctx: RequestContext,
         batch_size: int = 100,
         output_fields: Optional[List[str]] = None,
+        recursive: bool = True,
+        include_direct_children: bool = False,
     ) -> Dict[str, Dict[str, Any]]:
-        """Strictly load lightweight L0/L1/L2 metadata below a resource root."""
+        """Strictly load lightweight L0/L1/L2 metadata in a URI scope."""
         projection = list(
             dict.fromkeys(
                 [
@@ -2311,7 +2225,11 @@ class VikingVectorIndexBackend:
         scope = And(
             [
                 Eq("account_id", ctx.account_id),
-                PathScope("uri", canonical_uri, depth=-1),
+                PathScope(
+                    "uri",
+                    canonical_uri,
+                    depth=-1 if recursive else 1 if include_direct_children else 0,
+                ),
                 In("level", [0, 1, 2]),
             ]
         )

@@ -4,8 +4,8 @@
  * stdio -> streamable-HTTP MCP proxy for the OpenViking DSH bundle.
  *
  * DSH's MCP bridge starts this process as a local stdio MCP server. The proxy
- * resolves its connection through the same `resolveConfig()` as the in-process
- * runtime, from the child environment the bundle builds in `mcp.mjs`: DSH
+ * resolves its connection and diagnostics through the same `resolveConfig()`
+ * as the in-process runtime, from the child environment built in `mcp-env.mjs`: DSH
  * scrubs credential-shaped names out of what it inherits, and values that came
  * from the Cordis patch are invisible to a subprocess otherwise.
  */
@@ -25,8 +25,8 @@ export function readProxyConfig(env = process.env, cwd = process.cwd()) {
     // still decides whether the proxy may send it. In broad recall mode the
     // actor header must stay unset; otherwise a process launched in workspace A
     // narrows MCP searches for a session whose runtime is serving workspace B.
-    debug: Boolean(env.OV_DEBUG_LOG),
-    debugLogPath: env.OV_DEBUG_LOG || "",
+    debug: env.OV_DEBUG_LOG ? true : cfg.debug,
+    debugLogPath: env.OV_DEBUG_LOG || cfg.debugLogPath,
   });
 }
 

@@ -157,8 +157,6 @@ Rerank has no separate `enabled` field. It becomes available when the required p
 ```json
 {
   "retrieval": {
-    "hotness_alpha": 0,
-    "score_propagation_alpha": 1,
     "enable_intent": true
   }
 }
@@ -168,8 +166,6 @@ Rerank has no separate `enabled` field. It becomes available when the required p
 
 | Field | Type / values | Default | Purpose |
 |---|---|---|---|
-| `hotness_alpha` | number, `0`–`1` | `0` | Hotness score weight; `0` disables it |
-| `score_propagation_alpha` | number, `0`–`1` | `1` | Child-result score weight in hierarchical retrieval |
 | `enable_intent` | boolean | `true` | Run intent analysis/query planning when `session_id` is present |
 
 Search and Find requests default to `limit: 10`; override the limit on each API or SDK request. `retrieval.enable_intent` controls LLM query planning for session-aware Search, while result reranking is enabled only when `rerank` has a usable provider configuration.
@@ -233,6 +229,14 @@ This setting controls queue-job concurrency. It is separate from `vlm.media.max_
 
 `max_concurrent` controls independent AddResource jobs. `file_operation_concurrency` controls file commit and fallback comparison work within one AddResource job, while `file_vectorization_concurrency` controls files within one vectors-only directory job.
 
+### `queue_workers.reindex`
+
+| Field | Type | Default | Description |
+|---|---|---:|---|
+| `max_concurrent` | integer | `4` | Number of complete Reindex root jobs consumed concurrently; must be greater than `0`; requires a server restart after changes |
+
+This setting limits independent asynchronous reindex requests. URI-overlapping requests remain protected by path locks, while VLM and embedding work continue to use their respective concurrency limits.
+
 ### `queue_workers.session_commit`
 
 | Field | Type | Default | Description |
@@ -262,7 +266,7 @@ When `base_url` is configured, OV sends the current user's OV API key in `X-API-
 
 | Field | Type | Default | Description |
 |---|---|---:|---|
-| `file_vectorization_concurrency` | integer | `8` | Number of files concurrently read, prepared, and enqueued by one `vectors_only` reindex task; must be greater than `0`; values above the internal safety limit of `64` are capped; requires a server restart after changes |
+| `file_vectorization_concurrency` | integer | `8` | Number of files concurrently read, fingerprinted, and prepared by one resource/skill reindex task; must be greater than `0`; values above the internal safety limit of `64` are capped; requires a server restart after changes |
 
 ## HTTP Server Settings
 

@@ -53,7 +53,7 @@ After using it for a while, start a new conversation and ask about something you
 
 Start `dsh --profile web` and open a conversation. You should see an OpenViking context injection at the top of the session, and the model should have `mcp__openviking__*` tools available. Ask it about something from an earlier session to confirm recall.
 
-If nothing appears, set `OV_DEBUG_LOG=/tmp/ov-dsh.log` and check that file.
+For MCP proxy diagnostics, set `OPENVIKING_DEBUG=1` and `OPENVIKING_DEBUG_LOG=/tmp/ov-dsh.log` before starting DSH, then check that file. Automatic memory callbacks use DSH's own logger. The legacy `OV_DEBUG_LOG=/tmp/ov-dsh.log` alias is still supported and takes precedence over both canonical settings.
 
 ## How it works
 
@@ -78,7 +78,9 @@ Credentials resolve from `OPENVIKING_*` environment variables, then `~/.openviki
 | `OPENVIKING_PEER_ID` | — | Explicit actor peer |
 | `OPENVIKING_WORKSPACE_PEER` | `true` | Derive a peer from each session's workspace; `0` sends no peer |
 | `OPENVIKING_RECALL_PEER_SCOPE` | `all` | `actor` isolates recall to the current workspace |
-| `OV_DEBUG_LOG` | — | Write debug logs to this path |
+| `OPENVIKING_DEBUG` | `false` | Enable MCP proxy debug logging; also requires a log path |
+| `OPENVIKING_DEBUG_LOG` | `""` | File path for MCP proxy debug logs |
+| `OV_DEBUG_LOG` | — | Legacy alias: enables MCP proxy logging and overrides the canonical debug flag and log path |
 
 Behavior knobs live in the profile's Cordis patch entry:
 

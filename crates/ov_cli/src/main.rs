@@ -1324,11 +1324,11 @@ enum Commands {
         /// Viking URI
         #[arg(value_name = "uri")]
         uri: String,
-        /// Reindex mode: vectors_only rebuilds vectors; semantic_and_vectors regenerates semantic artifacts, then vectors; prune_orphans deletes orphan vector records
+        /// Reindex mode: vectors_only rebuilds vectors; semantic_and_vectors regenerates semantic artifacts, then vectors
         #[arg(
             long,
             default_value = "vectors_only",
-            value_parser = ["vectors_only", "semantic_and_vectors", "prune_orphans"],
+            value_parser = ["vectors_only", "semantic_and_vectors"],
             value_name = "mode",
             help_heading = "Common options"
         )]
@@ -1342,9 +1342,9 @@ enum Commands {
             help_heading = "Common options"
         )]
         wait: bool,
-        /// Preview prune_orphans deletions without mutating vectors
+        /// Rebuild all selected semantic/vector data without comparing fingerprints
         #[arg(long, help_heading = "Common options")]
-        dry_run: bool,
+        force: bool,
         /// Comma-separated k=v retrieval tags for rebuilt vector records
         #[arg(long = "tags", value_delimiter = ',', value_name = "k=v", help_heading = "Common options")]
         tags: Vec<String>,
@@ -1442,7 +1442,7 @@ pub(crate) enum SnapshotCmd {
     Commit {
         #[arg(short = 'm', long)]
         message: String,
-        /// Limit to specific viking:// URIs (comma-separated); accepts files and directories. Directories are expanded recursively with the snapshot pruning rules. Omit to snapshot the full account tree.
+        /// Limit to specific viking:// URIs (comma-separated); accepts files and directories. Directories are expanded recursively with the snapshot pruning rules. Required for USER/ADMIN callers; only local ROOT mode may omit paths to snapshot the full account tree.
         #[arg(long, value_delimiter = ',')]
         paths: Option<Vec<String>>,
         #[arg(long, default_value = "main")]
@@ -3834,12 +3834,12 @@ async fn main() {
             uri,
             mode,
             wait,
-            dry_run,
+            force,
             tags,
             tag_mode,
             recursive,
         } => {
-            handlers::handle_reindex(uri, mode, wait, dry_run, tags, tag_mode, recursive, ctx).await
+            handlers::handle_reindex(uri, mode, wait, force, tags, tag_mode, recursive, ctx).await
         }
         Commands::Get { uri, local_path } => handlers::handle_get(uri, local_path, ctx).await,
         Commands::Find {
@@ -5946,9 +5946,9 @@ mod tests {
             "reindex",
             "viking://resources/demo",
             "--mode",
-            "prune_orphans",
+            "semantic_and_vectors",
             "--wait=false",
-            "--dry-run",
+            "--force",
             "--tags",
             "team=search",
             "--tag-mode",
@@ -5959,12 +5959,14 @@ mod tests {
         let cli = result.expect("reindex command should parse");
         match cli.command {
             Commands::Reindex {
+                force,
                 tags,
                 tag_mode,
                 recursive,
                 ..
             } => {
                 assert_eq!(tags, vec!["team=search"]);
+                assert!(force);
                 assert_eq!(tag_mode, "append");
                 assert!(!recursive);
             }

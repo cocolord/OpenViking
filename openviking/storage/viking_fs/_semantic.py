@@ -278,7 +278,6 @@ class _SemanticMixin:
             storage=storage,
             embedder=embedder,
             rerank_config=self.rerank_config,
-            retrieval_config=self.retrieval_config,
         )
 
         typed_query = TypedQuery(
@@ -510,7 +509,6 @@ class _SemanticMixin:
             storage=storage,
             embedder=embedder,
             rerank_config=self.rerank_config,
-            retrieval_config=self.retrieval_config,
         )
 
         async def _execute(tq: TypedQuery):

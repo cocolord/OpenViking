@@ -17,12 +17,12 @@ OpenViking provides multiple retrieval methods, including simple vector similari
 The core retrieval pipeline is as follows:
 
 ```
-Query → Intent Analysis (search only) → Vector Search (L0) → Rerank (L1) → Results
+Query → Intent Analysis (search only, optional) → Global Vector Search → Rerank (search only, optional) → Results
 ```
 
 1. **Intent Analysis** (search only): Understand query intent, expand queries
 2. **Vector Search**: Find candidates using embeddings
-3. **Rerank**: Re-score using content for better accuracy
+3. **Rerank**: THINKING with a usable reranker reranks `2 × limit` recalled candidates once; otherwise recall is limited to `limit` hits
 4. **Results**: Return top-k contexts
 
 ## API Reference
@@ -33,14 +33,12 @@ Basic vector similarity search without session context.
 
 #### 1. API Implementation Introduction
 
-The `find()` method performs pure vector similarity search for simple query scenarios. It uses hierarchical retrieval to search at the L0 summary level first, then matches in detail at L1/L2 levels.
+The `find()` method runs one global vector similarity search in QUICK mode for simple query scenarios. It recalls `limit` candidates and supports filtering by L0/L1/L2 through `level`.
 
 **Processing Pipeline**:
 1. Convert query text to vector
 2. Perform global vector search within specified target URI
-3. Use hierarchical retrieval strategy to recursively search relevant directories and files
-4. Optional: Use rerank model to optimize result ordering
-5. Return matched context list
+3. Apply the score threshold and return matched contexts without reranking
 
 **Code Entry Points**:
 - `openviking_cli/client/sync_http.py:SyncHTTPClient.find()` - Python SDK entry (HTTP)
@@ -375,7 +373,7 @@ The `search()` method adds session context understanding and intent analysis cap
 1. Load session context (if session_id is provided)
 2. Analyze query intent, understand actual needs combined with conversation history
 3. Expand queries to improve recall rate
-4. Execute same hierarchical retrieval pipeline as `find()`
+4. Run one global search per query; with a usable reranker, recall `2 × limit` candidates and rerank once to return at most `limit` results, otherwise recall `limit` hits directly
 5. Return search results with query plan
 
 **Code Entry Points**:
@@ -411,13 +409,13 @@ The `search()` method adds session context understanding and intent analysis cap
 
 `search()` uses the same target resolution and explicit tag filtering rules as `find()`, including the peer collection filter selected by `X-OpenViking-Actor-Peer` or SDK `actor_peer_id`. When `image_url` is provided, `search()` uses direct image retrieval and skips session query planning.
 
-Event time decay applies to semantic `find()` and both `search(mode="list")` and `search(mode="context")` at L2 under `viking://user/{user_id}/memories/events/` and `viking://user/{user_id}/peers/{peer_id}/memories/events/`. It does not affect other memory types, L0/L1, query-less filter-only `find()`, `recall`, `grep`, or `glob`. Enabled event results use `score = origin_score * time_score` and expose `origin_score` and `time_score` in list responses; context mode uses the resulting score while assembling its candidates. The CLI labels list-result scores as semantic, time, and final scores. Inside the protection period `time_score` is 1, so the original score is unchanged. Time distance follows the VikingDB exponential decay operator, using the absolute difference from the request time. Time is read from the existing indexed `updated_at` field; no reindex or timestamp rewrite is required. Local fusion preserves the original score for missing or invalid timestamps; cloud fusion uses the indexed date-time field and the backend operator. The curve is owned by the server; callers only provide the per-request protection period. No `ov.conf` or `ovcli.conf` change is required.
+Event time decay applies to results tagged `memory_type=events` in semantic `find()` and both `search(mode="list")` and `search(mode="context")`. Memory extraction writes this tag on user/peer event L2 records; retrieval identifies events by the tag rather than inferring the type from a URI or level. Untagged/non-event results, query-less filter-only `find()`, `recall`, `grep`, and `glob` are unaffected. Enabled event results use `score = origin_score * time_score` and expose `origin_score` and `time_score` in list responses; context mode uses the resulting score while assembling its candidates. The CLI labels list-result scores as semantic, time, and final scores. Inside the protection period `time_score` is 1, so the original score is unchanged. Time distance follows the VikingDB exponential decay operator, using the absolute difference from the request time. Time is read from the existing indexed `updated_at` field; no reindex or timestamp rewrite is required. Local fusion preserves the original score for missing or invalid timestamps; cloud fusion uses the indexed date-time field and the backend operator. The curve is owned by the server; callers only provide the per-request protection period. No `ov.conf` or `ovcli.conf` change is required.
 
-New and updated memories produced by memory extraction automatically receive a `memory_type=<type>` search tag. With decay enabled, both local and cloud backends recall tagged event L2 memories separately and merge them with the remaining results, without requiring a peer ID. Existing data is not backfilled; untagged memories keep their original scores. Direct content refreshes and ordinary tag updates preserve the existing memory type without inferring it from the URI.
+New and updated memories produced by memory extraction automatically receive a `memory_type=<type>` search tag. With decay enabled, both local and cloud backends recall records tagged `memory_type=events` separately and merge them with the complementary untagged/non-event branch; both branches preserve the original scope, permission and level filters, without requiring a peer ID. Existing data is not backfilled; untagged memories keep their original scores. Direct content refreshes and ordinary tag updates preserve the existing memory type without inferring it from the URI.
 
 The local vector engine expands the requested event window by at most 3x internally (capped at 100,000), computes decay and sorts in C++, then returns top-k before any abstract or payload fields are fetched. This is a bounded candidate approximation, so events outside that semantic window are not guaranteed to be promoted. The HTTP vector service forwards the same native rule. Cloud adapters use VikingDB score fusion and request only the required limit plus offset, without a fixed 100,000-input override. cuVS collections use their native scalar/vector index for decay requests; openGauss performs bounded recall, decay sorting and pagination in SQL before joining payloads.
 
-When model rerank or parent-score propagation is needed, the retriever explicitly requests a separate semantic candidate window. The engine preserves semantic order and attaches time scores without amplification or decay-based truncation. The retriever then runs model rerank (when enabled), propagates the parent score for recursive results, multiplies by time_score exactly once, and applies the final threshold/top-k. Global leaf prefetch has no parent score and therefore fuses immediately after rerank.
+When model rerank is enabled, the retriever requests a separate semantic candidate window of `2 × limit`. Both branches merge before one model rerank. The engine preserves semantic order and attaches time scores without amplification or decay-based truncation. After rerank (or fallback to vector scores), event scores are multiplied by `time_score` exactly once, before the final threshold and top-k. Parent-directory scores and hotness are not mixed into the result.
 
 #### 3. Usage Examples
 

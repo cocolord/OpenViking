@@ -49,12 +49,23 @@ accepted by current OpenViking servers.
 
 ## Migration coordination
 
-After this directory is merged, submit a Hermes catalog entry with:
+Before the catalog cutover, submit a Hermes catalog entry with:
 
 - `name: openviking`
 - `repo: https://github.com/volcengine/OpenViking`
 - `subdir: examples/hermes-plugin`
 - `sha`: the full reviewed OpenViking commit SHA
+- `category: memory`
+- `tier: community`
+
+Include the required `capabilities` block for tools, hooks, middleware, and
+environment variables. Its declarations must match the plugin at the reviewed
+SHA. Follow the [Hermes catalog entry schema](https://github.com/NousResearch/hermes-agent/blob/main/plugin-catalog/README.md#entry-schema)
+and validate the pinned installation directory:
+
+```bash
+hermes plugins validate /path/to/hermes-profile/plugins/openviking
+```
 
 Publish the catalog entry and validate migration before Hermes removes its
 bundled provider. Hermes PR [#114569](https://github.com/NousResearch/hermes-agent/pull/114569)

@@ -1052,7 +1052,7 @@ async def test_decay_applies_under_bare_user_target():
 
 
 @pytest.mark.asyncio
-async def test_decay_applies_to_children_of_a_peer_event_directory():
+async def test_decay_applies_to_scoped_peer_event_directory():
     backend = _backend_with_type("local")
     calls = []
 
@@ -1073,9 +1073,9 @@ async def test_decay_applies_to_children_of_a_peer_event_directory():
         return _adapter_results(await fake_search(**kwargs), kwargs)
 
     backend.search = adapter_search
-    results = await backend.search_children_in_tenant(
+    results = await backend.search_in_tenant(
         ctx=_ctx(),
-        parent_uri="viking://user/alice/peers/peer-a/memories/events",
+        target_directories=["viking://user/alice/peers/peer-a/memories/events"],
         query_vector=[1.0],
         context_type="memory",
         limit=2,
@@ -1266,3 +1266,37 @@ async def test_local_tag_split_does_not_boost_fresh_events(vector_backend_factor
         assert "_time_score" not in first[0]
     finally:
         await backend.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "context_type,level", [(None, None), ("memory", [0, 1]), ("resource", [2])]
+)
+async def test_decay_split_adds_only_complementary_event_tag_predicates(context_type, level):
+    backend = _backend_with_type("local")
+    calls = []
+
+    async def search(**kwargs):
+        calls.append(kwargs)
+        return []
+
+    backend.search = search
+    ctx = _ctx()
+    extra = Eq("search_tags", "team=search")
+    await backend.search_in_tenant(
+        ctx,
+        [1.0],
+        context_type=context_type,
+        level=level,
+        extra_filter=extra,
+        events_time_decay_protection="0",
+        limit=2,
+    )
+    scope = _build(ctx, None, context_type=context_type, level=level, extra_filter=extra)
+    assert len(calls) == 2
+    assert calls[0]["filter"] == backend._merge_filters(
+        scope, RawDSL({"op": "must_not", "field": "search_tags", "conds": ["memory_type=events"]})
+    )
+    assert calls[1]["filter"] == backend._merge_filters(
+        scope, Eq("search_tags", "memory_type=events")
+    )

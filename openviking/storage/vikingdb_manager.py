@@ -157,6 +157,7 @@ class VikingDBManager(VikingVectorIndexBackend):
             logger.error(f"Error getting embedding queue size: {e}")
             return 0
 
+
 class VikingDBManagerProxy:
     """
     租户绑定的 VikingDBManager 代理。
@@ -472,34 +473,6 @@ class VikingDBManagerProxy:
             limit=limit,
             offset=offset,
         )
-
-    async def search_children_in_tenant(
-        self,
-        parent_uri: str,
-        query_vector: Optional[List[float]],
-        sparse_query_vector: Optional[Dict[str, float]] = None,
-        context_type: Optional[str] = None,
-        target_directories: Optional[List[str]] = None,
-        extra_filter: Optional[FilterExpr | Dict[str, Any]] = None,
-        limit: int = 10,
-        events_time_decay_protection: Optional[str] = None,
-        request_now: Optional[datetime] = None,
-    ) -> List[Dict[str, Any]]:
-        kwargs: Dict[str, Any] = {
-            "parent_uri": parent_uri,
-            "query_vector": query_vector,
-            "sparse_query_vector": sparse_query_vector,
-            "context_type": context_type,
-            "target_directories": target_directories,
-            "extra_filter": extra_filter,
-            "limit": limit,
-        }
-        if events_time_decay_protection is not None:
-            kwargs.update(
-                events_time_decay_protection=events_time_decay_protection,
-                request_now=request_now,
-            )
-        return await self._manager.search_children_in_tenant(self._ctx, **kwargs)
 
     async def get_context_by_uri(
         self,
