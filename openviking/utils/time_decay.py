@@ -13,8 +13,6 @@ from typing import Any, Optional
 
 from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
 
-DEFAULT_TIME_DECAY_CANDIDATE_FACTOR = 3
-MAX_TIME_DECAY_CANDIDATES = 100_000
 # This curve is an internal ranking contract; it is intentionally not part of
 # ov.conf or ovcli.conf.
 EVENT_TIME_DECAY_SCALE = "7d"
@@ -134,16 +132,3 @@ def build_time_decay_post_process_ops(
             "addition_score": [addition],
         }
     ]
-
-
-def time_decay_candidate_limit(limit: int, offset: int = 0) -> int:
-    """Return the bounded candidate budget used before local score fusion."""
-    final_window = limit + offset
-    if final_window > MAX_TIME_DECAY_CANDIDATES:
-        raise ValueError(
-            f"time-decay search limit + offset must not exceed {MAX_TIME_DECAY_CANDIDATES}"
-        )
-    return min(
-        final_window * DEFAULT_TIME_DECAY_CANDIDATE_FACTOR,
-        MAX_TIME_DECAY_CANDIDATES,
-    )

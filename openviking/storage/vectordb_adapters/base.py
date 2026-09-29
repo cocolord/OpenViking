@@ -487,7 +487,7 @@ class CollectionAdapter(ABC):
         advance: Optional[Dict[str, Any]] = None,
     ) -> list[Dict[str, Any]]:
         decay_request = (advance or {}).get("time_decay")
-        if decay_request is not None:
+        if decay_request is not None and self.mode != "opengauss":
             from openviking.utils.time_decay import (
                 build_time_decay_fusion_spec,
                 build_time_decay_post_process_ops,
@@ -496,7 +496,7 @@ class CollectionAdapter(ABC):
 
             protection = decay_request["protection"]
             origin = parse_iso_datetime(decay_request["origin"])
-            if self.mode in {"local", "cuvs", "http", "opengauss"}:
+            if self.mode in {"local", "cuvs", "http"}:
                 spec = build_time_decay_fusion_spec(protection=protection, origin=origin)
                 advance = {
                     "time_decay": {
