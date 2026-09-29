@@ -940,10 +940,13 @@ def _write_env_vars(env_path: Path, env_writes: dict, remove_keys: tuple[str, ..
             existing = fh.read()
     else:
         existing = ""
-    existing_lines = existing.splitlines()
+    # Only physical line endings separate records; other separators belong to values.
+    existing_lines = re.split(r"\r\n|\r|\n", existing)
+    if existing_lines[-1] == "":
+        existing_lines.pop()
     # Adopt the file's own line ending instead of the platform default: writing
     # one variable must not rewrite every untouched line from LF to CRLF.
-    eol = "\r\n" if "\r\n" in existing else "\n"
+    eol = "\r\n" if "\r\n" in existing else "\n"  # Mixed endings use CRLF if present.
     updated_keys = set()
     new_lines = []
     for line in existing_lines:

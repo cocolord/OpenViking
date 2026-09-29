@@ -187,18 +187,28 @@ type UpdateWatchOptions struct {
 
 // ListOptions controls List.
 type ListOptions struct {
-	Simple        bool
-	Recursive     bool
-	Output        string
-	AbsLimit      int
-	ShowAllHidden bool
-	NodeLimit     int
-	Offset        int
-	Limit         int
-	SortBy        string
-	SortOrder     string
-	Tags          []string
-	IncludeTags   bool
+	Simple          bool
+	Recursive       bool
+	Output          string
+	AbsLimit        int
+	IncludeAbstract *bool
+	IncludeOverview *bool
+	OverviewLimit   int
+	ShowAllHidden   bool
+	NodeLimit       int
+	Offset          int
+	Limit           int
+	SortBy          string
+	SortOrder       string
+	ExtraFields     []string
+	Tags            []string
+	IncludeTags     bool
+}
+
+// ListPage contains a page of directory entries and pagination metadata.
+type ListPage struct {
+	Result  []any
+	HasMore bool
 }
 
 // TreeOptions controls Tree.
@@ -214,8 +224,15 @@ type TreeOptions struct {
 	LevelLimit      *int
 	Offset          int
 	Limit           int
+	ExtraFields     []string
 	Tags            []string
 	IncludeTags     bool
+}
+
+// TreePage contains a page of tree nodes and pagination metadata.
+type TreePage struct {
+	Result  []map[string]any
+	HasMore bool
 }
 
 // RemoveOptions controls Remove.

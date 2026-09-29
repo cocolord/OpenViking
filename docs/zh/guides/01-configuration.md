@@ -769,7 +769,9 @@ LiteLLM 的 Bedrock bearer-token API-key 鉴权，请设置 `forward_api_key=tru
 
 **自定义请求 Body**
 
-对于接受 provider 专有 JSON body 字段的 OpenAI 兼容 provider，可以通过 `extra_request_body` 配置。OpenViking 会把这些字段合并到 OpenAI SDK 或 LiteLLM 发送的 `extra_body` 中：
+通过 `extra_request_body` 配置 provider 专有 JSON body 字段。OpenAI 兼容路由使用 SDK 的 `extra_body`；LiteLLM Anthropic 路由将 `thinking`、`output_config` 等原生选项直接传给 LiteLLM，使其进入请求 body 顶层。LiteLLM 仍会校验模型是否支持这些选项。在 Anthropic 路由中，LiteLLM 控制参数名（包括 `api_key`、`api_base`、`metadata`、`mock_response`）以及调用自身管理的字段（`model`、`messages`、`tools`、`tool_choice`、`stream`、`timeout` 和请求头）会报错，不会覆盖调用。凭据和路由请使用各自的专用配置。
+
+例如，关闭 Ollama 的思考模式：
 
 ```json
 {

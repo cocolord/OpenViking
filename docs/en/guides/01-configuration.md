@@ -804,7 +804,9 @@ Common use cases:
 
 **Custom Request Body**
 
-For OpenAI-compatible providers that accept provider-specific JSON body fields, add them via `extra_request_body`. OpenViking merges these fields into the `extra_body` sent by the OpenAI SDK or LiteLLM:
+Use `extra_request_body` for provider-specific JSON body fields. OpenAI-compatible routes use SDK `extra_body`. LiteLLM Anthropic routes pass native options such as `thinking` and `output_config` directly to LiteLLM, so they reach the top-level request body. LiteLLM still validates model support for these options. On Anthropic routes, LiteLLM control names (including `api_key`, `api_base`, `metadata`, and `mock_response`) and call-owned fields (`model`, `messages`, `tools`, `tool_choice`, `stream`, `timeout`, and headers) are rejected instead of overriding the call. Configure credentials and routing through their dedicated settings.
+
+For example, to disable thinking on Ollama:
 
 ```json
 {
