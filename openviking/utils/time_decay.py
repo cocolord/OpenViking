@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
-"""Event time-decay validation and score fusion helpers."""
+"""Event time-decay validation and engine parameter translation."""
 
 from __future__ import annotations
 
@@ -85,29 +85,6 @@ class TimeDecayFusionSpec:
         if not 0.0 < self.decay < 1.0:
             raise ValueError("time-decay decay must be in (0, 1)")
         object.__setattr__(self, "origin_ms", _datetime_to_epoch_ms(self.origin_ms))
-
-    def time_scores(self, source_times: list[Any]) -> list[Optional[float]]:
-        """Deserialize timestamps, then compute the whole batch in C++."""
-        from openviking.storage.vectordb import engine
-
-        timestamps = []
-        for source_time in source_times:
-            try:
-                timestamps.append(_datetime_to_epoch_ms(source_time))
-            except (TypeError, ValueError, OverflowError):
-                timestamps.append(None)
-        return engine.time_decay_scores(
-            timestamps, self.origin_ms, self.offset_ms, self.scale_ms, self.decay
-        )
-
-
-def rank_time_decay_scores(
-    scores: list[float], time_scores: list[Optional[float]], limit: int
-) -> list[tuple[int, float]]:
-    """Return candidate indices and fused scores in native top-k order."""
-    from openviking.storage.vectordb import engine
-
-    return engine.rank_time_decay(scores, time_scores, limit)
 
 
 def build_time_decay_fusion_spec(

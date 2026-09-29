@@ -21,7 +21,7 @@ from openviking.storage.expr import FilterExpr
 from openviking.storage.vikingdb_manager import VikingDBManager, VikingDBManagerProxy
 from openviking.telemetry import get_current_telemetry
 from openviking.utils.tags import normalize_search_tags
-from openviking.utils.time_decay import parse_duration_ms, rank_time_decay_scores
+from openviking.utils.time_decay import parse_duration_ms
 from openviking.utils.token_estimation import (
     estimate_text_tokens,
     truncate_text_to_token_budget,
@@ -126,7 +126,6 @@ class HierarchicalRetriever:
             decay_kwargs = {
                 "events_time_decay_protection": events_time_decay_protection,
                 "request_now": request_now or datetime.now(timezone.utc),
-                "for_rerank": use_rerank,
             }
         if image_query and level is None:
             level = [2]
@@ -189,7 +188,8 @@ class HierarchicalRetriever:
         telemetry.count("vector.scored", len(vector_results))
         telemetry.count("vector.scanned", len(vector_results))
 
-        # Keep the highest vector-scored hit for each URI before reranking.
+        # Recall scores already include event decay from the vector engine.
+        # Keep the highest-scored hit for each URI before model reranking.
         collected_by_uri: Dict[str, Dict[str, Any]] = {}
         for result in vector_results:
             uri = result.get("uri", "")
@@ -212,19 +212,6 @@ class HierarchicalRetriever:
                 scores,
             )
 
-        native_decay_ranking = rerank_used and events_time_decay_protection is not None
-        if native_decay_ranking:
-            # Deferred recall preserves semantic scores. Fuse once after model
-            # reranking (including fallback). C++ owns fusion, sorting and top-k.
-            for candidate, score in zip(candidates, scores, strict=True):
-                if "_origin_score" in candidate:
-                    candidate["_origin_score"] = score
-            ranked = rank_time_decay_scores(
-                scores, [candidate.get("_time_score") for candidate in candidates], limit
-            )
-            candidates = [candidates[index] for index, _ in ranked]
-            scores = [score for _, score in ranked]
-
         # A low vector score can still rerank highly, so filter only after reranking.
         candidates = [
             {**candidate, "_final_score": score}
@@ -232,9 +219,7 @@ class HierarchicalRetriever:
             if self._passes_threshold(score, effective_threshold, score_gte)
         ]
         telemetry.count("vector.passed", len(candidates))
-        matched = await self._convert_to_matched_contexts(
-            candidates, ctx=ctx, sort_by_score=not native_decay_ranking
-        )
+        matched = await self._convert_to_matched_contexts(candidates, ctx=ctx)
         final = matched[:limit]
 
         elapsed_ms = (time.monotonic() - t0) * 1000
@@ -324,8 +309,6 @@ class HierarchicalRetriever:
         self,
         candidates: List[Dict[str, Any]],
         ctx: RequestContext,
-        *,
-        sort_by_score: bool = True,
     ) -> List[MatchedContext]:
         """Convert candidates to contexts ordered by vector or rerank score."""
         results = []
@@ -362,8 +345,7 @@ class HierarchicalRetriever:
                 )
             )
 
-        if sort_by_score:
-            results.sort(key=lambda x: x.score, reverse=True)
+        results.sort(key=lambda x: x.score, reverse=True)
         return results
 
     @classmethod

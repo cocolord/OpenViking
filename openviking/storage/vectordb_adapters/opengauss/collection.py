@@ -1118,14 +1118,10 @@ class OpenGaussCollection(ICollection):
             if spec.field not in self._date_time_fields:
                 raise ValueError("Time-decay field must be a date_time column")
             quoted = _quote_identifier(spec.field)
-            deferred = time_decay.get("defer_fusion", False)
-            candidate_limit = (
-                limit + offset if deferred else time_decay_candidate_limit(limit, offset)
-            )
+            candidate_limit = time_decay_candidate_limit(limit, offset)
             similarity = {"cosine": "1.0 - _distance", "ip": "-_distance"}.get(
                 distance_metric, "1.0 / (1.0 + GREATEST(_distance, 0.0))"
             )
-            final_score = "_origin_score" if deferred else "_origin_score * _time_score"
             # Keep only IDs, distance and date in the ANN window; join payloads
             # after decay sorting and pagination inside the database.
             sql = f"""
@@ -1139,7 +1135,7 @@ class OpenGaussCollection(ICollection):
                            EXP(%s * GREATEST(0.0, ABS(%s - {quoted}) - %s)) END AS _time_score
                     FROM candidates
                 ), ranked AS (
-                    SELECT *, ({final_score}) AS _final_score FROM scored
+                    SELECT *, (_origin_score * _time_score) AS _final_score FROM scored
                     ORDER BY _final_score DESC, id LIMIT %s OFFSET %s
                 ), payloads AS (SELECT {select_cols} FROM "{self._name}")
                 SELECT payloads.*, ranked._origin_score, ranked._time_score, ranked._final_score

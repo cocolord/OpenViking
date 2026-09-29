@@ -286,6 +286,7 @@ class MatchedContext:
     score: float = 0.0
     match_reason: str = ""
     search_tags: List[str] = field(default_factory=list)
+    # Recall-stage vector score and time factor, retained after model rerank.
     origin_score: Optional[float] = None
     time_score: Optional[float] = None
 

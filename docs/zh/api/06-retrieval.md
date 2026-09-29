@@ -411,13 +411,15 @@ openviking find "红色海报风格" --image ./poster.png --uri "viking://resour
 
 `search()` 使用和 `find()` 相同的目标解析和显式标签过滤规则，包括由 `X-OpenViking-Actor-Peer` 或 SDK `actor_peer_id` 选择的 peer 集合过滤。提供 `image_url` 时，`search()` 会直接执行图片检索并跳过会话 query planning。
 
-事件时间衰减作用于语义 `find()`、`search(mode="list")` 和 `search(mode="context")` 中带 `memory_type=events` 标签的结果。记忆提取流程将该标签写入 user / peer 事件的 L2 记录；检索按标签判断，不从 URI 或层级推断事件类型。无事件标签的结果、无 query 的纯过滤 `find()`、`recall`、`grep` 和 `glob` 不受影响。启用后按 `score = origin_score * time_score` 融合；context 模式使用该最终分组装候选。保护期内 `time_score` 为 1，原分不变；时间距离与 VikingDB 指数衰减算子一致，取时间戳与请求时间的绝对差。list 响应中的 event 结果额外返回 `origin_score` 和 `time_score`，CLI 分别展示为 semantic、time 和 final 分。时间取自已有索引的 `updated_at` 字段，无需重新索引或改写时间戳；本地计算遇到缺失或非法时间时保持原分；云端使用索引中的日期时间字段和后处理算子。衰减曲线由服务端内部维护，调用方只需按请求传入保护期，无需修改 `ov.conf` 或 `ovcli.conf`。
+事件时间衰减作用于语义 `find()`、`search(mode="list")` 和 `search(mode="context")` 中带 `memory_type=events` 标签的结果。记忆提取流程将该标签写入 user / peer 事件的 L2 记录；检索按标签判断，不从 URI 或层级推断事件类型。无事件标签的结果、无 query 的纯过滤 `find()`、`recall`、`grep` 和 `glob` 不受影响。事件召回阶段由向量引擎将原向量分乘以 `time_score`；响应中的 `score` 是最终检索分数，开启模型 rerank 时使用模型分。context 模式按最终分组装候选。保护期内 `time_score` 为 1，原分不变；时间距离与 VikingDB 指数衰减算子一致，取时间戳与请求时间的绝对差。list 响应中的 event 结果额外返回 `origin_score` 和 `time_score`，CLI 分别展示为 semantic、time 和 final 分。时间取自已有索引的 `updated_at` 字段，无需重新索引或改写时间戳；本地计算遇到缺失或非法时间时保持原分；云端使用索引中的日期时间字段和后处理算子。衰减曲线由服务端内部维护，调用方只需按请求传入保护期，无需修改 `ov.conf` 或 `ovcli.conf`。
 
 由记忆提取流程新生成或更新的记忆会自动写入 `memory_type=<类型>` 检索标签。启用衰减时，本地和云端均将按是否带 `memory_type=events` 标签拆成互斥且完整覆盖原范围的两路，再合并排序；两路均保留原 scope 的权限、目录和 level 限制，无需指定 peer id。存量数据不补标签，无标签记忆保持原分。直接内容刷新和普通标签更新保留已有类型，不从 URI 推断或重设类型。
 
 本地向量引擎按所需 event 条数在内部最多放大 3 倍候选（上限 100,000），在 C++ 中计算衰减并排序，截取 top-k 后才读取摘要等字段。这是有界候选近似，不能保证将语义候选窗口以外的事件提升进结果。HTTP 向量服务透传同一规则；云端 Adapter 使用 VikingDB 分数融合，仅请求 limit + offset，不设置固定 100,000 条输入预算。cuVS 集合的衰减请求使用其原生标量/向量索引；openGauss 在 SQL 内完成有界召回、衰减排序和分页，再关联内容字段。
 
-启用模型 rerank 时，Retriever 请求 `2 × limit` 的独立语义候选窗口，两路合并后统一执行一次模型 rerank。延后融合的召回保持语义顺序并附上时间分数，不额外放大、不按衰减分提前截断。模型 rerank（或失败回退到向量分数）之后，由包内 C++ 引擎将事件分数乘一次 `time_score`，统一排序所有候选并返回 top-k；Python 应用分数阈值、组装结果，不再二次排序。云端延后融合路径的时间因子也由包内 C++ 引擎计算，普通云端召回仍使用 VikingDB 算子。因此，即使使用远端向量库，模型 rerank 与时间衰减同时开启时，OpenViking 服务端也需要原生引擎扩展。最终分数不混入父目录分数或热度分。
+启用模型 rerank 时，两路各请求 `2 × limit` 条结果。事件分支在召回时已完成衰减：云端由 VikingDB 计算，开源本地由 C++ 引擎计算。两路按召回分合并，取前 `2 × limit` 条统一执行一次模型 rerank，再按模型分排序、过滤阈值并取最终结果，模型后不再衰减。模型失败时使用已经衰减过的召回分。`origin_score` 和 `time_score` 始终描述召回阶段的原向量分与时间因子，因此二者乘积不一定等于成功 rerank 后的模型分。最终分数不混入父目录分数或热度分。
+
+本地引擎的 3 倍扩召作用于事件分支请求窗口，模型的 2 倍候选窗口是另一层限制。例如最终 `limit=10` 时，两路各返回最多 20 条；本地事件引擎内部最多考虑 60 条向量候选，合并后最多 20 条进入模型。
 
 #### 3. 使用示例
 

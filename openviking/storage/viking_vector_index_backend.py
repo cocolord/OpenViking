@@ -1900,7 +1900,6 @@ class VikingVectorIndexBackend:
         offset: int = 0,
         events_time_decay_protection: Optional[str] = None,
         request_now: Optional[datetime] = None,
-        for_rerank: bool = False,
     ) -> List[Dict[str, Any]]:
         acl_enabled = await self._acl_enabled(ctx)
         scope_filter = self._build_scope_filter(
@@ -1934,7 +1933,6 @@ class VikingVectorIndexBackend:
             offset=offset,
             events_time_decay_protection=events_time_decay_protection,
             request_now=request_now,
-            defer_fusion=for_rerank,
         )
 
     async def filter_in_tenant(
@@ -1987,7 +1985,6 @@ class VikingVectorIndexBackend:
         offset: int,
         events_time_decay_protection: str,
         request_now: Optional[datetime],
-        defer_fusion: bool = False,
     ) -> List[Dict[str, Any]]:
         request_now = request_now or datetime.now(timezone.utc)
         final_window = limit + offset
@@ -1997,12 +1994,10 @@ class VikingVectorIndexBackend:
             RawDSL({"op": "must_not", "field": "search_tags", "conds": ["memory_type=events"]}),
         )
         # The adapter owns backend parameters and the engine owns amplification.
-        # Deferred calls request the retriever's semantic/rerank window unchanged.
         advance = {
             "time_decay": {
                 "protection": events_time_decay_protection,
                 "origin": request_now.isoformat(),
-                "defer_fusion": defer_fusion,
             }
         }
         remaining_results, event_results = await asyncio.gather(

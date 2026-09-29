@@ -11,7 +11,6 @@
 #include <thread>
 #include "spdlog/spdlog.h"
 #include "common/ann_utils.h"
-#include "index/time_decay.h"
 #include "index/detail/scalar/filter/op_base.h"
 #include "index/detail/scalar/filter/filter_ops.h"
 #include "index/detail/scalar/filter/sort_ops.h"
@@ -532,9 +531,7 @@ int IndexManagerImpl::perform_vector_recall(const SearchRequest& req,
     }
   }
   // The native recall owns candidate amplification; callers receive only topk.
-  const bool deferred = apply_decay && decay.HasMember("defer_fusion") &&
-      decay["defer_fusion"].IsBool() && decay["defer_fusion"].GetBool();
-  const uint32_t recall_topk = apply_decay && !deferred ? std::min(req.topk * 3u, 100000u) : req.topk;
+  const uint32_t recall_topk = apply_decay ? std::min(req.topk * 3u, 100000u) : req.topk;
   VectorRecallRequest recall_request{
       .dense_vector = req.query.data(),
       .topk = recall_topk,
@@ -558,9 +555,9 @@ int IndexManagerImpl::perform_vector_recall(const SearchRequest& req,
   }
   const auto time_values = scalar_index_->get_field_sets()->get_rangedmap_ptr(
       decay["field"].GetString());
-  const TimeDecayScorer time_score(
-      decay["origin_ms"].GetDouble(), decay["offset_ms"].GetDouble(),
-      decay["scale_ms"].GetDouble(), decay["decay"].GetDouble());
+  const double origin = decay["origin_ms"].GetDouble();
+  const double protection = decay["offset_ms"].GetDouble();
+  const double rate = std::log(decay["decay"].GetDouble()) / decay["scale_ms"].GetDouble();
   std::vector<float> fused = recall_result.scores;
   std::vector<double> time_scores(fused.size(), std::numeric_limits<double>::quiet_NaN());
   for (size_t i = 0; i < fused.size(); ++i) {
@@ -568,9 +565,15 @@ int IndexManagerImpl::perform_vector_recall(const SearchRequest& req,
     if (!time_values || offset < 0 || static_cast<uint32_t>(offset) >= time_values->size()) continue;
     const double updated = time_values->get_score_by_offset(offset);
     if (!std::isfinite(updated)) continue;
-    time_scores[i] = time_score(updated);
+    time_scores[i] = std::exp(rate * std::max(0.0, std::abs(origin - updated) - protection));
+    fused[i] *= time_scores[i];
   }
-  const auto order = fuse_and_rank_time_decay(fused, time_scores, req.topk, !deferred);
+  std::vector<size_t> order(fused.size());
+  std::iota(order.begin(), order.end(), 0);
+  std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+    return fused[a] > fused[b];
+  });
+  order.resize(std::min(order.size(), static_cast<size_t>(req.topk)));
   JsonDoc details;
   details.SetObject();
   auto& allocator = details.GetAllocator();

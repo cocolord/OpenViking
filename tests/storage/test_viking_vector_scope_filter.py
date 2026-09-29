@@ -94,14 +94,17 @@ def _adapter_results(records, kwargs):
     spec = build_time_decay_fusion_spec(
         protection=rule["protection"], origin=datetime.fromisoformat(rule["origin"])
     )
-    time_scores = spec.time_scores([item.get("updated_at") for item in records])
-    for item, time in zip(records, time_scores, strict=True):
+    # Test-only reference for the mocked vector engine. Production computes
+    # these factors inside the database, before returning the requested window.
+    for item in records:
         score = item["_score"]
         item["_origin_score"] = score
-        if time is not None:
-            item["_time_score"] = time
-        if not rule.get("defer_fusion"):
-            item["_score"] = score * time if time is not None else score
+        timestamp = item.get("updated_at")
+        if timestamp is not None:
+            age_ms = abs(spec.origin_ms - datetime.fromisoformat(timestamp).timestamp() * 1000)
+            factor = 0.5 ** (max(0, age_ms - spec.offset_ms) / spec.scale_ms)
+            item["_time_score"] = factor
+            item["_score"] = score * factor
     return records
 
 
@@ -261,7 +264,7 @@ async def test_local_scope_requests_final_window_and_accepts_engine_ranking():
     )
 
     assert max(call["limit"] for call in calls) == 1
-    assert calls[1]["advance"]["time_decay"]["defer_fusion"] is False
+    assert set(calls[1]["advance"]["time_decay"]) == {"protection", "origin"}
     assert results[0]["uri"] == "viking://user/alice/memories/events/fresh.md"
 
 
@@ -303,7 +306,7 @@ async def test_cloud_mixed_scope_splits_event_and_non_event_queries(offset):
 
 
 @pytest.mark.asyncio
-async def test_cloud_mixed_rerank_prefetch_keeps_one_origin_score_window():
+async def test_cloud_mixed_scope_merges_decayed_recall_window():
     backend = _backend_with_type("vikingdb")
 
     async def fake_search(**kwargs):
@@ -345,7 +348,6 @@ async def test_cloud_mixed_rerank_prefetch_keeps_one_origin_score_window():
         target_directories=["viking://user/alice/memories"],
         limit=3,
         events_time_decay_protection="0",
-        for_rerank=True,
         request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
     )
 
@@ -899,7 +901,7 @@ async def test_scope_leaves_capability_selection_to_account_adapter():
 
 
 @pytest.mark.asyncio
-async def test_decay_rerank_prefetch_keeps_expanded_origin_candidates():
+async def test_decay_recall_returns_fused_scores_in_requested_window():
     backend = _backend_with_type("local")
     calls = []
 
@@ -935,14 +937,13 @@ async def test_decay_rerank_prefetch_keeps_expanded_origin_candidates():
         level=[2],
         limit=3,
         events_time_decay_protection="0",
-        for_rerank=True,
         request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
     )
 
     assert calls[0]["limit"] == 3
     assert calls[0]["advance"] is None
     assert calls[0]["return_detail_info"] is False
-    assert [result["_score"] for result in results] == pytest.approx([0.9, 0.8])
+    assert [result["_score"] for result in results] == pytest.approx([0.9, 0.4])
     assert [result["_origin_score"] for result in results] == pytest.approx([0.9, 0.8])
     assert [result["_time_score"] for result in results] == pytest.approx([1.0, 0.5])
 
@@ -1093,9 +1094,8 @@ async def test_decay_applies_to_scoped_peer_event_directory():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend_type", ["local", "vikingdb", "volcengine"])
 @pytest.mark.parametrize("actor_peer_id", [None, "peer-a"])
-@pytest.mark.parametrize("for_rerank", [False, True])
 async def test_tagged_events_use_the_same_split_and_scores_across_backends(
-    backend_type, actor_peer_id, for_rerank
+    backend_type, actor_peer_id
 ):
     backend = _backend_with_type(backend_type)
     calls = []
@@ -1136,10 +1136,9 @@ async def test_tagged_events_use_the_same_split_and_scores_across_backends(
         query_vector=[1.0],
         context_type="memory",
         extra_filter=Eq("search_tags", "team=search"),
-        limit=3 if for_rerank else 2,
+        limit=2,
         events_time_decay_protection="0",
         request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
-        for_rerank=for_rerank,
     )
 
     assert len(calls) == 2
@@ -1147,14 +1146,8 @@ async def test_tagged_events_use_the_same_split_and_scores_across_backends(
         ctx, None, context_type="memory", extra_filter=Eq("search_tags", "team=search")
     )
     assert all(_contains_expr(call["filter"], expected_scope) for call in calls)
-    if for_rerank:
-        assert calls[1]["advance"]["time_decay"]["defer_fusion"] is True
-        assert [result["_score"] for result in results] == pytest.approx([0.75, 0.6, 0.2])
-        assert results[1]["_time_score"] == pytest.approx(0.5)
-        assert results[2]["_time_score"] == pytest.approx(1.0)
-    else:
-        assert [result["uri"] for result in results] == [preference["uri"], old_event["uri"]]
-        assert [result["_score"] for result in results] == pytest.approx([0.75, 0.3])
+    assert [result["uri"] for result in results] == [preference["uri"], old_event["uri"]]
+    assert [result["_score"] for result in results] == pytest.approx([0.75, 0.3])
 
 
 @pytest.mark.asyncio

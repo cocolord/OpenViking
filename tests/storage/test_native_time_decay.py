@@ -15,11 +15,10 @@ from tests.storage.test_viking_vector_scope_filter import _ctx
 
 
 @pytest.mark.asyncio
-async def test_model_rerank_uses_native_fusion_on_mixed_recalled_candidates(
-    vector_backend_factory, tmp_path, monkeypatch
+async def test_native_decay_selects_candidates_before_model_rerank(
+    vector_backend_factory, tmp_path
 ):
     from openviking.retrieve.hierarchical_retriever import HierarchicalRetriever
-    from openviking.storage.vectordb import engine
     from openviking_cli.retrieve.types import ContextType, TypedQuery
 
     backend = vector_backend_factory(
@@ -65,8 +64,6 @@ async def test_model_rerank_uses_native_fusion_on_mixed_recalled_candidates(
         model = Mock()
         model.rerank_batch.return_value = [0.9, 0.4, 0.5, 0.1]
         retriever._rerank_client = model
-        native_rank = Mock(wraps=engine._BACKEND._rank_time_decay)
-        monkeypatch.setattr(engine._BACKEND, "_rank_time_decay", native_rank)
 
         result = await retriever.retrieve(
             TypedQuery(query="recent events", context_type=ContextType.MEMORY, intent=""),
@@ -76,17 +73,19 @@ async def test_model_rerank_uses_native_fusion_on_mixed_recalled_candidates(
             request_now=origin,
         )
 
+        # The semantically strongest old event is already below the merged
+        # top-4 window after native decay and never reaches the model.
         model.rerank_batch.assert_called_once_with(
-            "recent events", [f"candidate {index}" for index in range(4)]
+            "recent events", [f"candidate {index}" for index in range(1, 5)]
         )
-        native_rank.assert_called_once_with([0.9, 0.4, 0.5, 0.1], [0.5, 1.0, None, None], 2)
         assert [item.uri for item in result.matched_contexts] == [
-            records[2]["uri"],
-            records[0]["uri"],
+            records[1]["uri"],
+            records[3]["uri"],
         ]
-        assert [item.score for item in result.matched_contexts] == pytest.approx([0.5, 0.45])
-        assert result.matched_contexts[1].origin_score == 0.9
-        assert result.matched_contexts[1].time_score == 0.5
+        assert [item.score for item in result.matched_contexts] == pytest.approx([0.9, 0.5])
+        # The local cosine index maps similarity to (1 + cosine) / 2.
+        assert result.matched_contexts[0].origin_score == pytest.approx(0.95)
+        assert result.matched_contexts[0].time_score == 1.0
     finally:
         await backend.close()
 
@@ -157,21 +156,6 @@ async def test_native_decay_bounds_candidates_and_fetches_only_final_topk(
         )
         assert one[0]["id"] == "0"
         assert one[0]["_score"] < 0.001
-        # A retriever requests its own rerank window. Native attaches time scores
-        # while preserving semantic order and does not expand/truncate that window.
-        deferred = await backend.search_in_tenant(
-            ctx=ctx,
-            query_vector=[1, 0, 0, 0],
-            context_type="memory",
-            level=[2],
-            limit=3,
-            for_rerank=True,
-            events_time_decay_protection="0",
-            request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
-        )
-        assert [r["id"] for r in deferred] == ["0", "1", "2"]
-        assert deferred[0]["_score"] == pytest.approx(1)
-        assert deferred[0]["_time_score"] < 0.001
     finally:
         await backend.close()
 

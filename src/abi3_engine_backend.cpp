@@ -12,7 +12,6 @@
 #include "common/log_utils.h"
 #include "index/common_structs.h"
 #include "index/index_engine.h"
-#include "index/time_decay.h"
 #include "store/bytes_row.h"
 #include "store/kv_store.h"
 #include "store/persist_store.h"
@@ -2008,90 +2007,7 @@ PyObject* py_store_seek_range_page(PyObject*, PyObject* args) {
   }
 }
 
-bool py_to_optional_doubles(PyObject* obj, std::vector<double>* out) {
-  const Py_ssize_t size = PySequence_Size(obj);
-  if (size < 0) return false;
-  out->reserve(static_cast<size_t>(size));
-  for (Py_ssize_t i = 0; i < size; ++i) {
-    PyObject* item = PySequence_GetItem(obj, i);
-    if (item == nullptr) return false;
-    const double value = item == Py_None
-        ? std::numeric_limits<double>::quiet_NaN() : PyFloat_AsDouble(item);
-    Py_DECREF(item);
-    if (PyErr_Occurred()) return false;
-    out->push_back(value);
-  }
-  return true;
-}
-
-PyObject* py_time_decay_scores(PyObject*, PyObject* args) {
-  PyObject* timestamps_obj = nullptr;
-  double origin, offset, scale, decay;
-  if (!PyArg_ParseTuple(args, "Odddd", &timestamps_obj, &origin, &offset,
-                        &scale, &decay)) return nullptr;
-  std::vector<double> values;
-  if (!py_to_optional_doubles(timestamps_obj, &values)) return nullptr;
-  try {
-    const vdb::TimeDecayScorer scorer(origin, offset, scale, decay);
-    call_without_gil([&]() {
-      for (auto& value : values) value = scorer(value);
-    });
-    PyObject* result = PyList_New(static_cast<Py_ssize_t>(values.size()));
-    if (result == nullptr) return nullptr;
-    for (size_t i = 0; i < values.size(); ++i) {
-      PyObject* value = std::isfinite(values[i]) ? PyFloat_FromDouble(values[i])
-                                               : Py_NewRef(Py_None);
-      if (value == nullptr) {
-        Py_DECREF(result);
-        return nullptr;
-      }
-      PyList_SetItem(result, static_cast<Py_ssize_t>(i), value);
-    }
-    return result;
-  } catch (const std::exception& exc) {
-    raise_value_error(exc.what());
-    return nullptr;
-  }
-}
-
-PyObject* py_rank_time_decay(PyObject*, PyObject* args) {
-  PyObject* scores_obj = nullptr;
-  PyObject* time_scores_obj = nullptr;
-  Py_ssize_t limit;
-  if (!PyArg_ParseTuple(args, "OOn", &scores_obj, &time_scores_obj, &limit)) return nullptr;
-  if (limit < 0) {
-    raise_value_error("limit must be non-negative");
-    return nullptr;
-  }
-  std::vector<double> scores, time_scores;
-  if (!py_to_optional_doubles(scores_obj, &scores) ||
-      !py_to_optional_doubles(time_scores_obj, &time_scores)) return nullptr;
-  try {
-    const auto order = call_without_gil([&]() {
-      return vdb::fuse_and_rank_time_decay(scores, time_scores, static_cast<size_t>(limit));
-    });
-    PyObject* result = PyList_New(static_cast<Py_ssize_t>(order.size()));
-    if (result == nullptr) return nullptr;
-    for (size_t i = 0; i < order.size(); ++i) {
-      PyObject* item = Py_BuildValue("(nd)", static_cast<Py_ssize_t>(order[i]), scores[order[i]]);
-      if (item == nullptr) {
-        Py_DECREF(result);
-        return nullptr;
-      }
-      PyList_SetItem(result, static_cast<Py_ssize_t>(i), item);
-    }
-    return result;
-  } catch (const std::exception& exc) {
-    raise_value_error(exc.what());
-    return nullptr;
-  }
-}
-
 PyMethodDef kModuleMethods[] = {
-    {"_time_decay_scores", py_time_decay_scores, METH_VARARGS,
-     "Compute time factors for a batch of timestamps."},
-    {"_rank_time_decay", py_rank_time_decay, METH_VARARGS,
-     "Fuse semantic/model scores with time factors and return ranked top-k."},
     {"_new_schema", py_new_schema, METH_VARARGS, "Create a schema handle."},
     {"_schema_get_total_byte_length", py_schema_get_total_byte_length,
      METH_VARARGS, "Read total schema byte length."},

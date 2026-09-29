@@ -14,12 +14,7 @@ from openviking.storage.vectordb_adapters.opengauss.collection import OpenGaussC
 
 
 @pytest.mark.parametrize("mode", ["local", "cuvs", "http", "vikingdb", "volcengine"])
-@pytest.mark.parametrize("deferred", [False, True])
-def test_adapter_owns_decay_parameters_and_keeps_requested_window(mode, deferred, monkeypatch):
-    from openviking.storage.vectordb import engine
-
-    native_time_scores = Mock(wraps=engine._BACKEND._time_decay_scores)
-    monkeypatch.setattr(engine._BACKEND, "_time_decay_scores", native_time_scores)
+def test_adapter_owns_decay_parameters_and_keeps_requested_window(mode):
     adapter = LocalCollectionAdapter("context", "", "default")
     adapter.mode = mode
     coll = Mock()
@@ -27,7 +22,7 @@ def test_adapter_owns_decay_parameters_and_keeps_requested_window(mode, deferred
         data=[SearchItemResult(id="one", score=0.8, fields={"updated_at": "2026-01-01T00:00:00Z"})]
     )
     adapter.get_collection = lambda: coll
-    results = adapter.query(
+    adapter.query(
         query_vector=[1],
         limit=10,
         offset=2,
@@ -35,25 +30,18 @@ def test_adapter_owns_decay_parameters_and_keeps_requested_window(mode, deferred
             "time_decay": {
                 "protection": "0",
                 "origin": "2026-01-08T00:00:00Z",
-                "defer_fusion": deferred,
             }
         },
     )
     kwargs = coll.search_by_vector.call_args.kwargs
     assert kwargs["limit"] == 10 and kwargs["offset"] == 2
     if mode in {"vikingdb", "volcengine"}:
-        if deferred:
-            assert kwargs["advance"] is None
-            assert results[0]["_score"] == 0.8
-            assert results[0]["_time_score"] == 0.5
-        else:
-            assert set(kwargs["advance"]) == {"post_process_ops"}
-            assert kwargs["advance"]["post_process_ops"][0]["fusion_by"] == "multiply"
+        assert set(kwargs["advance"]) == {"post_process_ops"}
+        assert kwargs["advance"]["post_process_ops"][0]["fusion_by"] == "multiply"
     else:
         rule = kwargs["advance"]["time_decay"]
-        assert rule["defer_fusion"] == deferred
         assert rule["offset_ms"] == 0 and rule["scale_ms"] == 7 * 24 * 3600 * 1000
-    assert native_time_scores.call_count == int(deferred and mode in {"vikingdb", "volcengine"})
+    assert kwargs["return_detail_info"] is True
 
 
 @pytest.mark.asyncio
@@ -108,8 +96,7 @@ async def test_http_transport_delivers_native_rule_and_score_details(monkeypatch
     assert result.data[0].origin_score == 0.8 and result.data[0].addition_score == 0.5
 
 
-@pytest.mark.parametrize("deferred", [False, True])
-def test_opengauss_ranks_in_sql_before_joining_payloads(deferred):
+def test_opengauss_ranks_in_sql_before_joining_payloads():
     coll = OpenGaussCollection.__new__(OpenGaussCollection)
     coll._name, coll._dim, coll._distance, coll._distributed = "context", 2, "cosine", False
     coll._field_names = {"id", "vector", "updated_at", "abstract"}
@@ -127,7 +114,7 @@ def test_opengauss_ranks_in_sql_before_joining_payloads(deferred):
         ("_time_score",),
         ("_final_score",),
     ]
-    cursor.fetchall.return_value = [("one", "retained", 0.8, 0.5, 0.8 if deferred else 0.4)]
+    cursor.fetchall.return_value = [("one", "retained", 0.8, 0.5, 0.4)]
     result = coll.search_by_vector(
         "default",
         dense_vector=[1, 0],
@@ -141,13 +128,13 @@ def test_opengauss_ranks_in_sql_before_joining_payloads(deferred):
                 "offset_ms": 0,
                 "scale_ms": 604800000,
                 "decay": 0.5,
-                "defer_fusion": deferred,
             }
         },
     )
     sql, params = cursor.execute.call_args.args
-    assert params[1] == (12 if deferred else 36)
+    assert params[1] == 36
     assert '"abstract"' not in sql.split("scored AS")[0]
+    assert "(_origin_score * _time_score) AS _final_score" in sql
     assert "JOIN payloads" in sql
-    assert result.data[0].score == (0.8 if deferred else 0.4)
+    assert result.data[0].score == 0.4
     assert result.data[0].fields == {"abstract": "retained"}
