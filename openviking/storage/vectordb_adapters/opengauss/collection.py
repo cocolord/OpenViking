@@ -1179,9 +1179,7 @@ class OpenGaussCollection(ICollection):
         items = []
         for row in rows:
             record = self._row_to_dict(row, col_names)
-            distance = record.pop("_distance", 0.0)
             record_id = record.pop("id", None)
-            similarity = _distance_to_similarity(distance_metric, distance)
             if time_decay is not None:
                 items.append(
                     SearchItemResult(
@@ -1193,6 +1191,8 @@ class OpenGaussCollection(ICollection):
                     )
                 )
             else:
+                distance = record.pop("_distance", 0.0)
+                similarity = _distance_to_similarity(distance_metric, distance)
                 items.append(SearchItemResult(id=record_id, fields=record, score=similarity))
         return SearchResult(data=items)
 
