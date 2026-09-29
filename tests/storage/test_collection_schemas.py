@@ -524,7 +524,14 @@ async def test_embedding_handler_merge_action_reads_and_merges_before_full_upser
 
         async def get_strict(self, ids, *, ctx):
             captured["read"] = (list(ids), ctx.account_id)
-            return [{"id": ids[0], "search_tags": ["env=old"], "created_at": "old"}]
+            return [
+                {
+                    "id": ids[0],
+                    "context_type": "memory",
+                    "search_tags": ["env=old", "memory_type=preferences"],
+                    "created_at": "old",
+                }
+            ]
 
         async def upsert(self, data, *, ctx, options=UpsertOptions()):
             captured["data"] = dict(data)
@@ -538,8 +545,10 @@ async def test_embedding_handler_merge_action_reads_and_merges_before_full_upser
         context_data={
             "id": "generated-id",
             "_upsert_record_id": "generated-id",
-            "uri": "viking://resources/repo/a.py",
+            "_upsert_options": {"extracted_memory_type": "events"},
+            "uri": "viking://user/alice/peers/memories/memories/events/event.md",
             "account_id": "acct",
+            "context_type": "memory",
             "abstract": "summary",
         },
         update_fields={"search_tags": ["scope=new"]},
@@ -550,66 +559,9 @@ async def test_embedding_handler_merge_action_reads_and_merges_before_full_upser
 
     assert result.outcome is ProcessOutcome.SUCCESS
     assert captured["read"] == (["generated-id"], "acct")
-    assert captured["data"]["search_tags"] == ["env=old", "scope=new"]
+    assert set(captured["data"]["search_tags"]) == {"env=old", "memory_type=events", "scope=new"}
     assert captured["data"]["created_at"] == "old"
     assert captured["options"].partial_update is False
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("existing_tags", "expected_tags"),
-    [
-        ([], ["team=new", "memory_type=events"]),
-        (["memory_type=preferences"], ["memory_type=events", "team=new"]),
-    ],
-)
-async def test_embedding_handler_applies_the_extracted_memory_type(
-    monkeypatch, existing_tags, expected_tags
-):
-    config = _DummyConfig(_DummyEmbedder())
-    monkeypatch.setattr("openviking_cli.utils.config.get_openviking_config", lambda: config)
-    captured = {}
-
-    class _MemoryVikingDB:
-        is_closing = False
-        uses_content_field = False
-
-        async def get_strict(self, ids, *, ctx):
-            return [
-                {
-                    "id": ids[0],
-                    "context_type": "memory",
-                    "search_tags": list(existing_tags),
-                }
-            ]
-
-        async def upsert(self, data, *, ctx, options=UpsertOptions()):
-            captured["data"] = dict(data)
-            return data["id"]
-
-    handler = TextEmbeddingHandler(_MemoryVikingDB())
-    msg = EmbeddingMsg(
-        message="body",
-        action=IndexAction.MERGE,
-        context_data={
-            "id": "generated-id",
-            "_upsert_record_id": "generated-id",
-            "_upsert_options": {
-                "search_tag_mode": "append",
-                "extracted_memory_type": "events",
-            },
-            "uri": "viking://user/alice/memories/events/a.md",
-            "account_id": "acct",
-            "context_type": "memory",
-            "abstract": "summary",
-            "search_tags": ["memory_type=events", "team=new"],
-        },
-    )
-
-    result = await handler.on_dequeue(_build_operation_payload(msg))
-
-    assert result.outcome is ProcessOutcome.SUCCESS
-    assert captured["data"]["search_tags"] == expected_tags
 
 
 @pytest.mark.asyncio

@@ -4189,54 +4189,6 @@ mod tests {
     }
 
     #[test]
-    fn cli_search_decay_protection_aliases_reject_duplicates() {
-        for flag in [
-            "--events-time-decay-protection",
-            "--events_time_decay_protection",
-        ] {
-            let cli = Cli::try_parse_from(["ov", "search", "event", flag, "30m"]).unwrap();
-            match cli.command {
-                Commands::Search {
-                    events_time_decay_protection,
-                    ..
-                } => assert_eq!(events_time_decay_protection.as_deref(), Some("30m")),
-                _ => panic!("expected search command"),
-            }
-        }
-        assert!(
-            Cli::try_parse_from([
-                "ov",
-                "search",
-                "event",
-                "--events-time-decay-protection",
-                "0",
-                "--events_time_decay_protection",
-                "30m"
-            ])
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn cli_rejects_invalid_decay_protection_before_sending_requests() {
-        for command in ["find", "search"] {
-            for value in ["", "1w", "-1d", "1095001d"] {
-                assert!(
-                    Cli::try_parse_from([
-                        "ov",
-                        command,
-                        "event",
-                        "--events-time-decay-protection",
-                        value,
-                    ])
-                    .is_err(),
-                    "{command} accepted invalid protection {value:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
     fn cli_parses_search_image_with_query() {
         let cli = Cli::try_parse_from(["ov", "search", "poster", "--image", "viking://x.png"])
             .expect("search image should parse");

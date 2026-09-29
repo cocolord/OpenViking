@@ -1413,16 +1413,16 @@ def test_atomic_scalar_metadata_persistence_recovers_unique_race():
     assert any(item.args[0].startswith("UPDATE") for item in retry_cursor.execute.call_args_list)
 
 
-def test_search_sql_uses_stable_id_tiebreaker():
+def test_search_sql_ranks_bounded_candidates_with_stable_id_tiebreaker():
     collection = OpenGaussCollection.__new__(OpenGaussCollection)
     collection._distributed = False
     collection._distance = "cosine"
     collection._name = "context"
     collection._dim = 2
     collection._distance = "cosine"
-    collection._field_names = {"id", "vector", "level"}
+    collection._field_names = {"id", "vector", "level", "updated_at", "abstract"}
     collection._array_fields = set()
-    collection._date_time_fields = set()
+    collection._date_time_fields = {"updated_at"}
     collection._indexes = {"default": {"_distance": "cosine"}}
     collection._pending_indexes = {}
     collection._lock = threading.RLock()
@@ -1437,6 +1437,44 @@ def test_search_sql_uses_stable_id_tiebreaker():
 
     collection.search_by_vector("default", dense_vector=[1.0, 0.0])
     assert "ORDER BY _distance, id" in cursor.execute.call_args.args[0]
+
+    cursor.description = [
+        ("id",),
+        ("abstract",),
+        ("_origin_score",),
+        ("_time_score",),
+        ("_final_score",),
+    ]
+    cursor.fetchall.return_value = [("event", "retained", 0.8, 0.5, 0.4)]
+    result = collection.search_by_vector(
+        "default",
+        dense_vector=[1.0, 0.0],
+        limit=10,
+        offset=2,
+        output_fields=["abstract"],
+        advance={
+            "time_decay": {
+                "field": "updated_at",
+                "origin_ms": 1767830400000,
+                "offset_ms": 0,
+                "scale_ms": 604800000,
+                "decay": 0.5,
+            }
+        },
+    )
+    sql, params = cursor.execute.call_args.args
+    assert params[1] == 36
+    assert "ORDER BY _distance, id LIMIT" in sql
+    assert "ORDER BY _final_score DESC, id LIMIT" in sql
+    assert '"abstract"' not in sql.split("scored AS")[0]
+    assert "(_origin_score * _time_score) AS _final_score" in sql
+    assert "JOIN payloads" in sql
+    assert result.data[0].fields == {"abstract": "retained"}
+    assert (result.data[0].score, result.data[0].origin_score, result.data[0].addition_score) == (
+        0.4,
+        0.8,
+        0.5,
+    )
 
     cursor.description = [("id",), ("level",), ("_scalar_val",)]
     cursor.fetchall.return_value = []

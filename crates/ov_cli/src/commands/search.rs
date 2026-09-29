@@ -938,6 +938,8 @@ mod tests {
                 "uri": "viking://user/default/memories/entities/.overview.md",
                 "level": 1,
                 "score": 0.3805481195449829,
+                "origin_score": 0.8,
+                "time_score": 0.5,
                 "abstract": "Entity memories from user's world. Each entity has its own subdirectory including projects, people, concepts, etc."
             }
         ]);
@@ -945,31 +947,11 @@ mod tests {
         let rendered = strip_ansi(&render_search_results_for_table(&results).expect("cards"));
 
         assert!(rendered.starts_with("1 result\nRanked by relevance\n\n"));
-        assert!(rendered.contains("1. memory · Level 1 · score 0.381"));
+        assert!(rendered.contains("1. memory · Level 1 · semantic 0.800 · time 0.500 · final 0.381"));
         assert!(rendered.contains("viking://user/default/memories/entities/.overview.md"));
         assert!(rendered.contains("Entity memories from user's world."));
         assert!(!rendered.contains("peop\n   le"));
         assert!(!rendered.contains("context_type  uri"));
-    }
-
-    #[test]
-    fn search_result_cards_explain_time_decay_scores() {
-        let results = json!([
-            {
-                "context_type": "memory",
-                "uri": "viking://user/default/memories/events/recent.md",
-                "score": 0.54,
-                "origin_score": 0.6,
-                "time_score": 0.9,
-                "abstract": "Recent event."
-            }
-        ]);
-
-        let rendered = strip_ansi(&render_search_results_for_table(&results).expect("cards"));
-
-        assert!(rendered.contains("1. memory · semantic 0.600 · time 0.900 · final 0.540"));
-        assert!(!rendered.contains("origin_score"));
-        assert!(!rendered.contains("time_score"));
     }
 
     #[test]

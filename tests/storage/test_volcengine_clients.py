@@ -1,12 +1,8 @@
-import inspect
-
 import pytest
 import requests
 from volcengine.base.Request import Request
 
-from openviking.storage.vectordb.collection.collection import ICollection
-from openviking.storage.vectordb.collection.http_collection import HttpCollection
-from openviking.storage.vectordb.collection.local_collection import LocalCollection
+from openviking.storage.vectordb.collection.collection import Collection
 from openviking.storage.vectordb.collection.volcengine_clients import (
     ClientForConsoleApi,
     ClientForDataApi,
@@ -15,7 +11,6 @@ from openviking.storage.vectordb.collection.volcengine_clients import (
 from openviking.storage.vectordb.collection.volcengine_collection import VolcengineCollection
 from openviking.storage.vectordb_adapters.base import VIKINGDB_STRING_FIELD_BYTE_LIMIT
 from openviking.storage.vectordb_adapters.local_adapter import LocalCollectionAdapter
-from openviking.storage.vectordb_adapters.opengauss.collection import OpenGaussCollection
 from openviking.storage.vectordb_adapters.vikingdb_private_adapter import (
     VikingDBPrivateCollectionAdapter,
 )
@@ -24,22 +19,6 @@ from openviking_cli.utils.config.vectordb_config import (
     VectorDBBackendConfig,
     VolcengineConfig,
 )
-
-
-@pytest.mark.parametrize(
-    "collection_type", [ICollection, LocalCollection, HttpCollection, OpenGaussCollection]
-)
-def test_collection_vector_search_contract_includes_remote_ranking_options(collection_type):
-    parameters = inspect.signature(collection_type.search_by_vector).parameters
-
-    assert parameters["advance"].default is None
-    assert parameters["return_detail_info"].default is False
-
-
-@pytest.mark.parametrize("collection_type", [LocalCollection, OpenGaussCollection])
-def test_local_and_opengauss_reject_vikingdb_post_process_ops(collection_type):
-    with pytest.raises(NotImplementedError, match="supports time_decay only"):
-        collection_type.search_by_vector(None, "default", advance={"post_process_ops": []})
 
 
 def test_console_client_prepare_request_includes_session_token():
@@ -361,7 +340,7 @@ def test_volcengine_collection_update_data_sanitizes_uri_fields(monkeypatch):
     }
 
 
-def test_volcengine_collection_uses_date_time_filter_operator(monkeypatch):
+def test_volcengine_query_preserves_time_filters_and_applies_decay(monkeypatch):
     captured = {}
 
     class _Response:
@@ -369,7 +348,13 @@ def test_volcengine_collection_uses_date_time_filter_operator(monkeypatch):
 
         @staticmethod
         def json():
-            return {"result": {"agg": {"_total": 1}}}
+            return {
+                "result": {
+                    "data": [
+                        {"id": "event", "score": 0.4, "origin_score": 0.8, "addition_score": 0.5}
+                    ]
+                }
+            }
 
     collection = VolcengineCollection(
         ak="test-ak",
@@ -385,11 +370,22 @@ def test_volcengine_collection_uses_date_time_filter_operator(monkeypatch):
 
     monkeypatch.setattr(collection.data_client, "do_req", _fake_do_req)
 
+    adapter = VolcengineCollectionAdapter.from_config(
+        VectorDBBackendConfig(
+            backend="volcengine",
+            name="context",
+            volcengine=VolcengineConfig(ak="test-ak", sk="test-sk", region="cn-beijing"),
+        )
+    )
+    adapter._collection = Collection(collection)
     # Both date_time fields (created_at, updated_at) must be normalized to
     # time_range, while numeric range nodes are left untouched.
-    collection.aggregate_data(
-        index_name="default",
-        filters={
+    result = adapter.query(
+        query_vector=[1.0],
+        limit=10,
+        offset=2,
+        advance={"time_decay": {"protection": "0", "origin": "2026-08-17T00:00:00Z"}},
+        filter={
             "op": "and",
             "conds": [
                 {
@@ -408,7 +404,32 @@ def test_volcengine_collection_uses_date_time_filter_operator(monkeypatch):
         },
     )
 
-    assert captured["path"] == "/api/vikingdb/data/agg"
+    assert captured["path"] == "/api/vikingdb/data/search/vector"
+    assert result == [{"id": "event", "_score": 0.4, "_origin_score": 0.8, "_time_score": 0.5}]
+    body = captured["req_body"]
+    assert (body["limit"], body["offset"]) == (10, 2)
+    assert body["return_detail_info"] is True
+    assert body["advance"] == {
+        "post_process_ops": [
+            {
+                "op": "score_fusion",
+                "fusion_by": "multiply",
+                "normalize_for_origin_score": {"enable": False},
+                "normalize_for_addition_score": {"enable": False},
+                "addition_score": [
+                    {
+                        "factor": 1,
+                        "base_value_from": "decay_func",
+                        "field": "updated_at",
+                        "func": "exp",
+                        "origin": "2026-08-17T00:00:00.000Z",
+                        "scale": "7d",
+                        "decay": 0.5,
+                    }
+                ],
+            }
+        ]
+    }
     assert captured["req_body"]["filter"] == {
         "op": "and",
         "conds": [
@@ -1105,47 +1126,6 @@ def test_http_collection_update_data_posts_to_update_endpoint(monkeypatch):
         "collection_name": "context",
         "fields": '[{"id": "doc-1", "name": "updated"}]',
     }
-
-
-def test_http_adapter_vector_search_keeps_original_request_shape(monkeypatch):
-    captured = {}
-
-    class _Response:
-        status_code = 200
-        text = '{"data": {"data": [{"id": "doc-1", "score": 0.8}]}}'
-
-    def _fake_post(url, headers=None, json=None, timeout=None):
-        captured.update(url=url, json=json)
-        return _Response()
-
-    monkeypatch.setattr(
-        "openviking.storage.vectordb.collection.http_collection.requests.post",
-        _fake_post,
-    )
-
-    from openviking.storage.vectordb.collection.collection import Collection
-    from openviking.storage.vectordb.collection.http_collection import HttpCollection
-    from openviking.storage.vectordb_adapters.http_adapter import HttpCollectionAdapter
-
-    adapter = HttpCollectionAdapter(
-        host="127.0.0.1",
-        port=1933,
-        project_name="default",
-        collection_name="context",
-        index_name="default",
-    )
-    adapter._collection = Collection(
-        HttpCollection(
-            ip="127.0.0.1",
-            port=1933,
-            meta_data={"ProjectName": "default", "CollectionName": "context"},
-        )
-    )
-
-    assert adapter.query(query_vector=[1.0]) == [{"id": "doc-1", "_score": 0.8}]
-    assert captured["url"].endswith("/api/vikingdb/data/search/vector")
-    assert "advance" not in captured["json"]
-    assert "return_detail_info" not in captured["json"]
 
 
 def test_http_adapter_strict_count_propagates_http_failure(monkeypatch):

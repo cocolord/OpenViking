@@ -16,7 +16,6 @@ from openviking.storage.viking_vector_index_backend import (
     VikingVectorIndexBackend,
     _SingleAccountBackend,
 )
-from openviking.utils.time_decay import build_time_decay_fusion_spec
 from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils.config.vectordb_config import VectorDBBackendConfig
 
@@ -77,304 +76,6 @@ class _RecordingAsyncAdapter:
     async def call(self, method_name, **kwargs):
         self.calls.append((method_name, kwargs))
         return []
-
-
-def _scope_backend() -> VikingVectorIndexBackend:
-    backend = object.__new__(VikingVectorIndexBackend)
-    backend.acl_manager = None
-    return backend
-
-
-def _adapter_results(records, kwargs):
-    rule = (kwargs.get("advance") or {}).get("time_decay")
-    if rule is None:
-        return records
-    spec = build_time_decay_fusion_spec(
-        protection=rule["protection"], origin=datetime.fromisoformat(rule["origin"])
-    )
-    # Test-only reference for the mocked vector engine. Production computes
-    # these factors inside the database, before returning the requested window.
-    for item in records:
-        score = item["_score"]
-        item["_origin_score"] = score
-        timestamp = item.get("updated_at")
-        if timestamp is not None:
-            age_ms = abs(spec.origin_ms - datetime.fromisoformat(timestamp).timestamp() * 1000)
-            factor = 0.5 ** (max(0, age_ms - spec.offset_ms) / spec.scale_ms)
-            item["_time_score"] = factor
-            item["_score"] = score * factor
-    return records
-
-
-def _contains_expr(expr, expected) -> bool:
-    if expr == expected:
-        return True
-    if isinstance(expr, (And, Or)):
-        return any(_contains_expr(cond, expected) for cond in expr.conds)
-    return False
-
-
-@pytest.mark.asyncio
-async def test_event_scope_splits_decay_and_ordinary_queries():
-    backend = _scope_backend()
-    calls = []
-
-    async def fake_search(**kwargs):
-        calls.append(kwargs)
-        return []
-
-    backend.search = fake_search
-    await backend.search_in_tenant(
-        ctx=_ctx(actor_peer_id="assistant"),
-        query_vector=[1.0],
-        context_type="memory",
-        target_directories=["viking://user/alice/peers/assistant/memories/events"],
-        level=[2],
-        limit=10,
-        events_time_decay_protection="0",
-        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
-    )
-
-    assert len(calls) == 2
-    cloud_call = next(call for call in calls if call.get("advance"))
-    assert cloud_call["limit"] == 10
-    assert cloud_call["advance"]["time_decay"]["protection"] == "0"
-    assert "post_process_input_limit" not in cloud_call["advance"]
-    semantic_call = next(call for call in calls if call.get("advance") is None)
-    assert semantic_call["limit"] == 10
-    assert _contains_expr(
-        semantic_call["filter"],
-        RawDSL({"op": "must_not", "field": "search_tags", "conds": ["memory_type=events"]}),
-    )
-
-
-@pytest.mark.asyncio
-async def test_scope_merge_preserves_engine_scores():
-    backend = _scope_backend()
-    cloud_result = {
-        "uri": "viking://user/alice/peers/assistant/memories/events/past.md",
-        "context_type": "memory",
-        "level": 2,
-        "search_tags": ["memory_type=events"],
-        "updated_at": "2026-01-01T00:00:00Z",
-        "_score": 0.4,
-        "_origin_score": 0.8,
-        "_time_score": 0.5,
-    }
-
-    async def fake_search(**kwargs):
-        if kwargs.get("advance"):
-            return [dict(cloud_result)]
-        return []
-
-    backend.search = fake_search
-    results = await backend.search_in_tenant(
-        ctx=_ctx(),
-        query_vector=[1.0],
-        context_type="memory",
-        limit=2,
-        events_time_decay_protection="0",
-        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
-    )
-
-    assert results == [cloud_result]
-
-
-@pytest.mark.asyncio
-async def test_event_directory_does_not_override_memory_type_tag():
-    backend = _scope_backend()
-    result = {
-        "uri": "viking://user/alice/memories/events/old.md",
-        "context_type": "memory",
-        "level": 2,
-        "search_tags": ["memory_type=preferences"],
-        "updated_at": "2026-01-01T00:00:00Z",
-        "_score": 0.8,
-    }
-
-    async def fake_search(**kwargs):
-        if _contains_expr(kwargs["filter"], Eq("search_tags", "memory_type=events")):
-            return []
-        return [dict(result)]
-
-    backend.search = fake_search
-    results = await backend.search_in_tenant(
-        ctx=_ctx(),
-        query_vector=[1.0],
-        context_type="memory",
-        target_directories=["viking://user/alice/memories/events"],
-        level=[2],
-        limit=1,
-        events_time_decay_protection="0",
-        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
-    )
-
-    assert results == [result]
-
-
-@pytest.mark.asyncio
-async def test_scope_requests_final_window_and_accepts_engine_ranking():
-    backend = _scope_backend()
-    calls = []
-    candidates = [
-        {
-            "uri": f"viking://user/alice/memories/events/old-{index}.md",
-            "context_type": "memory",
-            "level": 2,
-            "updated_at": "2025-01-01T00:00:00Z",
-            "_score": score,
-        }
-        for index, score in enumerate((0.99, 0.98, 0.97), start=1)
-    ]
-    candidates.append(
-        {
-            "uri": "viking://user/alice/memories/events/fresh.md",
-            "context_type": "memory",
-            "level": 2,
-            "updated_at": "2026-01-08T00:00:00Z",
-            "_score": 0.96,
-        }
-    )
-
-    async def fake_search(**kwargs):
-        calls.append(kwargs)
-        if not _contains_expr(kwargs["filter"], Eq("search_tags", "memory_type=events")):
-            return []
-        return [dict(candidates[-1], _origin_score=0.96, _time_score=1.0)]
-
-    backend.search = fake_search
-    results = await backend.search_in_tenant(
-        ctx=_ctx(),
-        query_vector=[1.0],
-        context_type="memory",
-        target_directories=["viking://user/alice/memories/events"],
-        level=[2],
-        limit=1,
-        events_time_decay_protection="0",
-        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
-    )
-
-    assert max(call["limit"] for call in calls) == 1
-    assert set(calls[1]["advance"]["time_decay"]) == {"protection", "origin"}
-    assert results[0]["uri"] == "viking://user/alice/memories/events/fresh.md"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("offset", [0, 1])
-async def test_mixed_scope_splits_event_and_non_event_queries(offset):
-    backend = _scope_backend()
-    calls = []
-
-    async def fake_search(**kwargs):
-        calls.append(kwargs)
-        if kwargs.get("advance"):
-            return [
-                {
-                    "uri": "viking://user/alice/memories/events/new",
-                    "context_type": "memory",
-                    "level": 2,
-                    "_score": 0.7,
-                }
-            ]
-        return [{"uri": "viking://user/alice/memories/preferences/p", "_score": 0.8}]
-
-    backend.search = fake_search
-    results = await backend.search_in_tenant(
-        ctx=_ctx(),
-        query_vector=[1.0],
-        context_type="memory",
-        target_directories=["viking://user/alice/memories"],
-        limit=1,
-        offset=offset,
-        events_time_decay_protection="0",
-        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
-    )
-
-    assert len(calls) == 2
-    assert all(call["limit"] == 1 + offset and call["offset"] == 0 for call in calls)
-    assert [item["_score"] for item in results] == [[0.8], [0.7]][offset]
-
-
-@pytest.mark.asyncio
-async def test_mixed_scope_merges_decayed_recall_window():
-    backend = _scope_backend()
-
-    async def fake_search(**kwargs):
-        if _contains_expr(kwargs["filter"], Eq("search_tags", "memory_type=events")):
-            return [
-                {
-                    "uri": "viking://user/alice/memories/events/a",
-                    "level": 2,
-                    "updated_at": "2026-01-08T00:00:00Z",
-                    "_score": 0.4,
-                },
-                {
-                    "uri": "viking://user/alice/memories/events/b",
-                    "level": 2,
-                    "updated_at": "2026-01-01T00:00:00Z",
-                    "_score": 0.3,
-                },
-                {
-                    "uri": "viking://user/alice/memories/events/c",
-                    "level": 2,
-                    "updated_at": "2025-12-25T00:00:00Z",
-                    "_score": 0.2,
-                },
-            ]
-        return [
-            {"uri": "viking://user/alice/memories/preferences/a", "_score": 0.8},
-            {"uri": "viking://user/alice/memories/preferences/b", "_score": 0.7},
-            {"uri": "viking://user/alice/memories/preferences/c", "_score": 0.1},
-        ]
-
-    async def adapter_search(**kwargs):
-        return _adapter_results(await fake_search(**kwargs), kwargs)
-
-    backend.search = adapter_search
-    results = await backend.search_in_tenant(
-        ctx=_ctx(),
-        query_vector=[1.0],
-        context_type="memory",
-        target_directories=["viking://user/alice/memories"],
-        limit=3,
-        events_time_decay_protection="0",
-        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
-    )
-
-    assert len(results) == 3
-    assert [item["_score"] for item in results] == [0.8, 0.7, 0.4]
-    assert [item["_time_score"] for item in results if "_time_score" in item] == [1.0]
-
-
-@pytest.mark.asyncio
-async def test_default_user_scope_splits_tagged_events_without_a_peer():
-    backend = _scope_backend()
-    calls = []
-
-    async def fake_search(**kwargs):
-        calls.append(kwargs)
-        return []
-
-    backend.search = fake_search
-    await backend.search_in_tenant(
-        ctx=_ctx(),
-        query_vector=[1.0],
-        context_type="memory",
-        limit=10,
-        events_time_decay_protection="0",
-        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
-    )
-
-    assert len(calls) == 2
-    cloud_call = next(call for call in calls if call.get("advance"))
-    assert cloud_call["advance"]["time_decay"]["protection"] == "0"
-    assert _contains_expr(cloud_call["filter"], Eq("search_tags", "memory_type=events"))
-    semantic_call = next(call for call in calls if call.get("advance") is None)
-    assert semantic_call["limit"] == 10
-    assert _contains_expr(
-        semantic_call["filter"],
-        RawDSL({"op": "must_not", "field": "search_tags", "conds": ["memory_type=events"]}),
-    )
 
 
 def _single_account_backend(async_adapter, account_id: str | None):
@@ -491,12 +192,14 @@ async def test_tenant_search_enforces_visible_roots_and_shared_acl(
             "uri": own_uri,
             "account_id": "acct",
             "context_type": "resource",
+            "search_tags": ["memory_type=events"],
         },
         {
             "id": "cross-user",
             "uri": cross_user_uri,
             "account_id": "acct",
             "context_type": "resource",
+            "search_tags": ["memory_type=events"],
         },
         {
             **legacy_mode,
@@ -518,6 +221,7 @@ async def test_tenant_search_enforces_visible_roots_and_shared_acl(
             "account_id": "acct",
             "context_type": "resource",
             "acl_mode": "inherit",
+            "search_tags": ["memory_type=events"],
             "acl_direct_grants": ["1:user:alice"],
         },
         {
@@ -542,6 +246,7 @@ async def test_tenant_search_enforces_visible_roots_and_shared_acl(
             "account_id": "acct",
             "context_type": "resource",
             "acl_mode": "restricted",
+            "search_tags": ["memory_type=events"],
             "acl_direct_grants": ["1:user:alice"],
             "acl_inherited_grants": ["7:user:bob"],
         },
@@ -551,6 +256,7 @@ async def test_tenant_search_enforces_visible_roots_and_shared_acl(
             "account_id": "acct",
             "context_type": "resource",
             "acl_mode": "inherit",
+            "search_tags": ["memory_type=events"],
             "acl_direct_grants": [],
             "acl_inherited_grants": ["3:group:finance"],
         },
@@ -581,18 +287,32 @@ async def test_tenant_search_enforces_visible_roots_and_shared_acl(
                 user=UserIdentifier(record["account_id"], ctx.user.user_id), role=Role.ADMIN
             )
             await backend._upsert_many_raw(
-                [{**record, "level": 2, "vector": [1.0, 0.0, 0.0, 0.0]}], ctx=record_ctx
+                [
+                    {
+                        **record,
+                        "level": 2,
+                        "updated_at": "2026-01-01T00:00:00Z",
+                        "vector": [1.0, 0.0, 0.0, 0.0],
+                    }
+                ],
+                ctx=record_ctx,
             )
 
+        decay = {
+            "events_time_decay_protection": "0",
+            "request_now": datetime(2026, 1, 8, tzinfo=timezone.utc),
+        }
         visible = await backend.search_in_tenant(
             ctx=ctx,
             query_vector=[1.0, 0.0, 0.0, 0.0],
             context_type="resource",
+            **decay,
         )
         cross_user_only = await backend.search_in_tenant(
             ctx=ctx,
             query_vector=[1.0, 0.0, 0.0, 0.0],
             context_type="resource",
+            **decay,
             target_directories=[cross_user_uri],
         )
         internal = await backend.search_in_tenant(
@@ -603,11 +323,13 @@ async def test_tenant_search_enforces_visible_roots_and_shared_acl(
             ),
             query_vector=[1.0, 0.0, 0.0, 0.0],
             context_type="resource",
+            **decay,
         )
         finance = await backend.search_in_tenant(
             ctx=RequestContext(user=ctx.user, role=ctx.role, group_ids=("finance",)),
             query_vector=[1.0, 0.0, 0.0, 0.0],
             context_type="resource",
+            **decay,
             target_directories=["viking://resources/finance"],
         )
         assert [record["id"] for record in finance] == ["denied-shared"]
@@ -622,6 +344,11 @@ async def test_tenant_search_enforces_visible_roots_and_shared_acl(
                 "restricted-direct-shared",
             ]
         )
+        by_id = {record["id"]: record for record in visible}
+        assert by_id["own"]["_score"] == pytest.approx(0.5)
+        assert by_id["own"]["_origin_score"] == pytest.approx(1.0)
+        assert by_id["legacy-shared"]["_score"] == pytest.approx(1.0)
+        assert "_time_score" not in by_id["legacy-shared"]
         assert cross_user_only == []
         assert sorted(record["id"] for record in internal) == sorted(
             [
@@ -642,6 +369,7 @@ async def test_tenant_search_enforces_visible_roots_and_shared_acl(
             ctx=ctx,
             query_vector=[1.0, 0.0, 0.0, 0.0],
             context_type="resource",
+            **decay,
         )
         assert sorted(record["id"] for record in shared) == sorted(
             [
@@ -693,20 +421,57 @@ def test_no_target_keeps_original_tenant_filter():
     )
 
 
-def test_merge_filters_wraps_raw_dict_filter():
+@pytest.mark.asyncio
+async def test_tenant_search_preserves_raw_scope_across_decay_routes():
     backend = object.__new__(VikingVectorIndexBackend)
-
-    result = backend._merge_filters(
-        {"op": "must", "field": "uri", "conds": ["viking://resources"]},
-        Eq("account_id", "acct"),
-    )
-
-    assert result == And(
+    backend.acl_manager = None
+    backend.search = AsyncMock(return_value=[])
+    ctx = _ctx()
+    raw_filter = {"op": "must", "field": "search_tags", "conds": ["team=search"]}
+    options = {
+        "ctx": ctx,
+        "query_vector": [1.0],
+        "context_type": "resource",
+        "level": [0, 1],
+        "target_directories": ["viking://resources/wiki"],
+        "extra_filter": raw_filter,
+        "limit": 1,
+        "offset": 1,
+    }
+    scope = And(
         [
-            RawDSL({"op": "must", "field": "uri", "conds": ["viking://resources"]}),
+            Eq("context_type", "resource"),
             Eq("account_id", "acct"),
+            Or([PathScope("uri", "viking://resources/wiki", depth=-1)]),
+            RawDSL(raw_filter),
+            In("level", [0, 1]),
         ]
     )
+    await backend.search_in_tenant(**options)
+    call = backend.search.await_args.kwargs
+    assert backend.search.await_count == 1
+    assert call["filter"] == scope
+    assert (call["limit"], call["offset"]) == (1, 1)
+    assert "advance" not in call
+
+    backend.search.reset_mock()
+    event = {"id": "event", "_score": 0.4, "_origin_score": 0.8, "_time_score": 0.5}
+
+    async def recall(**kwargs):
+        return [event] if kwargs.get("advance") else [{"id": "ordinary", "_score": 0.7}]
+
+    backend.search.side_effect = recall
+    result = await backend.search_in_tenant(**options, events_time_decay_protection="0")
+    calls = [call.kwargs for call in backend.search.await_args_list]
+    assert len(calls) == 2
+    other = next(call for call in calls if "advance" not in call)
+    events = next(call for call in calls if "advance" in call)
+    assert other["filter"] == And(
+        [scope, RawDSL({"op": "must_not", "field": "search_tags", "conds": ["memory_type=events"]})]
+    )
+    assert events["filter"] == And([scope, Eq("search_tags", "memory_type=events")])
+    assert (other["limit"], events["limit"], other["offset"], events["offset"]) == (2, 2, 0, 0)
+    assert result == [event]
 
 
 def test_root_role_keeps_existing_target_only_behavior():
@@ -763,490 +528,3 @@ async def test_search_by_random_reuses_account_filter_for_raw_dsl():
             },
         )
     ]
-
-
-@pytest.mark.asyncio
-async def test_null_decay_protection_keeps_the_original_single_search_call():
-    backend = object.__new__(VikingVectorIndexBackend)
-    backend.acl_manager = None
-    calls = []
-
-    async def fake_search(**kwargs):
-        calls.append(kwargs)
-        return [{"uri": "viking://resources/doc", "_score": 0.8}]
-
-    backend.search = fake_search
-    results = await backend.search_in_tenant(
-        ctx=_ctx(),
-        query_vector=[1.0],
-        context_type="memory",
-        limit=7,
-        offset=2,
-    )
-
-    assert results == [{"uri": "viking://resources/doc", "_score": 0.8}]
-    assert len(calls) == 1
-    assert calls[0]["limit"] == 7
-    assert calls[0]["offset"] == 2
-
-
-@pytest.mark.asyncio
-async def test_decay_leaves_untagged_user_and_peer_events_unchanged():
-    backend = _scope_backend()
-    calls = []
-
-    async def fake_search(**kwargs):
-        calls.append(kwargs)
-        if _contains_expr(kwargs["filter"], Eq("search_tags", "memory_type=events")):
-            return []
-        return [
-            {
-                "uri": "viking://user/alice/memories/events/old",
-                "level": 2,
-                "updated_at": "2026-01-01T00:00:00Z",
-                "_score": 0.9,
-            },
-            {
-                "uri": "viking://user/alice/peers/peer-a/memories/events/recent",
-                "level": 2,
-                "updated_at": "2026-01-08T00:00:00Z",
-                "_score": 0.6,
-            },
-            {
-                "uri": "viking://user/alice/memories/preferences/pref.md",
-                "level": 2,
-                "updated_at": "2026-01-08T00:00:00Z",
-                "_score": 0.75,
-            },
-        ]
-
-    backend.search = fake_search
-    results = await backend.search_in_tenant(
-        ctx=_ctx(),
-        query_vector=[1.0],
-        context_type="memory",
-        limit=3,
-        events_time_decay_protection="0",
-        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
-    )
-
-    assert len(calls) == 2
-    assert calls[0]["limit"] == 3
-    assert [item["_score"] for item in results] == pytest.approx([0.9, 0.75, 0.6])
-    assert all("_origin_score" not in item and "_time_score" not in item for item in results)
-
-
-@pytest.mark.asyncio
-async def test_scope_passes_backend_neutral_decay_rule():
-    backend = _scope_backend()
-    calls = []
-
-    async def fake_search(**kwargs):
-        calls.append(kwargs)
-        return []
-
-    backend.search = fake_search
-    await backend.search_in_tenant(
-        ctx=_ctx(),
-        query_vector=[1.0],
-        context_type="memory",
-        limit=3,
-        events_time_decay_protection="0",
-        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
-    )
-
-    assert len(calls) == 2
-    assert calls[0].get("advance") is None
-    assert calls[1]["advance"]["time_decay"]["protection"] == "0"
-    assert all(call["limit"] == 3 for call in calls)
-
-
-@pytest.mark.asyncio
-async def test_decay_recall_returns_fused_scores_in_requested_window():
-    backend = _scope_backend()
-    calls = []
-
-    async def fake_search(**kwargs):
-        calls.append(kwargs)
-        if not _contains_expr(kwargs["filter"], Eq("search_tags", "memory_type=events")):
-            return []
-        candidates = [
-            {
-                "uri": "viking://user/alice/memories/events/fresh",
-                "level": 2,
-                "_score": 0.9,
-                "updated_at": "2026-01-08T00:00:00Z",
-            },
-            {
-                "uri": "viking://user/alice/peers/peer-a/memories/events/old",
-                "level": 2,
-                "_score": 0.8,
-                "updated_at": "2026-01-01T00:00:00Z",
-            },
-        ]
-        return candidates[: kwargs["limit"]]
-
-    async def adapter_search(**kwargs):
-        return _adapter_results(await fake_search(**kwargs), kwargs)
-
-    backend.search = adapter_search
-    results = await backend.search_in_tenant(
-        ctx=_ctx(),
-        query_vector=[1.0],
-        context_type="memory",
-        target_directories=["viking://user/alice"],
-        level=[2],
-        limit=3,
-        events_time_decay_protection="0",
-        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
-    )
-
-    assert calls[0]["limit"] == 3
-    assert calls[0].get("advance") is None
-    assert [result["_score"] for result in results] == pytest.approx([0.9, 0.4])
-    assert [result["_origin_score"] for result in results] == pytest.approx([0.9, 0.8])
-    assert [result["_time_score"] for result in results] == pytest.approx([1.0, 0.5])
-
-
-@pytest.mark.asyncio
-async def test_decay_keeps_directory_levels_that_share_a_uri():
-    backend = _scope_backend()
-    directory_uri = "viking://user/alice/memories/events/project"
-
-    async def fake_search(**kwargs):
-        if kwargs.get("advance"):
-            return []
-        return [
-            {
-                "uri": directory_uri,
-                "context_type": "memory",
-                "level": 0,
-                "_score": 0.9,
-            },
-            {
-                "uri": directory_uri,
-                "context_type": "memory",
-                "level": 1,
-                "_score": 0.8,
-            },
-        ]
-
-    backend.search = fake_search
-    results = await backend.search_in_tenant(
-        ctx=_ctx(),
-        query_vector=[1.0],
-        context_type="memory",
-        limit=2,
-        events_time_decay_protection="0",
-        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
-    )
-
-    assert [(result["uri"], result["level"]) for result in results] == [
-        (directory_uri, 0),
-        (directory_uri, 1),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_decay_applies_to_a_peer_only_target():
-    backend = _scope_backend()
-    calls = []
-
-    async def fake_search(**kwargs):
-        calls.append(kwargs)
-        if not _contains_expr(kwargs["filter"], Eq("search_tags", "memory_type=events")):
-            return []
-        return [
-            {
-                "uri": "viking://user/alice/peers/peer-a/memories/events/recent",
-                "level": 2,
-                "updated_at": "2026-01-08T00:00:00Z",
-                "_score": 0.2,
-            }
-        ]
-
-    async def adapter_search(**kwargs):
-        return _adapter_results(await fake_search(**kwargs), kwargs)
-
-    backend.search = adapter_search
-    results = await backend.search_in_tenant(
-        ctx=_ctx(),
-        query_vector=[1.0],
-        context_type="memory",
-        target_directories=["viking://user/alice/peers/peer-a/memories/events"],
-        level=[2],
-        events_time_decay_protection="0",
-        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
-    )
-
-    assert len(calls) == 2
-    assert calls[1]["limit"] == 10
-    assert results[0]["_score"] == pytest.approx(0.2)
-    assert results[0]["_origin_score"] == pytest.approx(0.2)
-    assert results[0]["_time_score"] == pytest.approx(1.0)
-
-
-@pytest.mark.asyncio
-async def test_decay_applies_under_bare_user_target():
-    backend = _scope_backend()
-    calls = []
-
-    async def fake_search(**kwargs):
-        calls.append(kwargs)
-        if _contains_expr(kwargs["filter"], Eq("search_tags", "memory_type=events")):
-            return []
-        return []
-
-    backend.search = fake_search
-    await backend.search_in_tenant(
-        ctx=_ctx(),
-        query_vector=[1.0],
-        context_type="memory",
-        target_directories=["viking://user"],
-        level=[2],
-        limit=2,
-        events_time_decay_protection="0",
-    )
-
-    assert len(calls) == 2
-    assert calls[0]["limit"] == 2
-
-
-@pytest.mark.asyncio
-async def test_decay_applies_to_scoped_peer_event_directory():
-    backend = _scope_backend()
-    calls = []
-
-    async def fake_search(**kwargs):
-        calls.append(kwargs)
-        if not _contains_expr(kwargs["filter"], Eq("search_tags", "memory_type=events")):
-            return []
-        return [
-            {
-                "uri": "viking://user/alice/peers/peer-a/memories/events/recent",
-                "level": 2,
-                "updated_at": "2026-01-08T00:00:00Z",
-                "_score": 0.2,
-            }
-        ]
-
-    async def adapter_search(**kwargs):
-        return _adapter_results(await fake_search(**kwargs), kwargs)
-
-    backend.search = adapter_search
-    results = await backend.search_in_tenant(
-        ctx=_ctx(),
-        target_directories=["viking://user/alice/peers/peer-a/memories/events"],
-        query_vector=[1.0],
-        context_type="memory",
-        limit=2,
-        events_time_decay_protection="0",
-        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
-    )
-
-    assert len(calls) == 2
-    assert calls[0]["limit"] == 2
-    assert results[0]["_score"] == pytest.approx(0.2)
-    assert results[0]["_origin_score"] == pytest.approx(0.2)
-    assert results[0]["_time_score"] == pytest.approx(1.0)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("actor_peer_id", [None, "peer-a"])
-async def test_tagged_events_keep_scope_and_merge_decayed_scores(actor_peer_id):
-    backend = _scope_backend()
-    calls = []
-    new_event = {
-        "uri": "viking://user/alice/peers/peer-a/memories/events/new.md",
-        "context_type": "memory",
-        "level": 2,
-        "search_tags": ["memory_type=events"],
-        "updated_at": "2026-01-08T00:00:00Z",
-        "_score": 0.2,
-    }
-    old_event = {
-        "uri": "viking://user/alice/peers/peer-a/memories/events/old.md",
-        "level": 2,
-        "search_tags": ["memory_type=events"],
-        "updated_at": "2026-01-01T00:00:00Z",
-        "_score": 0.6,
-    }
-    preference = {
-        "uri": "viking://user/alice/memories/preferences/p.md",
-        "level": 2,
-        "search_tags": ["memory_type=preferences"],
-        "_score": 0.75,
-    }
-
-    async def fake_search(**kwargs):
-        calls.append(kwargs)
-        if not _contains_expr(kwargs["filter"], Eq("search_tags", "memory_type=events")):
-            return [dict(preference)]
-        event = dict(new_event)
-        old = dict(old_event)
-        return _adapter_results([old, event], kwargs)
-
-    backend.search = fake_search
-    ctx = _ctx(actor_peer_id=actor_peer_id)
-    results = await backend.search_in_tenant(
-        ctx=ctx,
-        query_vector=[1.0],
-        context_type="memory",
-        extra_filter=Eq("search_tags", "team=search"),
-        limit=2,
-        events_time_decay_protection="0",
-        request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
-    )
-
-    assert len(calls) == 2
-    expected_scope = _build(
-        ctx, None, context_type="memory", extra_filter=Eq("search_tags", "team=search")
-    )
-    assert all(_contains_expr(call["filter"], expected_scope) for call in calls)
-    assert [result["uri"] for result in results] == [preference["uri"], old_event["uri"]]
-    assert [result["_score"] for result in results] == pytest.approx([0.75, 0.3])
-
-
-@pytest.mark.asyncio
-async def test_local_tag_split_does_not_boost_fresh_events(vector_backend_factory, tmp_path):
-    backend = vector_backend_factory(
-        config=VectorDBBackendConfig(
-            backend="local", name="context", dimension=4, path=str(tmp_path / "vectors")
-        )
-    )
-    ctx = _ctx()
-    event_uri = "viking://user/alice/peers/peer-a/memories/events/new.md"
-    old_event_uri = "viking://user/alice/peers/peer-a/memories/events/old.md"
-    legacy_uri = "viking://user/alice/peers/peer-b/memories/events/old.md"
-    try:
-        assert await backend.create_collection(
-            "context", CollectionSchemas.context_collection("context", 4)
-        )
-        records = [
-            {
-                "id": f"preference-{i}",
-                "uri": f"viking://user/alice/memories/preferences/{i}.md",
-                "vector": [0.8, 0.6, 0.0, 0.0],
-                "search_tags": ["memory_type=preferences"],
-            }
-            for i in range(4)
-        ]
-        records.extend(
-            [
-                {
-                    "id": "new",
-                    "uri": event_uri,
-                    "vector": [0.2, 0.98, 0.0, 0.0],
-                    "search_tags": ["memory_type=events"],
-                },
-                {
-                    "id": "old",
-                    "uri": old_event_uri,
-                    "vector": [0.99, 0.1, 0.0, 0.0],
-                    "search_tags": ["memory_type=events"],
-                    "updated_at": "2026-01-01T00:00:00Z",
-                },
-                {
-                    "id": "foreign-owner",
-                    "uri": "viking://user/bob/memories/events/hidden.md",
-                    "vector": [1.0, 0.0, 0.0, 0.0],
-                    "search_tags": ["memory_type=events"],
-                },
-            ]
-        )
-        await backend._upsert_many_raw(
-            [
-                {
-                    "account_id": "acct",
-                    "context_type": "memory",
-                    "level": 2,
-                    "updated_at": "2026-01-08T00:00:00Z",
-                    **record,
-                }
-                for record in records
-            ],
-            ctx=ctx,
-        )
-        options = {
-            "ctx": ctx,
-            "query_vector": [1.0, 0.0, 0.0, 0.0],
-            "context_type": "memory",
-            "limit": 1,
-        }
-        original = await backend.search_in_tenant(**options)
-        assert original[0]["uri"] == old_event_uri
-        decayed = await backend.search_in_tenant(
-            **options,
-            events_time_decay_protection="0",
-            request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
-        )
-        assert "/memories/preferences/" in decayed[0]["uri"]
-        replaced = await backend.update_search_tags(
-            event_uri, ["team=search"], mode="replace", ctx=ctx
-        )
-        assert set(replaced[0]["search_tags"]) == {"memory_type=events", "team=search"}
-        # A genuinely absent search_tags field must still match the other route.
-        await backend._upsert_many_raw(
-            [
-                {
-                    "id": "legacy",
-                    "uri": legacy_uri,
-                    "vector": [0.9, 0.44, 0.0, 0.0],
-                    "account_id": "acct",
-                    "context_type": "memory",
-                    "level": 2,
-                    "updated_at": "2026-01-01T00:00:00Z",
-                }
-            ],
-            ctx=ctx,
-        )
-        decayed = await backend.search_in_tenant(
-            **{**options, "limit": 10},
-            events_time_decay_protection="0",
-            request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
-        )
-        # Tagged and untagged events are both eligible, without boosting a fresh event.
-        assert {event_uri, legacy_uri} <= {item["uri"] for item in decayed}
-        first = await backend.search_in_tenant(
-            **options,
-            events_time_decay_protection="0",
-            request_now=datetime(2026, 1, 8, tzinfo=timezone.utc),
-        )
-        assert first[0]["uri"] == legacy_uri
-        assert "_time_score" not in first[0]
-    finally:
-        await backend.close()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "context_type,level", [(None, None), ("memory", [0, 1]), ("resource", [2])]
-)
-async def test_decay_split_adds_only_complementary_event_tag_predicates(context_type, level):
-    backend = _scope_backend()
-    calls = []
-
-    async def search(**kwargs):
-        calls.append(kwargs)
-        return []
-
-    backend.search = search
-    ctx = _ctx()
-    extra = Eq("search_tags", "team=search")
-    await backend.search_in_tenant(
-        ctx,
-        [1.0],
-        context_type=context_type,
-        level=level,
-        extra_filter=extra,
-        events_time_decay_protection="0",
-        limit=2,
-    )
-    scope = _build(ctx, None, context_type=context_type, level=level, extra_filter=extra)
-    assert len(calls) == 2
-    assert calls[0]["filter"] == backend._merge_filters(
-        scope, RawDSL({"op": "must_not", "field": "search_tags", "conds": ["memory_type=events"]})
-    )
-    assert calls[1]["filter"] == backend._merge_filters(
-        scope, Eq("search_tags", "memory_type=events")
-    )

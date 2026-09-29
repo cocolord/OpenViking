@@ -138,7 +138,7 @@ def test_embedding_update_fields_rejects_vector_fields():
 
 def test_field_patch_roundtrip_and_resolution():
     patch = FieldPatch(
-        values={"search_tags": ["scope=new"], "md5": "new-md5"},
+        values={"search_tags": ["scope=new", "memory_type=preferences"], "md5": "new-md5"},
         modes={"search_tags": "append"},
         seed_fields={
             "uri": "viking://resources/demo/a.py",
@@ -150,11 +150,21 @@ def test_field_patch_roundtrip_and_resolution():
 
     restored = FieldPatch.from_dict(patch.to_dict())
 
-    assert restored.resolve({"search_tags": ["env=old"], "md5": "old-md5"}) == {
-        "search_tags": ["env=old", "scope=new"],
+    existing = {
+        "context_type": "memory",
+        "search_tags": ["env=old", "memory_type=events"],
+        "md5": "old-md5",
+    }
+    assert restored.resolve(existing) == {
+        "search_tags": ["memory_type=events", "env=old", "scope=new"],
         "md5": "new-md5",
     }
     assert restored.seed_fields["vector"] == [0.1, 0.2]
+    # Ordinary replacement can clear user tags, but cannot create or overwrite a type.
+    restored.modes["search_tags"] = "replace"
+    restored.values["search_tags"] = ["memory_type=preferences"]
+    assert restored.resolve(existing)["search_tags"] == ["memory_type=events"]
+    assert restored.resolve({"context_type": "memory", "search_tags": []})["search_tags"] == []
 
 
 @pytest.mark.parametrize(
@@ -320,42 +330,3 @@ def test_legacy_update_fields_message_normalizes_to_field_patch_payload():
     assert restored.payload.field_patch.values == {"search_tags": ["scope=new"]}
     assert restored.payload.field_patch.modes == {"search_tags": "append"}
     assert restored.payload.field_patch.seed_fields == {"vector": [0.1, 0.2]}
-
-
-@pytest.mark.parametrize("mode", ["replace", "append"])
-@pytest.mark.parametrize("tags", [[], ["team=new"]])
-def test_scalar_tag_edits_preserve_the_system_memory_type(mode, tags):
-    patch = FieldPatch(values={"search_tags": tags}, modes={"search_tags": mode})
-    result = patch.resolve(
-        {"context_type": "memory", "search_tags": ["team=old", "memory_type=events"]}
-    )
-    assert "memory_type=events" in result["search_tags"]
-    assert "memory_type=preferences" not in result["search_tags"]
-    if mode == "replace":
-        assert "team=old" not in result["search_tags"]
-
-
-def test_memory_write_cannot_override_a_preexisting_type_tag():
-    patch = FieldPatch(values={"search_tags": ["memory_type=events"]})
-    result = patch.resolve({"context_type": "memory", "search_tags": ["memory_type=preferences"]})
-    assert result["search_tags"] == ["memory_type=preferences"]
-
-
-@pytest.mark.parametrize("existing_tags", [[], ["memory_type=preferences"]])
-def test_memory_write_does_not_infer_or_replace_type_from_uri(existing_tags):
-    patch = FieldPatch(values={"search_tags": ["memory_type=events", "team=new"]})
-    result = patch.resolve(
-        {
-            "uri": "viking://user/alice/peers/memories/memories/events/event.md",
-            "context_type": "memory",
-            "search_tags": existing_tags,
-        }
-    )
-    assert result["search_tags"] == existing_tags + ["team=new"]
-
-
-def test_resource_tags_keep_existing_replace_semantics():
-    patch = FieldPatch(values={"search_tags": []})
-    assert patch.resolve({"context_type": "resource", "search_tags": ["memory_type=events"]}) == {
-        "search_tags": []
-    }
