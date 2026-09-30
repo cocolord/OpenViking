@@ -89,28 +89,29 @@ ov observer queue
 
 #### 1. API 实现介绍
 
-获取 VikingDB 状态（集合、索引、向量数量）。
+获取 VikingDB 状态。结构化响应还会在后端能够从已加载索引中确定时，返回实际向量 metric 和纯 dense 分数尺度。
 
 **代码入口**:
 - `openviking/server/routers/observer.py:observer_vikingdb` - HTTP 路由
-- `openviking/service/debug_service.py:ObserverService.vikingdb` - 核心实现
-- `openviking/storage/observers/vikingdb_observer.py` - VikingDB 观察者
+- `openviking/service/debug_service.py:ObserverService.account_vikingdb` - 核心实现
 - `crates/ov_cli/src/commands/observer.rs` - CLI 命令
 
 #### 2. 接口和参数说明
 
-无参数。
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `format` | string | 否 | `table` | `table` 返回原有可读状态；`json` 返回结构化运行时详情。 |
 
 #### 3. 使用示例
 
 **HTTP API**
 
 ```
-GET /api/v1/observer/vikingdb
+GET /api/v1/observer/vikingdb?format=json
 ```
 
 ```bash
-curl -X GET http://localhost:1933/api/v1/observer/vikingdb \
+curl -X GET 'http://localhost:1933/api/v1/observer/vikingdb?format=json' \
   -H "X-API-Key: your-key"
 ```
 
@@ -160,11 +161,23 @@ ov observer vikingdb
     "name": "vikingdb",
     "is_healthy": true,
     "has_errors": false,
-    "status": "Collection  Index Count  Vector Count  Status\ncontext     1            55            OK\nTOTAL       1            55"
+    "status": {
+      "backend": "local",
+      "collection": "context",
+      "index": "default",
+      "dimension": 1024,
+      "vector_count": 55,
+      "distance_metric": "cosine",
+      "pure_dense_score_scale": "cosine_affine_0_1"
+    }
   },
   "time": 0.1
 }
 ```
+
+对于 local 后端，cosine、IP 和 L2 对应的 `pure_dense_score_scale` 分别为 `cosine_affine_0_1`、`inner_product` 和 `one_minus_squared_l2`。其他后端返回 `backend_defined`；如果已加载的元数据没有暴露 metric，`distance_metric` 为 `null`。
+
+该字段只描述纯 dense 向量分数。稀疏融合、时间衰减、rerank 等检索阶段可能产生不同尺度的最终 `score`。从 v0.4.22 起，local 纯 dense cosine 使用 `clamp((cosine_similarity + 1) / 2, 0, 1)`，已有索引也适用。
 
 ---
 

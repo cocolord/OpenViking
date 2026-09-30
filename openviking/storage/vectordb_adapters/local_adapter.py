@@ -87,18 +87,6 @@ class LocalCollectionAdapter(CollectionAdapter):
         result = collection.update_data(data_list)
         return list(result.ids or [])
 
-    def _dense_score_semantics(self, distance_metric: Optional[str]) -> Dict[str, Any]:
-        # cuVS (including auto-cuVS's native fallback) uses these same transforms.
-        scales = {
-            "cosine": ("cosine_affine_0_1", [0.0, 1.0]),
-            "ip": ("inner_product", None),
-            "l2": ("one_minus_squared_l2", [None, 1.0]),
-        }
-        if distance_metric not in scales:
-            return super()._dense_score_semantics(distance_metric)
-        scale, score_range = scales[distance_metric]
-        return {"scale": scale, "range": score_range, "higher_is_better": True}
-
     def begin_bulk_ingest(self) -> None:
         self.get_collection().begin_bulk_ingest()
 

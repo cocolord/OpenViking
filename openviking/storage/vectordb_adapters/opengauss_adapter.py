@@ -160,27 +160,6 @@ class OpenGaussCollectionAdapter(CollectionAdapter):
             return dict(_EMPTY_OR_FILTER)
         return compiled
 
-    def _get_distance_metric(
-        self, collection: Collection, index_meta: Dict[str, Any]
-    ) -> Optional[str]:
-        # Match OpenGaussCollection._resolve_distance_and_op, including its
-        # collection-level fallback when the named index has no metric override.
-        return index_meta.get("_distance") or index_meta.get(
-            "Distance", collection.get_meta_data().get("_distance")
-        )
-
-    def _dense_score_semantics(self, distance_metric: Optional[str]) -> Dict[str, Any]:
-        scales = {
-            "cosine": ("cosine_similarity", [-1.0, 1.0]),
-            "ip": ("inner_product", None),
-            "l2": ("inverse_one_plus_distance", [0.0, 1.0]),
-            "l1": ("inverse_one_plus_distance", [0.0, 1.0]),
-        }
-        if distance_metric not in scales:
-            return super()._dense_score_semantics(distance_metric)
-        scale, score_range = scales[distance_metric]
-        return {"scale": scale, "range": score_range, "higher_is_better": True}
-
     def _table_exists(self, table_name: str) -> bool:
         """Return True if *table_name* exists in the current schema.
 

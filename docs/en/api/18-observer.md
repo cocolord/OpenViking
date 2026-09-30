@@ -89,28 +89,29 @@ ov observer queue
 
 #### 1. API Implementation Overview
 
-Get VikingDB status (collections, indexes, vector counts).
+Get VikingDB status. The structured representation also reports the effective vector metric and pure-dense score scale when the backend can determine them from the loaded index.
 
 **Code Entry Points**:
 - `openviking/server/routers/observer.py:observer_vikingdb` - HTTP route
-- `openviking/service/debug_service.py:ObserverService.vikingdb` - Core implementation
-- `openviking/storage/observers/vikingdb_observer.py` - VikingDB observer
+- `openviking/service/debug_service.py:ObserverService.account_vikingdb` - Core implementation
 - `crates/ov_cli/src/commands/observer.rs` - CLI command
 
 #### 2. Interface and Parameters
 
-No parameters.
+| Parameter | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `format` | string | No | `table` | `table` returns the existing human-readable status; `json` returns structured runtime details. |
 
 #### 3. Usage Examples
 
 **HTTP API**
 
 ```
-GET /api/v1/observer/vikingdb
+GET /api/v1/observer/vikingdb?format=json
 ```
 
 ```bash
-curl -X GET http://localhost:1933/api/v1/observer/vikingdb \
+curl -X GET 'http://localhost:1933/api/v1/observer/vikingdb?format=json' \
   -H "X-API-Key: your-key"
 ```
 
@@ -160,11 +161,23 @@ ov observer vikingdb
     "name": "vikingdb",
     "is_healthy": true,
     "has_errors": false,
-    "status": "Collection  Index Count  Vector Count  Status\ncontext     1            55            OK\nTOTAL       1            55"
+    "status": {
+      "backend": "local",
+      "collection": "context",
+      "index": "default",
+      "dimension": 1024,
+      "vector_count": 55,
+      "distance_metric": "cosine",
+      "pure_dense_score_scale": "cosine_affine_0_1"
+    }
   },
   "time": 0.1
 }
 ```
+
+For the local backend, `pure_dense_score_scale` is `cosine_affine_0_1`, `inner_product`, or `one_minus_squared_l2` for cosine, IP, or L2 respectively. Other backends report `backend_defined`; `distance_metric` is `null` when their loaded metadata does not expose it.
+
+The field describes only a pure-dense vector score. Sparse fusion, time decay, reranking, and other retrieval stages can produce a different final `score` scale. Since v0.4.22, local pure-dense cosine uses `clamp((cosine_similarity + 1) / 2, 0, 1)`, including for existing indexes.
 
 ---
 

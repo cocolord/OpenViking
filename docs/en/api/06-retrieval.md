@@ -107,7 +107,7 @@ class MatchedContext:
     match_reason: str                # Why this matched
 ```
 
-`score` is not universally bounded to `[0, 1]`. Its scale depends on the vector backend and metric, and can change through sparse fusion, time decay, reranking, or hierarchical retrieval processing. For the current account's effective metric and **dense-only score scale before that processing**, use [`GET /api/v1/debug/vector/info`](../guides/05-observability.md#vector-metric-and-score-scale). Local/cuVS dense cosine scores use `clamp((cosine_similarity + 1) / 2, 0, 1)` from v0.4.22 onward; this does not define the scale of every final hit. Recalibrate fixed thresholds when changing engines, versions, or retrieval settings.
+`score` is not universally bounded to `[0, 1]`: its scale depends on the backend, metric and postprocessing. See [observer.vikingdb](18-observer.md#observervikingdb) for the runtime metric, pure-dense scale and its scope.
 
 #### 3. Usage Examples
 

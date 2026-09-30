@@ -108,7 +108,7 @@ class MatchedContext:
     match_reason: str                # 匹配原因
 ```
 
-`score` 并非总在 `[0, 1]` 范围内。其尺度取决于向量后端和 metric，也可能经过稀疏融合、时间衰减、rerank 或层级检索处理。当前账户的实际 metric 和**这些处理之前的纯 dense 分数尺度**可通过 [`GET /api/v1/debug/vector/info`](../guides/05-observability.md#向量-metric-与分数尺度) 查询。自 v0.4.22 起，local/cuVS 的 dense cosine 分数使用 `clamp((cosine_similarity + 1) / 2, 0, 1)`，但这不能代表所有最终命中的分数尺度。更换引擎、版本或检索设置后，请重新校准固定阈值。
+`score` 并非总在 `[0, 1]` 内，其尺度取决于后端、metric 和后处理。运行时 metric、纯 dense 尺度及其适用范围见 [observer.vikingdb](18-observer.md#observervikingdb)。
 
 #### 3. 使用示例
 

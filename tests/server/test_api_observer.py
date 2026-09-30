@@ -37,14 +37,17 @@ async def test_observer_queue_structured(client: httpx.AsyncClient):
 
 
 async def test_observer_vikingdb(client: httpx.AsyncClient):
-    """GET /api/v1/observer/vikingdb should return VikingDB status."""
-    resp = await client.get("/api/v1/observer/vikingdb")
+    """Structured VikingDB status should expose the loaded local index semantics."""
+    resp = await client.get("/api/v1/observer/vikingdb", params={"format": "json"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "ok"
     result = body["result"]
-    assert "name" in result
-    assert "is_healthy" in result
+    assert result["name"] == "vikingdb"
+    assert result["is_healthy"] is True
+    assert result["status"]["backend"] == "local"
+    assert result["status"]["distance_metric"] == "cosine"
+    assert result["status"]["pure_dense_score_scale"] == "cosine_affine_0_1"
 
 
 async def test_observer_models(client: httpx.AsyncClient):

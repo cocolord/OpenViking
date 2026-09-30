@@ -268,10 +268,6 @@ class VikingDBManagerProxy:
     async def get_collection_meta(self) -> Optional[Dict[str, Any]]:
         return await self._manager.get_collection_meta(ctx=self._ctx)
 
-    async def get_vector_info(self) -> Optional[Dict[str, Any]]:
-        backend = await self._manager.get_account_backend(self._ctx.account_id)
-        return await backend.get_vector_info()
-
     async def update_collection_description(self, description: str) -> bool:
         backend = await self._manager.get_account_backend(self._ctx.account_id)
         return await backend.update_collection_description(description)

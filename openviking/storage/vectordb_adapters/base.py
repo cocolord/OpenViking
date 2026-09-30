@@ -238,45 +238,6 @@ class CollectionAdapter(ABC):
             return None
         return self.get_collection().get_meta_data()
 
-    def get_vector_info(self) -> Optional[Dict[str, Any]]:
-        """Describe the loaded index's dense scores before fusion or postprocessing.
-
-        Read index metadata rather than the creation config: an existing index
-        can retain a different metric after a restart. Backends without metadata
-        support must report an unknown metric, not the configured default.
-        """
-        if not self.collection_exists():
-            return None
-        collection = self.get_collection()
-        try:
-            index_meta = collection.get_index_meta_data(self._index_name) or {}
-        except NotImplementedError:
-            index_meta = {}
-        distance_metric = self._get_distance_metric(collection, index_meta)
-        return {
-            "backend": self.mode,
-            "collection_name": self._collection_name,
-            "index_name": self._index_name,
-            "distance_metric": distance_metric,
-            "dense_score": self._dense_score_semantics(distance_metric),
-        }
-
-    def _get_distance_metric(
-        self, collection: Collection, index_meta: Dict[str, Any]
-    ) -> Optional[str]:
-        vector_meta = index_meta.get("VectorIndex") or {}
-        distance = vector_meta.get("Distance")
-        if not isinstance(distance, str):
-            return None
-        if distance.lower() == "ip" and vector_meta.get("NormalizeVector") is True:
-            return "cosine"
-        return distance.lower()
-
-    def _dense_score_semantics(self, distance_metric: Optional[str]) -> Dict[str, Any]:
-        # Remote services (including different versions of the HTTP engine) and
-        # custom adapters may implement their own transforms for the same metric.
-        return {"scale": "backend_defined", "range": None, "higher_is_better": None}
-
     def _sanitize_scalar_index_fields(
         self,
         scalar_index_fields: list[str],
