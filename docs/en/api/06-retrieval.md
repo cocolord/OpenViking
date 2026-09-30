@@ -107,7 +107,7 @@ class MatchedContext:
     match_reason: str                # Why this matched
 ```
 
-`score` is not universally bounded to `[0, 1]`: its scale depends on the backend, metric and postprocessing. See [observer.vikingdb](18-observer.md#observervikingdb) for the runtime metric, pure-dense scale and its scope.
+`score` is not universally bounded to `[0, 1]`: its scale depends on the backend, metric and postprocessing. See [observer.vikingdb](18-observer.md#observer-vikingdb) for the runtime metric, pure-dense scale and its scope.
 
 #### 3. Usage Examples
 

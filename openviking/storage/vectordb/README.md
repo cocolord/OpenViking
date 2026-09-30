@@ -450,7 +450,7 @@ for idx_name in indexes:
 
 `IndexMeta._get_user_meta()` 会反向转换；`collection.get_index_meta_data(index_name)` 返回用户可见的 `"Distance": "cosine"`。这个磁盘格式不记录引擎分数尺度：从 v0.4.22 起，local 的纯 dense cosine 分数使用 `clamp((cosine_similarity + 1) / 2, 0, 1)`，无需重建已有索引。普通 IP 分数不变，仍为内积。稀疏融合、时间衰减和 rerank 等处理后的分数不能直接套用此公式。
 
-运行时可通过 [`GET /api/v1/observer/vikingdb?format=json`](../../../docs/zh/api/18-observer.md#observervikingdb) 查询当前账户索引的实际 metric 和纯 dense 分数尺度。
+运行时可通过 [`GET /api/v1/observer/vikingdb?format=json`](../../../docs/zh/api/18-observer.md#observer-vikingdb) 查询当前账户索引的实际 metric 和纯 dense 分数尺度。
 
 #### 3.2 更新索引
 

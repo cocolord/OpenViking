@@ -108,7 +108,7 @@ class MatchedContext:
     match_reason: str                # 匹配原因
 ```
 
-`score` 并非总在 `[0, 1]` 内，其尺度取决于后端、metric 和后处理。运行时 metric、纯 dense 尺度及其适用范围见 [observer.vikingdb](18-observer.md#observervikingdb)。
+`score` 并非总在 `[0, 1]` 内，其尺度取决于后端、metric 和后处理。运行时 metric、纯 dense 尺度及其适用范围见 [observer.vikingdb](18-observer.md#observer-vikingdb)。
 
 #### 3. 使用示例
 
