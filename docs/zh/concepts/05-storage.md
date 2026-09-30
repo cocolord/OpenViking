@@ -133,6 +133,18 @@ index_meta = {
 }
 ```
 
+### 磁盘中的向量 metric 表示
+
+本地索引在 `index_meta.json` 中保存引擎内部表示。用户配置的 `"Distance": "cosine"` 会在 `VectorIndex` 中存为：
+
+```json
+{"Distance": "ip", "NormalizeVector": true}
+```
+
+这两个字段组合表示 **cosine**，通过向量归一化加内积实现。`"Distance": "ip"` 且 `"NormalizeVector": false` 才表示普通内积。离线工具必须同时检查这两个字段。`IndexMeta._get_user_meta()` 会反向转换，因此 `collection.get_index_meta_data(index_name)` 返回的是 `"Distance": "cosine"`。
+
+磁盘文件标识 metric，但不标识运行中引擎的分数尺度。自 v0.4.22 起，local/cuVS 的 dense cosine 分数为 `clamp((cosine_similarity + 1) / 2, 0, 1)`。已有 cosine 索引无需重建或修改元数据也会应用该转换；普通 IP 分数仍为内积。可以通过 [`GET /api/v1/debug/vector/info`](../guides/05-observability.md#向量-metric-与分数尺度) 查询运行时的 metric 和 dense 分数尺度。从旧 cosine 尺度升级后，需要重新校准固定阈值。
+
 ### 后端支持
 
 | 后端 | 说明 |

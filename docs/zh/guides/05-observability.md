@@ -15,6 +15,7 @@
 | 入口 | 适合看什么 | 典型场景 |
 | --- | --- | --- |
 | `/health`、`observer/*` | 服务是否健康、队列是否堆积、VikingDB/VLM 状态 | 部署验收、值班巡检 |
+| `/api/v1/debug/vector/info` | 实际向量 metric 与 dense 分数尺度 | 核对分数阈值与升级后的行为 |
 | `ov tui` | `viking://` 文件树、目录摘要、文件正文、向量记录、受支持图片文件的预览 | 开发调试、核对资源是否真正落库 |
 | `Web Studio`（`/studio`） | 同 OV server 的 Web UI：Home 看 token / 检索 / context commits 趋势，Resources 浏览 URI，Retrieval 直接发 find，Request Logs 看审计日志 | 不想手敲命令时做交互式排查 |
 | `telemetry` | 单次请求耗时、token、向量检索、资源处理阶段 | 排查一次具体调用为什么慢、为什么结果异常 |
@@ -106,6 +107,48 @@ curl http://localhost:1933/api/v1/debug/health \
 ```json
 {"status": "ok", "result": {"healthy": true}}
 ```
+
+### 向量 metric 与分数尺度
+
+`GET /api/v1/debug/vector/info` 描述当前认证账户的向量索引。接口读取已加载索引的元数据，即使创建配置后来发生变化，也会报告现有索引的实际 metric。在 API-key 模式下，请使用账户的 ADMIN 或 USER API key；ROOT key 不能访问这个租户级接口。
+
+```bash
+curl http://localhost:1933/api/v1/debug/vector/info \
+  -H "X-API-Key: your-account-key"
+```
+
+```json
+{
+  "status": "ok",
+  "result": {
+    "backend": "local",
+    "collection_name": "context",
+    "index_name": "default",
+    "distance_metric": "cosine",
+    "dense_score": {
+      "scale": "cosine_affine_0_1",
+      "range": [0.0, 1.0],
+      "higher_is_better": true
+    }
+  }
+}
+```
+
+`dense_score` 描述的是**仅使用 dense 向量、尚未进行稀疏融合、时间衰减、rerank 或层级检索处理时的分数**，不能代表所有 `find` / `search` 最终命中的分数尺度。Reranker、其他召回通道的融合分数，以及检索过程中生成的候选分数，可能遵循不同规则；请根据实际使用的检索流程校准阈值。
+
+| 后端 | `distance_metric` | `dense_score.scale` | 转换公式 | `range` |
+| --- | --- | --- | --- | --- |
+| `local`、`cuvs` | `cosine` | `cosine_affine_0_1` | `clamp((cosine_similarity + 1) / 2, 0, 1)` | `[0, 1]` |
+| `local`、`cuvs` | `ip` | `inner_product` | 内积 | `null`（无界） |
+| `local`、`cuvs` | `l2` | `one_minus_squared_l2` | `1 - squared_l2_distance` | `[null, 1]` |
+| `opengauss` | `cosine` | `cosine_similarity` | `1 - cosine_distance` | `[-1, 1]` |
+| `opengauss` | `ip` | `inner_product` | 内积 | `null`（无界） |
+| `opengauss` | `l2`、`l1` | `inverse_one_plus_distance` | `1 / (1 + max(distance, 0))` | `[0, 1]` |
+| 分数规则未知的远程或自定义后端 | 来自元数据的 metric，或 `null` | `backend_defined` | 由后端决定 | `null`（未知） |
+
+已知分数尺度的 `higher_is_better` 为 `true`。范围数组中某个边界为 `null` 表示该方向无界。对于 `backend_defined`，`range` 和 `higher_is_better` 均为 `null`；仅知道 metric 并不足以确定远程引擎的分数转换规则。后端无法提供 metric 时，`distance_metric` 为 `null`。集合不存在返回 HTTP 404（`NOT_FOUND`），向量管理器未初始化返回 HTTP 503（`NO_VECTOR_DB`）。
+
+从 v0.4.22 起，local 和 cuVS 的 dense cosine 分数由余弦相似度变为 `(cosine_similarity + 1) / 2`，现有索引无需重建也会应用该转换。固定阈值不会自动调整。审计索引文件时，请参阅[磁盘中的向量 metric 表示](../concepts/05-storage.md#磁盘中的向量-metric-表示)。
 
 ### 响应时间
 

@@ -6,6 +6,7 @@ Provides debug API for system diagnostics.
 - /api/v1/debug/health - Quick health check
 - /api/v1/debug/vector/scroll - Paginated vector records
 - /api/v1/debug/vector/count - Count vector records
+- /api/v1/debug/vector/info - Effective metric and dense score semantics
 """
 
 from typing import Optional
@@ -41,6 +42,22 @@ async def debug_health(
     )
 
 
+@router.get("/vector/info")
+async def debug_vector_info(
+    ctx: RequestContext = Depends(get_request_context),
+):
+    """Describe the current account's vector index, before score postprocessing."""
+    service = get_service()
+    if not service.vikingdb_manager:
+        return error_response(code="NO_VECTOR_DB", message="Vector DB not initialized")
+
+    proxy = VikingDBManagerProxy(service.vikingdb_manager, ctx)
+    info = await proxy.get_vector_info()
+    if info is None:
+        return error_response(code="NOT_FOUND", message="Vector collection not found")
+    return Response(status="ok", result=info)
+
+
 @router.get("/vector/scroll")
 async def debug_vector_scroll(
     limit: int = Query(100, ge=1, le=1000),
@@ -51,9 +68,7 @@ async def debug_vector_scroll(
     """Get paginated vector records with tenant isolation."""
     service = get_service()
     if not service.vikingdb_manager:
-        return error_response(
-            code="NO_VECTOR_DB", message="Vector DB not initialized"
-        )
+        return error_response(code="NO_VECTOR_DB", message="Vector DB not initialized")
 
     proxy = VikingDBManagerProxy(service.vikingdb_manager, _ctx)
 
@@ -79,9 +94,7 @@ async def debug_vector_count(
 
     service = get_service()
     if not service.vikingdb_manager:
-        return error_response(
-            code="NO_VECTOR_DB", message="Vector DB not initialized"
-        )
+        return error_response(code="NO_VECTOR_DB", message="Vector DB not initialized")
 
     proxy = VikingDBManagerProxy(service.vikingdb_manager, _ctx)
 
@@ -90,9 +103,7 @@ async def debug_vector_count(
         try:
             filter_expr = json.loads(filter)
         except json.JSONDecodeError:
-            return error_response(
-                code="INVALID_FILTER", message="Invalid filter JSON"
-            )
+            return error_response(code="INVALID_FILTER", message="Invalid filter JSON")
 
     if uri:
         # Resolve path variables before using URI

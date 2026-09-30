@@ -15,6 +15,7 @@ If you just want to know where to look first, start with the table below.
 | Entry point | Best for | Typical use case |
 | --- | --- | --- |
 | `/health`, `observer/*` | service health, queue backlog, VikingDB and VLM status | deployment validation, on-call checks |
+| `/api/v1/debug/vector/info` | effective vector metric and dense score scale | checking score thresholds and upgrade behavior |
 | `ov tui` | `viking://` trees, directory summaries, file content, vector records, image preview for supported image files | development debugging, verifying that data actually landed |
 | `Web Studio` (`/studio`) | same-origin web UI on the OV server: Home shows token / retrieval / context-commit trends; Resources browses URIs; Retrieval runs find; Request Logs shows audit | interactive investigation without typing every command |
 | `telemetry` | per-request duration, token usage, vector retrieval, ingestion stages | debugging one specific slow or unexpected call |
@@ -106,6 +107,48 @@ curl http://localhost:1933/api/v1/debug/health \
 ```json
 {"status": "ok", "result": {"healthy": true}}
 ```
+
+### Vector metric and score scale
+
+`GET /api/v1/debug/vector/info` describes the authenticated account's current vector index. It reads the loaded index metadata, so an existing index's metric is reported even if the creation configuration has since changed. Use an account ADMIN or USER API key in API-key mode; ROOT keys cannot access this tenant-scoped endpoint.
+
+```bash
+curl http://localhost:1933/api/v1/debug/vector/info \
+  -H "X-API-Key: your-account-key"
+```
+
+```json
+{
+  "status": "ok",
+  "result": {
+    "backend": "local",
+    "collection_name": "context",
+    "index_name": "default",
+    "distance_metric": "cosine",
+    "dense_score": {
+      "scale": "cosine_affine_0_1",
+      "range": [0.0, 1.0],
+      "higher_is_better": true
+    }
+  }
+}
+```
+
+`dense_score` describes **dense-only vector scores before sparse fusion, time decay, reranking, or hierarchical retrieval processing**. It does not specify the scale of every final `find` / `search` hit. Scores from a reranker, fused channels, or retrieval-generated candidates can follow different conventions; calibrate thresholds against the retrieval pipeline you use.
+
+| Backend | `distance_metric` | `dense_score.scale` | Transformation | `range` |
+| --- | --- | --- | --- | --- |
+| `local`, `cuvs` | `cosine` | `cosine_affine_0_1` | `clamp((cosine_similarity + 1) / 2, 0, 1)` | `[0, 1]` |
+| `local`, `cuvs` | `ip` | `inner_product` | inner product | `null` (unbounded) |
+| `local`, `cuvs` | `l2` | `one_minus_squared_l2` | `1 - squared_l2_distance` | `[null, 1]` |
+| `opengauss` | `cosine` | `cosine_similarity` | `1 - cosine_distance` | `[-1, 1]` |
+| `opengauss` | `ip` | `inner_product` | inner product | `null` (unbounded) |
+| `opengauss` | `l2`, `l1` | `inverse_one_plus_distance` | `1 / (1 + max(distance, 0))` | `[0, 1]` |
+| Remote or custom backends without a known score contract | metric from metadata, or `null` | `backend_defined` | backend-specific | `null` (unknown) |
+
+For known scales, `higher_is_better` is `true`. A `null` bound in a range means that side is unbounded. For `backend_defined`, both `range` and `higher_is_better` are `null`; a known metric alone does not establish a remote engine's score transformation. `distance_metric` is `null` when the backend cannot expose it. A missing collection returns HTTP 404 (`NOT_FOUND`); an uninitialized vector manager returns HTTP 503 (`NO_VECTOR_DB`).
+
+Local and cuVS dense cosine scores changed from cosine similarity to `(cosine_similarity + 1) / 2` in v0.4.22, including for existing indexes without reindexing. Fixed thresholds are not adjusted automatically. See [the on-disk metric representation](../concepts/05-storage.md#on-disk-vector-metric) when auditing index files.
 
 ### Response time
 

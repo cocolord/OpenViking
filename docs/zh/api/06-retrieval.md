@@ -104,9 +104,11 @@ class MatchedContext:
     abstract: str                    # L0 内容
     overview: Optional[str]          # L1 概览（非叶子节点时可选）
     category: str                    # 分类
-    score: float                     # 相关性分数 (0-1)
+    score: float                     # 相关性分数，尺度取决于检索流程
     match_reason: str                # 匹配原因
 ```
+
+`score` 并非总在 `[0, 1]` 范围内。其尺度取决于向量后端和 metric，也可能经过稀疏融合、时间衰减、rerank 或层级检索处理。当前账户的实际 metric 和**这些处理之前的纯 dense 分数尺度**可通过 [`GET /api/v1/debug/vector/info`](../guides/05-observability.md#向量-metric-与分数尺度) 查询。自 v0.4.22 起，local/cuVS 的 dense cosine 分数使用 `clamp((cosine_similarity + 1) / 2, 0, 1)`，但这不能代表所有最终命中的分数尺度。更换引擎、版本或检索设置后，请重新校准固定阈值。
 
 #### 3. 使用示例
 

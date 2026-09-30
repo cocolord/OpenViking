@@ -137,6 +137,18 @@ index_meta = {
 }
 ```
 
+### On-disk vector metric
+
+Local indexes persist the internal engine representation in `index_meta.json`. Within `VectorIndex`, a user-facing `"Distance": "cosine"` is stored as:
+
+```json
+{"Distance": "ip", "NormalizeVector": true}
+```
+
+This pair means **cosine**, implemented with normalized vectors and inner product. `"Distance": "ip"` with `"NormalizeVector": false` means plain inner product. Offline tools must inspect both fields. `IndexMeta._get_user_meta()` reverses this representation, so `collection.get_index_meta_data(index_name)` exposes `"Distance": "cosine"`.
+
+The file identifies the metric, not the running engine's score scale. From v0.4.22 onward, local/cuVS dense cosine scores are `clamp((cosine_similarity + 1) / 2, 0, 1)`. The change also applies to existing cosine indexes without reindexing or metadata changes; plain IP scores remain inner products. Use [`GET /api/v1/debug/vector/info`](../guides/05-observability.md#vector-metric-and-score-scale) to inspect the runtime metric and dense score scale. Fixed thresholds require recalibration after upgrading from the old cosine scale.
+
 ### Backend Support
 
 | Backend | Description |

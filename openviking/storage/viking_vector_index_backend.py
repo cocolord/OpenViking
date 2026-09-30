@@ -519,6 +519,10 @@ class _SingleAccountBackend:
         return await self._async_adapter.collection_meta(self._index_name)
 
     @_backend_operation
+    async def get_vector_info(self) -> Optional[Dict[str, Any]]:
+        return await self._async_adapter.call("get_vector_info")
+
+    @_backend_operation
     async def update_collection_description(self, description: str) -> bool:
         if not await self.collection_exists():
             return False
