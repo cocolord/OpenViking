@@ -38,7 +38,7 @@ from tests.storage.test_transfer_merge_binding import indexed_fs as indexed_fs
 
 
 class FakeVikingFS:
-    _ensure_restore_target_ttl = VikingFS._ensure_restore_target_ttl
+    _ensure_restore_targets_ttl = VikingFS._ensure_restore_targets_ttl
     _ttl_metadata_target = staticmethod(VikingFS._ttl_metadata_target)
     _ttl_expiry_for_write = VikingFS._ttl_expiry_for_write
     _handle_agfs_read = VikingFS._handle_agfs_read
@@ -1335,8 +1335,9 @@ async def test_account_backup_includes_restricted_originals_without_crossing_acc
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("directory_conflict", [False, True])
 async def test_account_restore_overwrites_original_beneath_existing_restricted_root(
-    indexed_fs, tmp_path, monkeypatch
+    indexed_fs, tmp_path, monkeypatch, directory_conflict
 ):
     fs, admin, reader, outsider, original = await _restricted_pack_source(indexed_fs)
     archive = tmp_path / "account.ovpack"
@@ -1350,7 +1351,11 @@ async def test_account_restore_overwrites_original_beneath_existing_restricted_r
         acl_mode=AclMode.RESTRICTED,
         ctx=admin,
     )
-    await fs.write_file_bytes(original, b"superseded content", ctx=admin)
+    conflict_uri = original
+    if directory_conflict:
+        await fs.rm(original, ctx=admin)
+        conflict_uri += "/child.md"
+    await fs.write_file_bytes(conflict_uri, b"superseded content", ctx=admin)
     enqueue = AsyncMock()
     monkeypatch.setattr(
         "openviking.storage.ovpack.operations._enqueue_direct_vectorization", enqueue
@@ -1358,7 +1363,7 @@ async def test_account_restore_overwrites_original_beneath_existing_restricted_r
 
     with pytest.raises(PermissionDeniedError):
         await PackService(fs).restore_ovpack(str(archive), ctx=reader, on_conflict="overwrite")
-    assert await fs.read_file_bytes(original, ctx=reader) == b"superseded content"
+    assert await fs.read_file_bytes(conflict_uri, ctx=reader) == b"superseded content"
     assert (
         await PackService(fs).restore_ovpack(str(archive), ctx=admin, on_conflict="overwrite")
         == "viking://"

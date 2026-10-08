@@ -375,6 +375,7 @@ class _RestoreAGFS:
         self.current = current or {}
 
     async def stat(self, path, **kwargs):
+        self.calls.append(("stat", path))
         if path not in self.current:
             raise FileNotFoundError(path)
         return {"isDir": False}
@@ -455,7 +456,13 @@ async def test_restore_marks_account_before_writeback_and_preserves_partial_erro
         else None
     )
     agfs = _RestoreAGFS(
-        plan=_restore_plan(to_write=(event_path, session_meta)),
+        plan=_restore_plan(
+            to_write=(
+                event_path,
+                session_meta,
+                *(f"user/user/sessions/s1/{i}.txt" for i in range(20)),
+            )
+        ),
         blobs={event_path: _ttl_metadata(), session_meta: _ttl_metadata()},
         result=result,
         error=error,
@@ -477,6 +484,7 @@ async def test_restore_marks_account_before_writeback_and_preserves_partial_erro
     else:
         await vfs.restore(source_commit="source", ctx=_request_context())
     assert vfs.ttl_registry.mark_account.await_count == 2
+    assert len([op for op, _ in agfs.calls if op == "stat"]) == 2
     assert (
         next(args for op, args in agfs.calls if op == "git_restore" and not args.get("dry_run"))[
             "source_commit"
@@ -539,16 +547,12 @@ async def test_restore_dry_run_does_not_write_account_marker():
 
 @pytest.mark.parametrize("operation", ["show", "show_blob_raw", "diff"])
 @pytest.mark.parametrize("scope", ["event", "session"])
-@pytest.mark.parametrize("current_expired", [False, True])
-async def test_snapshot_reads_enforce_historical_and_current_expiry(
-    monkeypatch, operation, scope, current_expired
-):
+@pytest.mark.parametrize("live_expiry", [None, "2000-01-01T00:00:00Z", "", "2040-01-01T00:00:00Z"])
+async def test_snapshot_reads_enforce_historical_and_current_expiry(operation, scope, live_expiry):
     from openviking.core import ttl
     from openviking.storage.ttl_registry import TTLRegistry
-    from openviking_cli.utils.config.ttl_config import TTLConfig
     from tests.unit.storage.ttl_test_storage import MemoryAGFS
 
-    monkeypatch.setattr(ttl, "get_openviking_config", lambda: SimpleNamespace(ttl=TTLConfig()))
     fs = VikingFS(agfs=SimpleNamespace())
     agfs = MemoryAGFS()
     fs._async_agfs = agfs
@@ -568,12 +572,15 @@ async def test_snapshot_reads_enforce_historical_and_current_expiry(
         uri.removeprefix("viking://"): b"expired body",
         meta_uri.removeprefix("viking://"): metadata,
     }
-    if current_expired:
-        await fs.write_file(meta_uri, metadata, ctx=ctx)
+    if live_expiry is not None:
+        await fs.write_file(meta_uri, json.dumps({"expires_at": live_expiry}), ctx=ctx)
+    if live_expiry == "2000-01-01T00:00:00Z":
         # Even a snapshot predating TTL adoption must obey the current fence.
         blobs = {uri.removeprefix("viking://"): b"old unmanaged body"}
 
     async def run(operation, **kwargs):
+        if operation == "git_diff_text":
+            return kwargs["after"]
         assert operation == "git_show"
         path = kwargs.get("path")
         if path is None:
@@ -584,7 +591,10 @@ async def test_snapshot_reads_enforce_historical_and_current_expiry(
         return {"oid": "blob", "bytes": value, "size": len(value)}
 
     agfs.run = run
-    with pytest.raises(NotFoundError):
+    from contextlib import nullcontext
+
+    expired = live_expiry is None or live_expiry == "2000-01-01T00:00:00Z"
+    with pytest.raises(NotFoundError) if expired else nullcontext():
         if operation == "diff":
             await fs.diff(path=uri, from_ref=None, to_ref="main", ctx=ctx)
         else:

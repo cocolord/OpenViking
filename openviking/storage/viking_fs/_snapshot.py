@@ -134,29 +134,21 @@ class _SnapshotMixin:
     def _restore_tree_path(tree_dir: Optional[str], relative_path: str) -> str:
         return f"{tree_dir or ''}/{relative_path}".strip("/")
 
-    async def _ensure_restore_target_ttl(self, uri: str, *, ctx: RequestContext) -> None:
-        """Reject raw overwrites that cannot preserve an existing lifecycle.
-
-        Snapshot and package restore publish original bytes, bypassing normal
-        write admission. Call under their write lock before any write or removal.
-        """
-        target = ttl_object_for_uri(uri)
-        if target is None:
-            return
-        _, owner = target
+    async def _ensure_restore_targets_ttl(self, uris, *, ctx: RequestContext) -> None:
+        """Check each affected owner once, under the restore operation's lock."""
         from openviking.storage.directory_ttl import read_directory_fields
 
-        fields = await read_directory_fields(self, owner, ctx=ctx)
-        expires_at = str(fields.get("expires_at") or "")
-        if not expires_at:
-            return
-        if hidden_by_ttl(expires_at):
-            raise NotFoundError(owner, "restore target")
-        raise ConflictError(
-            "Raw restore cannot preserve an existing TTL lifecycle; "
-            "update the live content through the content API instead",
-            resource=owner,
-        )
+        owners = {target[1] for uri in uris if (target := ttl_object_for_uri(uri))}
+        for owner in sorted(owners):
+            fields = await read_directory_fields(self, owner, ctx=ctx)
+            if hidden_by_ttl(fields.get("expires_at")):
+                raise NotFoundError(owner, "restore target")
+            if fields.get("expires_at"):
+                raise ConflictError(
+                    "Raw restore cannot preserve an existing TTL lifecycle; "
+                    "update the live content through the content API instead",
+                    resource=owner,
+                )
 
     async def _ensure_restore_plan_ttl(self, plan, *, tree_dir, real_ctx) -> None:
         """Validate every target and source fence before native writeback."""
@@ -164,16 +156,16 @@ class _SnapshotMixin:
             self._tree_path_to_uri(self._restore_tree_path(tree_dir, str(item["path"])))
             for item in plan["diff"]["to_write"]
         }
-        checked_sources: set[str] = set()
-        for uri in sorted(writes):
-            await self._ensure_restore_target_ttl(uri, ctx=real_ctx)
-            target = ttl_object_for_uri(uri)
-            if target is None:
-                continue
-            metadata_uri = ttl_metadata_uri(*target)
-            if metadata_uri in checked_sources:
-                continue
-            checked_sources.add(metadata_uri)
+        # Removing ordinary content does not detach its owner. Removing owner
+        # metadata can, even if native writeback fails partway through.
+        targets = set(writes)
+        for relative_path in plan["diff"]["to_delete"]:
+            uri = self._tree_path_to_uri(self._restore_tree_path(tree_dir, str(relative_path)))
+            if self._ttl_metadata_target(uri):
+                targets.add(uri)
+        await self._ensure_restore_targets_ttl(targets, ctx=real_ctx)
+        sources = {target for uri in writes if (target := ttl_object_for_uri(uri))}
+        for target in sorted(sources):
             metadata = await self._snapshot_ttl_metadata(target, str(plan["source"]), ctx=real_ctx)
             if metadata is None:
                 continue
@@ -185,15 +177,8 @@ class _SnapshotMixin:
                 await self.ttl_registry.mark_account(real_ctx.account_id)
                 if metadata_uri not in writes:
                     raise ConflictError(
-                        "Restore must include the source object's TTL metadata", resource=uri
+                        "Restore must include the source object's TTL metadata", resource=target[1]
                     )
-        for relative_path in plan["diff"]["to_delete"]:
-            uri = self._tree_path_to_uri(self._restore_tree_path(tree_dir, str(relative_path)))
-            target = self._ttl_metadata_target(uri)
-            if target is not None:
-                # Native multi-file deletion can fail after removing metadata.
-                # Do not detach a surviving file/session from its current fence.
-                await self._ensure_restore_target_ttl(uri, ctx=real_ctx)
 
     async def system_sync_status(
         self, uri: str, ctx: Optional[RequestContext] = None
@@ -661,25 +646,17 @@ class _SnapshotMixin:
         return None
 
     async def _ensure_snapshot_ttl_visible(self, uri, source_ref, *, ctx):
-        """Check source expiry and the selected snapshot's own lifecycle metadata."""
-        scope = ttl_scope_for_uri(uri)
-        if scope is None:
-            return
-        if not await self._ttl_uri_visible(uri, ctx):
-            raise NotFoundError(uri, "git_blob")
+        """Use the live deadline, falling back to the snapshot after deletion."""
         target = ttl_object_for_uri(uri)
         if target is None:
             return
-        _, owner = target
-        metadata = await self._snapshot_ttl_metadata(target, source_ref, ctx=ctx)
-        if metadata is None:
-            return
-        fields = json.loads(metadata[1]["bytes"])
         from openviking.storage.directory_ttl import read_directory_fields
 
-        live = await read_directory_fields(self, owner, ctx=ctx)
-        expiry = live.get("expires_at", fields.get("expires_at"))
-        if hidden_by_ttl(expiry):
+        fields = await read_directory_fields(self, target[1], ctx=ctx)
+        if "expires_at" not in fields:
+            metadata = await self._snapshot_ttl_metadata(target, source_ref, ctx=ctx)
+            fields = json.loads(metadata[1]["bytes"]) if metadata else {}
+        if hidden_by_ttl(fields.get("expires_at")):
             raise NotFoundError(uri, "git_blob")
 
     async def _read_snapshot_blob(self, target_ref, *, path, ctx, max_blob_bytes=None):

@@ -40,6 +40,8 @@ At `now >= expires_at` in UTC, the directory and all descendants become invisibl
 
 Structured objects expose their owner's `expires_at`, explicitly `null` without TTL. Mixed results carry per-item deadlines. Single-owner text/list responses include the deadline in the envelope. URI-only listing compatibility modes and download bytes keep their existing shape and still enforce server filtering. Root/year/month containers have no shared expiry; policy roots also expose `policy` and `effective_policy`.
 
+Snapshot reads use the live directory deadline, or the snapshot deadline after deletion. Raw import and restore reject overwrites of directories that still have TTL, and reject expired source data, so restoration cannot detach content from its deadline. Each affected directory is checked once, avoiding repeated metadata reads for sibling files.
+
 ## Cleanup and performance
 
 Cleanup uses the existing Session commit QueueFS worker framework. The scheduler scans owner directory metadata in accounts that have used TTL, sends expired owners to the queue, and continues in bounded batches while the queue drains. After finishing a pass it waits one day by default. The account marker stores no object deadlines; there is no per-object scheduling index or claim lease.
@@ -49,6 +51,8 @@ The worker rechecks the owner deadline under its metadata file lock and reuses t
 Lock contention, vector deletion failure or remaining body files preserve the owner deadline for the next pass. Restarting the scheduler rediscovers candidates from directory metadata; it needs no durable scan cursor or task-history lookup. A failure of the final confirmation request still reports an error even if the data was already deleted. Pre-existing vector-only orphans whose owner metadata is also gone cannot be discovered by a directory scan; strict deletion can remove them when their owner URI is known.
 
 Scanning costs O(owner directories in accounts that have used TTL) per pass. Each page examines at most `batch_size` owners, checks a time budget between owners, and waits for queued work to drain. This bounds queued deletion work, while storage listing latency and backlog can extend the daily pass. It avoids maintaining a second expiry record on writes, transfers, and restores.
+
+System strict cleanup deletes vectors directly by directory URI scope, avoiding a separate file-tree traversal to collect vector URIs. File deletion still takes individual locks and confirms the result.
 
 Result batches share owner metadata reads. Directory `count` uses the backend total and converges after physical cleanup, avoiding a full vector scan for real-time expiry counts. Returned content still enforces expiry immediately. Billing may lag physical deletion. OV cleanup alone does not verify cloud billing, gateway forwarding or backup erasure.
 

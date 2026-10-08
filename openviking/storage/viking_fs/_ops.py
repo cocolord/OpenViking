@@ -33,7 +33,7 @@ from openviking.storage.abstract_overview import (
     rewrite_abstract_overview_for_transfer,
 )
 from openviking.storage.acl import AclAction, is_acl_uri
-from openviking.storage.directory_ttl import content_update, directory_content_write
+from openviking.storage.directory_ttl import content_update, directory_write
 from openviking.storage.errors import StorageException
 from openviking.storage.expr import And, PathScope, RawDSL
 from openviking.storage.internal_names import is_storage_internal_name
@@ -253,7 +253,8 @@ class _OpsMixin:
         """
         from openviking.storage.errors import LockAcquisitionError, ResourceBusyError
 
-        guard_ctx = replace(self._ctx_or_default(ctx), bypass_acl=True)
+        real_ctx = self._ctx_or_default(ctx)
+        guard_ctx = replace(real_ctx, bypass_acl=True)
         await self._ensure_access(uri, guard_ctx, action=AclAction.MANAGE)
         await self._ensure_access(uri, ctx, action=AclAction.WRITE)
         path = self._uri_to_path(uri, ctx=ctx)
@@ -296,7 +297,6 @@ class _OpsMixin:
             # Path does not exist: clean up any orphan index records and return
             uris_to_delete = await self._collect_uris(path, recursive, ctx=ctx)
             uris_to_delete.append(target_uri)
-            real_ctx = self._ctx_or_default(ctx)
             estimated_count = await _estimate_deleted_count(path, real_ctx)
             await self._delete_from_vector_store(
                 uris_to_delete,
@@ -341,13 +341,14 @@ class _OpsMixin:
                     ctx=ctx,
                     strict=is_dir and await self._acl_enabled(ctx),
                 )
-                if is_dir
+                # Strict system cleanup deletes vectors by URI scope. It needs
+                # no per-file vector list or descendant ACL walk as ROOT.
+                if is_dir and not (strict and real_ctx.role == Role.ROOT)
                 else []
             )
             uris_to_delete.append(target_uri)
             if is_dir:
                 await self._ensure_access_many(uris_to_delete, ctx, action=AclAction.MANAGE)
-            real_ctx = self._ctx_or_default(ctx)
             estimated_count = await _estimate_deleted_count(path, real_ctx)
             await self._delete_from_vector_store(
                 uris_to_delete,
@@ -2090,7 +2091,6 @@ class _OpsMixin:
 
     # ========== Other Preserved Methods ==========
 
-    @directory_content_write
     async def write_file(
         self,
         uri: str,
@@ -2098,6 +2098,8 @@ class _OpsMixin:
         ctx: Optional[RequestContext] = None,
         lease_ref: Dict[str, Any] | None = None,
         auto_pathlock: bool = True,
+        *,
+        allow_empty_directory: bool = False,
     ) -> Any:
         """Write file directly. Encryption lock handled internally by EncryptionWrappedFS.
 
@@ -2105,28 +2107,34 @@ class _OpsMixin:
         automatic pathlock disabled. Only safe for URIs that are never written
         concurrently (e.g. unique-per-request shared upload directories).
         """
-        path = self._uri_to_path(uri, ctx=ctx)
-        await self._ensure_parent_dirs(path, ctx=ctx, lease_ref=lease_ref)
-
-        if isinstance(content, str):
-            content = content.encode("utf-8")
-
-        owned_lease = None
-        effective_lease = lease_ref
-        if effective_lease is None and auto_pathlock:
-            effective_lease = await self._async_agfs.pathlock_acquire_exact(path)
-            owned_lease = effective_lease
-        try:
-            await self._mark_ttl_write(uri, content, ctx=ctx)
-            return await self._async_agfs.write(
-                path,
-                content,
-                fs_ctx=self._pathlock_fs_ctx(ctx, effective_lease),
-                auto_pathlock=False if effective_lease is not None else auto_pathlock,
-            )
-        finally:
-            if owned_lease is not None:
-                await self._async_agfs.pathlock_release(owned_lease)
+        await self._ensure_access(uri, ctx, action=AclAction.WRITE)
+        async with directory_write(
+            self,
+            uri,
+            content,
+            ctx=self._ctx_or_default(ctx),
+            lease_ref=lease_ref,
+            allow_empty_directory=allow_empty_directory,
+        ) as effective_lease:
+            path = self._uri_to_path(uri, ctx=ctx)
+            await self._ensure_parent_dirs(path, ctx=ctx, lease_ref=effective_lease)
+            if isinstance(content, str):
+                content = content.encode("utf-8")
+            owned_lease = None
+            if effective_lease is None and auto_pathlock:
+                effective_lease = await self._async_agfs.pathlock_acquire_exact(path)
+                owned_lease = effective_lease
+            try:
+                await self._mark_ttl_write(uri, content, ctx=ctx)
+                return await self._async_agfs.write(
+                    path,
+                    content,
+                    fs_ctx=self._pathlock_fs_ctx(ctx, effective_lease),
+                    auto_pathlock=False if effective_lease is not None else auto_pathlock,
+                )
+            finally:
+                if owned_lease is not None:
+                    await self._async_agfs.pathlock_release(owned_lease)
 
     async def read_file(
         self,

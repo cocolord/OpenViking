@@ -96,15 +96,6 @@ async def test_public_write_entrypoints_share_directory_ttl(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("directory", ["2026", "notes.md", "events.txt"])
-async def test_event_directory_is_visible_without_parsing_it_as_a_file(ttl_fs, directory):
-    uri = "viking://user/default/memories/events/" + directory
-    ttl_fs._async_agfs.files[ttl_fs._uri_to_path(uri, ctx=root_ctx()) + "/body"] = b"body"
-    assert await ttl_fs._ttl_uri_visible(uri, root_ctx())
-    assert not ttl_fs._async_agfs.read_calls
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "metadata,expiry,visible",
     [

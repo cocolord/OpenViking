@@ -4,7 +4,6 @@
 
 import json
 from contextlib import asynccontextmanager
-from functools import wraps
 
 from openviking.config.ttl import resolve_ttl_config
 from openviking.core.ttl import (
@@ -165,49 +164,28 @@ async def content_update(fs, uri, content, *, ctx, lease_ref=None, allow_empty_d
         await fs._async_agfs.pathlock_release(body_lease)
 
 
-def directory_content_write(method):
-    """Share the lifecycle boundary across text and binary file writes."""
+@asynccontextmanager
+async def directory_write(fs, uri, content, *, ctx, lease_ref=None, allow_empty_directory=False):
+    """Admit a file write against both its source commit and target directory."""
+    from openviking.session.commit_lifetime import commit_write
 
-    @wraps(method)
-    async def wrapped(
-        self,
-        uri,
-        content,
-        ctx=None,
-        lease_ref=None,
-        auto_pathlock=True,
-        *,
-        allow_empty_directory=False,
-    ):
-        from openviking.storage.acl import AclAction
-
-        await self._ensure_access(uri, ctx, action=AclAction.WRITE)
-        from openviking.session.commit_lifetime import commit_write
-
-        async with commit_write(self, self._ctx_or_default(ctx), lease_ref) as source_lease:
-            file_lease = None
-            try:
-                if source_lease is not lease_ref:
-                    # A session guard proves source ownership; AGFS still needs
-                    # explicit coverage of the target file, including metadata.
-                    file_lease = await self._async_agfs.pathlock_acquire_exact(
-                        self._uri_to_path(uri, ctx=ctx),
-                        owner_lease_ref=source_lease,
-                        timeout_secs=30.0,
-                    )
-                async with content_update(
-                    self,
-                    uri,
-                    content,
-                    ctx=self._ctx_or_default(ctx),
-                    lease_ref=file_lease or source_lease,
-                    allow_empty_directory=allow_empty_directory,
-                ) as lease:
-                    return await method(
-                        self, uri, content, ctx=ctx, lease_ref=lease, auto_pathlock=auto_pathlock
-                    )
-            finally:
-                if file_lease is not None:
-                    await self._async_agfs.pathlock_release(file_lease)
-
-    return wrapped
+    async with commit_write(fs, ctx, lease_ref) as source_lease:
+        file_lease = None
+        try:
+            if source_lease is not lease_ref:
+                # The source Session lease does not cover the target file.
+                file_lease = await fs._async_agfs.pathlock_acquire_exact(
+                    fs._uri_to_path(uri, ctx=ctx), owner_lease_ref=source_lease, timeout_secs=30.0
+                )
+            async with content_update(
+                fs,
+                uri,
+                content,
+                ctx=ctx,
+                lease_ref=file_lease or source_lease,
+                allow_empty_directory=allow_empty_directory,
+            ) as lease:
+                yield lease
+        finally:
+            if file_lease is not None:
+                await fs._async_agfs.pathlock_release(file_lease)

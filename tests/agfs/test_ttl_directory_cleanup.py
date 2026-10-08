@@ -94,6 +94,9 @@ async def test_cleanup_removes_files_all_vectors_and_metadata(
         with pytest.raises(NotFoundError):
             await fs.stat(uri, ctx=ctx)
     cleanup = TTLCleanupService(service=SimpleNamespace(viking_fs=fs))
+    monkeypatch.setattr(
+        fs, "_collect_uris", AsyncMock(side_effect=AssertionError("unnecessary subtree scan"))
+    )
     if fail_confirmation:
         with monkeypatch.context() as patch:
             patch.setattr(

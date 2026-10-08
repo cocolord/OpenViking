@@ -15,7 +15,7 @@ from openviking.core.namespace import (
     is_session_uri,
     relative_uri_path,
 )
-from openviking.core.ttl import hidden_by_ttl
+from openviking.core.ttl import hidden_by_ttl, ttl_object_for_uri
 from openviking.resource.watch_storage import is_watch_task_control_uri
 from openviking.server.error_mapping import is_not_found_error
 from openviking.server.identity import RequestContext
@@ -141,11 +141,13 @@ async def _remove_existing_root(
 
 
 async def _ensure_package_ttl(
-    viking_fs, zf, files: dict[str, str], *, ctx, replace_roots=(), directories=()
+    viking_fs, zf, entries: dict[str, Optional[str]], *, ctx, replace_roots=()
 ) -> None:
-    """Preflight raw package writes/removals while the caller holds its locks."""
-    targets = set(files)
-    for uri in directories:
+    """Validate package entries (directory values are None) under the restore lock."""
+    targets = {uri for uri, member in entries.items() if member is not None}
+    for uri, member in entries.items():
+        if member is not None or ttl_object_for_uri(uri) is None:
+            continue
         try:
             stat = await viking_fs._async_agfs.stat(
                 viking_fs._uri_to_path(uri, ctx=ctx), bypass_cache=True
@@ -167,19 +169,18 @@ async def _ensure_package_ttl(
                 raise
             continue
         if stat.get("isDir"):
-            entries = await viking_fs._async_agfs.tree_directory(
+            descendants = await viking_fs._async_agfs.tree_directory(
                 path, show_hidden=True, node_limit=None, level_limit=None
             )
             targets.update(
                 viking_fs._path_to_uri(entry["path"], ctx=ctx)
-                for entry in entries
+                for entry in descendants
                 if not entry.get("isDir")
             )
-    for uri in sorted(targets):
-        await viking_fs._ensure_restore_target_ttl(uri, ctx=ctx)
-    for uri, zip_path in files.items():
+    await viking_fs._ensure_restore_targets_ttl(targets, ctx=ctx)
+    for uri, zip_path in entries.items():
         target = viking_fs._ttl_metadata_target(uri)
-        if target is None:
+        if target is None or zip_path is None:
             continue
         if hidden_by_ttl(viking_fs._ttl_expiry_for_write(uri, zf.read(zip_path))):
             raise NotFoundError(target[1], "package source")
@@ -396,15 +397,12 @@ async def import_ovpack(
                 viking_fs,
                 zf,
                 {
-                    join_uri(root_uri, rel): zip_path
+                    join_uri(root_uri, rel): zip_path if kind == "file" else None
                     for _, zip_path, kind, rel in members
-                    if kind == "file"
+                    if kind in {"file", "directory"}
                 },
                 ctx=ctx,
                 replace_roots=existing_roots,
-                directories=[
-                    join_uri(root_uri, rel) for _, _, kind, rel in members if kind == "directory"
-                ],
             )
             if parent != "viking://":
                 await _ensure_parent_exists(viking_fs, parent, ctx)
@@ -806,20 +804,16 @@ async def restore_ovpack(
                 viking_fs,
                 zf,
                 {
-                    manifest_entry_target_uri(root_uri, rel, manifest_entries[rel]): zip_path
+                    manifest_entry_target_uri(root_uri, rel, manifest_entries[rel]): (
+                        zip_path if kind == "file" else None
+                    )
                     for _, zip_path, kind, rel in content_members
-                    if kind == "file"
                 },
                 ctx=ctx,
                 replace_roots=[
                     manifest_entry_target_uri(root_uri, rel, manifest_entries[rel])
                     for _, _, kind, rel in content_members
                     if kind == "file"
-                ],
-                directories=[
-                    manifest_entry_target_uri(root_uri, rel, manifest_entries[rel])
-                    for _, _, kind, rel in content_members
-                    if kind == "directory"
                 ],
             )
             from openviking.storage.internal_names import is_ttl_metadata_name
