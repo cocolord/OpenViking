@@ -84,11 +84,13 @@ def _affected(root, scope, config, previous, patch):
     return "global" in patch or "global_default" in patch
 
 
-async def _roots(fs, ctx):
+async def _roots(fs, ctx, *, include_peers=True):
     async for user in _directories(fs, fs._uri_to_path("viking://user", ctx=ctx)):
         prefix = f"viking://user/{user}"
         yield prefix + "/sessions"
         yield prefix + "/memories/events"
+        if not include_peers:
+            continue
         async for peer in _directories(fs, fs._uri_to_path(prefix + "/peers", ctx=ctx)):
             yield prefix + f"/peers/{peer}/memories/events"
 
@@ -182,7 +184,9 @@ async def apply_account_ttl(fs, account_id, *, previous=None, patch=None, config
     batch = []
     try:
         config = config or await _config(fs, account_id)
-        async for root in _roots(fs, ctx):
+        # Peer roots have no individual overrides; decide once before listing them.
+        include_peers = _affected("", "peer_events", config, previous, patch)
+        async for root in _roots(fs, ctx, include_peers=include_peers):
             scope = ttl_scope_for_uri(root)
             if not _affected(root, scope, config, previous, patch):
                 continue

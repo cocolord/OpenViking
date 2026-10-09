@@ -14,6 +14,7 @@ from openviking.server.identity import RequestContext, Role
 from openviking.storage.collection_schemas import CollectionSchemas
 from openviking.storage.expr import Eq
 from openviking.storage.ovpack.index import EXPORT_VECTOR_FIELDS
+from openviking.storage.ttl_registry import TTLRegistry
 from openviking.storage.vectordb.index.cuvs_index import matches_filter
 from openviking.storage.vectordb_adapters.local_adapter import LocalCollectionAdapter
 from openviking.storage.viking_fs import VikingFS
@@ -95,8 +96,19 @@ def setup(monkeypatch):
                 {"uri": "path", "level": "int64", "account_id": "string"},
             )
         ]
+        if order_by := kwargs.get("order_by"):
+            selected.sort(key=lambda row: row[order_by], reverse=kwargs.get("order_desc", False))
         start = kwargs.get("offset", 0)
-        return [dict(row) for row in selected[start : start + kwargs["limit"]]]
+        fields = kwargs.get("output_fields")
+        page_limit = min(kwargs["limit"], getattr(single, "page_limit", kwargs["limit"]))
+        return [
+            {
+                key: value
+                for key, value in row.items()
+                if fields is None or key in fields or key == "_score"
+            }
+            for row in selected[start : start + page_limit]
+        ]
 
     single = SimpleNamespace(query=query, search_by_random=query, search_by_keywords=query)
     backend = object.__new__(VikingVectorIndexBackend)
@@ -122,83 +134,62 @@ def setup(monkeypatch):
         "filter_in_tenant",
         "search_by_keywords",
         "search_by_random",
+        "query",
     ],
 )
 async def test_expired_candidates_are_replaced_before_limit(setup, method):
     s = setup
     for i in range(7):
         uri = f"{ROOT}/2026/09/{i + 1:02}/{i}.md"
-        s.source(uri, PAST if i < 5 else FUTURE)
+        s.source(uri, PAST if i < 3 else FUTURE)
         s.rows.append({"uri": uri, "level": 2, "account_id": "acct", "_score": 1 - i / 10})
     kwargs = {"ctx": s.ctx, "limit": 2}
     if method == "search_in_tenant":
         kwargs["query_vector"] = [0.1, 0.2]
     if method == "filter_in_tenant":
         kwargs["target_directories"] = [ROOT]
+    if method == "search_by_keywords":
+        kwargs.update(query="meeting", mode="bm25", fields=["content"])
+    if method == "query":
+        # A remote backend may cap refill batches above the original page size.
+        s.single.page_limit = 2
+        kwargs.update(
+            query_vector=[0.1, 0.2],
+            include_expired=False,
+            advance={"time_decay": {"protection": "0", "origin": "2026-09-30T00:00:00Z"}},
+        )
     result = await getattr(s.backend, method)(**kwargs)
-    assert [row["uri"] for row in result] == [f"{ROOT}/2026/09/06/5.md", f"{ROOT}/2026/09/07/6.md"]
-    assert len(s.calls) == 4
-    assert [row["_score"] for row in result] == [0.5, pytest.approx(0.4)]
+    assert [row["uri"] for row in result] == [f"{ROOT}/2026/09/04/3.md", f"{ROOT}/2026/09/05/4.md"]
+    assert [call["limit"] for call in s.calls] == ([2, 4, 2] if method == "query" else [2, 4])
+    assert [row["_score"] for row in result] == pytest.approx([0.7, 0.6])
+    for key in ("advance", "mode", "fields"):
+        if key in kwargs:
+            assert all(call[key] == kwargs[key] for call in s.calls)
 
 
 @pytest.mark.asyncio
-async def test_time_decay_query_refills_expired_events_without_losing_advance(setup):
+@pytest.mark.parametrize("descending", [False, True])
+async def test_offset_counts_live_rows_and_preserves_legacy_records(setup, descending):
     s = setup
-    expired = ROOT + "/2026/09/01/expired.md"
-    live = ROOT + "/2026/09/02/live.md"
-    s.source(expired, PAST)
-    s.source(live, FUTURE)
-    s.rows.extend(
-        [
-            {"uri": expired, "level": 2, "_score": 0.9},
-            {"uri": live, "level": 2, "_score": 0.8},
-        ]
-    )
-    advance = {"time_decay": {"protection": "0", "origin": "2026-09-30T00:00:00Z"}}
-    result = await s.backend.query(
-        query_vector=[0.1, 0.2],
-        limit=1,
+    for i in range(9):
+        uri = f"{ROOT}/2026/09/{i + 1:02}/{i}.md"
+        s.source(uri, PAST if i < 3 or i > 5 else None)
+        s.rows.append({"uri": uri, "level": 2, "updated_at": f"2026-09-{i + 1:02}T00:00:00Z"})
+    result = await s.backend.filter(
+        Eq("level", 2),
+        limit=2,
+        offset=1,
+        output_fields=["updated_at"],
+        order_by="updated_at",
+        order_desc=descending,
         ctx=s.ctx,
         include_expired=False,
-        advance=advance,
     )
-    assert [row["uri"] for row in result] == [live]
-    assert len(s.calls) == 2
-    assert all(call["advance"] == advance for call in s.calls)
-
-
-@pytest.mark.asyncio
-async def test_keyword_refill_preserves_bm25_parameters(setup):
-    s = setup
-    expired = ROOT + "/2026/09/01/expired.md"
-    live = ROOT + "/2026/09/02/live.md"
-    s.source(expired, PAST)
-    s.source(live, FUTURE)
-    s.rows.extend([{"uri": expired, "level": 2}, {"uri": live, "level": 2}])
-    result = await s.backend.search_by_keywords(
-        query="meeting",
-        mode="bm25",
-        fields=["content"],
-        limit=1,
-        ctx=s.ctx,
-    )
-    assert [row["uri"] for row in result] == [live]
-    assert len(s.calls) == 2
-    assert all(call["mode"] == "bm25" and call["fields"] == ["content"] for call in s.calls)
-
-
-@pytest.mark.asyncio
-async def test_offset_counts_live_rows_and_preserves_legacy_records(setup):
-    s = setup
-    for i in range(5):
-        uri = f"{ROOT}/2026/09/{i + 1:02}/{i}.md"
-        s.source(uri, PAST if i < 2 else None)
-        s.rows.append({"uri": uri, "level": 2})
-    result = await s.backend.filter(
-        Eq("level", 2), limit=2, offset=1, output_fields=["uri"], ctx=s.ctx, include_expired=False
-    )
-    assert [row["uri"] for row in result] == [f"{ROOT}/2026/09/04/3.md", f"{ROOT}/2026/09/05/4.md"]
-    assert all("expires_at" in row for row in result)
+    assert result == [
+        {"updated_at": f"2026-09-{day:02}T00:00:00Z", "expires_at": None}
+        for day in ([5, 4] if descending else [5, 6])
+    ]
+    assert [call["limit"] for call in s.calls] == [3, 6]
 
 
 @pytest.mark.asyncio
@@ -220,14 +211,7 @@ async def test_summaries_follow_owner_expiry_while_containers_stay_visible(setup
         s.rows.append({"uri": root, "level": level, "abstract": "summary"})
     actual = await s.backend.query(ctx=s.ctx, include_expired=False)
     assert actual == ([] if target else [{**row, "expires_at": None} for row in s.rows])
-
-
-@pytest.mark.asyncio
-async def test_orphan_vectors_hidden_but_raw_cleanup_query_can_find_them(setup):
-    s = setup
-    s.rows.append({"uri": ROOT + "/2026/09/01/removed.md", "level": 2})
-    assert await s.backend.query(ctx=s.ctx, include_expired=False) == []
-    assert await s.backend.query(ctx=s.ctx) == s.rows
+    assert s.fs.ttl_registry.account_may_have_records.await_count == int(target is not None)
 
 
 @pytest.mark.asyncio
@@ -242,7 +226,8 @@ async def test_live_owner_does_not_stat_each_vector_source(setup):
     )
     result = await s.backend.query(ctx=s.ctx, limit=22, include_expired=False)
     assert len(result) == 22
-    assert s.fs._async_agfs.stat_calls == [s.fs._uri_to_path(owner + "/.meta.json", ctx=s.ctx)]
+    assert [call["limit"] for call in s.calls] == [22]
+    assert s.fs._async_agfs.stat_calls == []
     assert s.fs._async_agfs.read.await_count == 1
 
 
@@ -286,6 +271,8 @@ async def test_source_read_error_cannot_expose_content(setup, error, entrypoint)
     uri = ROOT + "/2026/09/02/event.md"
     s.source(uri, PAST)
     s.rows.append({"uri": uri, "level": 2})
+    s.fs.ttl_registry = TTLRegistry(s.fs._async_agfs)
+    s.fs._async_agfs.stat = AsyncMock(side_effect=error)
     s.fs._async_agfs.read = AsyncMock(side_effect=error)
     with pytest.raises(type(error), match=str(error)):
         if entrypoint == "vector_query":
@@ -306,14 +293,46 @@ async def test_backend_ignoring_exclusion_fails_without_looping_forever(setup):
 
 
 @pytest.mark.asyncio
-async def test_default_off_still_checks_stored_directory_deadlines(setup):
+@pytest.mark.parametrize("enable_during_query", [False, True])
+async def test_unmanaged_reads_notice_ttl_enablement_even_with_default_off(
+    setup, enable_during_query
+):
     s = setup
-    s.fs.ttl_registry.account_may_have_records.return_value = False
-    uri = ROOT + "/2026/09/04/legacy.md"
-    s.source(uri, PAST)
-    s.rows.append({"uri": uri, "level": 2})
+    s.fs.ttl_registry = TTLRegistry(s.fs._async_agfs)
+    s.rows.extend({"uri": f"{ROOT}/2026/09/{i:02}/body.md", "_score": i} for i in (1, 2, 3))
+    advance = {"time_decay": {"protection": "0", "origin": "2026-09-30T00:00:00Z"}}
+    assert await s.backend.query(
+        ctx=s.ctx,
+        limit=1,
+        offset=1,
+        output_fields=["_score"],
+        advance=advance,
+        include_expired=False,
+    ) == [{"_score": 2, "expires_at": None}]
+    assert s.calls[0]["advance"] == advance
+    assert s.fs._async_agfs.stat_calls == [TTLRegistry.marker_path(s.ctx.account_id)]
+    s.fs._async_agfs.read.assert_not_awaited()
+
+    async def enable():
+        # A different worker publishes the account marker before owner deadlines.
+        await TTLRegistry(s.fs._async_agfs).mark_account(s.ctx.account_id)
+        for row in s.rows:
+            s.source(row["uri"], PAST)
+
+    if enable_during_query:
+        original = s.single.query
+
+        async def query(**kwargs):
+            records = await original(**kwargs)
+            await enable()
+            return records
+
+        s.single.query = query
+    else:
+        await enable()
     assert await s.backend.query(ctx=s.ctx, include_expired=False) == []
     s.fs._async_agfs.read.assert_awaited()
+    assert await s.backend.query(ctx=s.ctx) == s.rows
 
 
 @pytest.mark.asyncio

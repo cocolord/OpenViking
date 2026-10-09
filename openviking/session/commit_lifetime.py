@@ -45,7 +45,7 @@ async def commit_write(fs, ctx, lease_ref=None):
     """Hold a session exact lock only across validation and persistence, never LLM work."""
     identity = _commit.get()
     if identity is None:
-        yield lease_ref
+        yield lease_ref, None
         return
     session_uri, archive_uri, task_id = identity
     lease = await fs._async_agfs.pathlock_acquire_exact(
@@ -55,8 +55,8 @@ async def commit_write(fs, ctx, lease_ref=None):
     )
     token = _write_lease.set(lease)
     try:
-        await validate_commit(fs, ctx, session_uri, archive_uri, task_id)
-        yield lease
+        meta = await validate_commit(fs, ctx, session_uri, archive_uri, task_id)
+        yield lease, (session_uri, lease, meta)
     finally:
         _write_lease.reset(token)
         await fs._async_agfs.pathlock_release(lease)

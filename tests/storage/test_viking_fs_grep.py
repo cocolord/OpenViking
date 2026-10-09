@@ -117,7 +117,7 @@ def fs(monkeypatch):
     return viking_fs
 
 
-async def _fake_stat(uri, ctx=None, skip_count=False):
+async def _fake_stat(uri, ctx=None, skip_count=False, ttl_view=None):
     return {"name": uri.rsplit("/", 1)[-1], "isDir": True}
 
 
@@ -170,9 +170,7 @@ async def test_collect_grep_files_paginates_wide_directories(monkeypatch, entry_
 @pytest.mark.asyncio
 async def test_grep_fallback_finds_match_after_first_directory_page(monkeypatch):
     viking_fs = VikingFS(agfs=_DummyAgfs())
-    entries = [
-        {"name": f"archive_{index:04d}.jsonl", "isDir": False} for index in range(1001)
-    ]
+    entries = [{"name": f"archive_{index:04d}.jsonl", "isDir": False} for index in range(1001)]
 
     async def fake_ls(uri, node_limit, offset, ctx=None):
         return entries[offset : offset + node_limit]
@@ -193,9 +191,7 @@ async def test_grep_fallback_finds_match_after_first_directory_page(monkeypatch)
     assert result["matches"] == [
         {
             "line": 1,
-            "uri": (
-                "viking://user/test/sessions/session-1/history/archive_1000.jsonl"
-            ),
+            "uri": ("viking://user/test/sessions/session-1/history/archive_1000.jsonl"),
             "content": "needle",
         }
     ]
@@ -488,6 +484,7 @@ async def test_primary_only_session_grep_uses_native_agfs(monkeypatch):
         ctx=None,
         before_context=0,
         after_context=0,
+        ttl_view=None,
     )
     fallback_grep.assert_not_awaited()
 
@@ -571,9 +568,7 @@ async def test_virtual_empty_session_root_uses_merge_fallback(monkeypatch):
     monkeypatch.setattr(viking_fs, "_agfs_path_exists", path_exists)
     monkeypatch.setattr(viking_fs, "_legacy_session_root_items", legacy_items)
 
-    assert not await viking_fs._session_native_grep_safe(
-        "viking://user/alice/sessions", None
-    )
+    assert not await viking_fs._session_native_grep_safe("viking://user/alice/sessions", None)
     path_exists.assert_awaited_once_with(primary_path)
     legacy_items.assert_not_awaited()
 
@@ -870,7 +865,7 @@ async def test_grep_vikingdb_pushes_tag_filter_into_bm25_request(monkeypatch):
 async def test_grep_preserves_dfs_order_and_node_limit(monkeypatch):
     fs = VikingFS(agfs=_DummyAgfs())
 
-    async def fake_stat(uri, ctx=None, skip_count=False):
+    async def fake_stat(uri, ctx=None, skip_count=False, ttl_view=None):
         return {"isDir": True}
 
     async def fake_ls(uri, ctx=None, **kwargs):
@@ -933,7 +928,7 @@ async def test_grep_preserves_dfs_order_and_node_limit(monkeypatch):
 async def test_grep_allowed_uris_filters_before_node_limit(monkeypatch):
     fs = VikingFS(agfs=_DummyAgfs())
 
-    async def fake_stat(uri, ctx=None, skip_count=False):
+    async def fake_stat(uri, ctx=None, skip_count=False, ttl_view=None):
         return {"isDir": True}
 
     async def fake_ls(uri, ctx=None, **kwargs):
@@ -971,7 +966,7 @@ async def test_grep_allowed_uris_filters_before_node_limit(monkeypatch):
 async def test_grep_applies_content_transform_before_matching(monkeypatch):
     fs = VikingFS(agfs=_DummyAgfs())
 
-    async def fake_stat(uri, ctx=None, skip_count=False):
+    async def fake_stat(uri, ctx=None, skip_count=False, ttl_view=None):
         return {"isDir": True}
 
     async def fake_ls(uri, ctx=None, **kwargs):
@@ -1080,7 +1075,7 @@ async def test_grep_parallel_limits_context_construction_per_file(monkeypatch):
 async def test_grep_parallel_reads_respect_concurrency_limit(monkeypatch):
     fs = VikingFS(agfs=_DummyAgfs())
 
-    async def fake_stat(uri, ctx=None, skip_count=False):
+    async def fake_stat(uri, ctx=None, skip_count=False, ttl_view=None):
         return {"isDir": True}
 
     async def fake_ls(uri, ctx=None, **kwargs):
@@ -1121,7 +1116,7 @@ async def test_grep_parallel_reads_respect_concurrency_limit(monkeypatch):
 async def test_grep_parallel_reads_work_with_blocking_agfs_read(monkeypatch):
     fs = VikingFS(agfs=_DummyAgfs())
 
-    async def fake_stat(uri, ctx=None, skip_count=False):
+    async def fake_stat(uri, ctx=None, skip_count=False, ttl_view=None):
         return {"isDir": True}
 
     async def fake_ls(uri, ctx=None, **kwargs):
@@ -1155,7 +1150,7 @@ async def test_grep_parallel_reads_work_with_blocking_agfs_read(monkeypatch):
 async def test_grep_stops_scheduling_later_batches_after_node_limit(monkeypatch):
     fs = VikingFS(agfs=_DummyAgfs())
 
-    async def fake_stat(uri, ctx=None, skip_count=False):
+    async def fake_stat(uri, ctx=None, skip_count=False, ttl_view=None):
         return {"isDir": True}
 
     async def fake_ls(uri, ctx=None, **kwargs):

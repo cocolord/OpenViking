@@ -30,7 +30,7 @@ def enabled(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("prefix", ["viking://user/default", "viking://user/default/peers/p"])
-async def test_event_deadline_is_frozen_on_first_content_write(binding_fs, prefix):
+async def test_event_deadline_is_frozen_on_first_content_write(binding_fs, prefix, monkeypatch):
     fs, ctx = binding_fs, root_ctx()
     root = prefix + "/memories/events/2026/09/28"
     await fs.mkdir(root, ctx=ctx)
@@ -41,8 +41,12 @@ async def test_event_deadline_is_frozen_on_first_content_write(binding_fs, prefi
         initial["received_at"]
     ) == timedelta(days=7)
     assert set(initial) == {"expires_at", "received_at"}
+    acquire = AsyncMock(wraps=fs._async_agfs.pathlock_acquire_exact)
+    monkeypatch.setattr(fs._async_agfs, "pathlock_acquire_exact", acquire)
     for name in ["a.md", "b.txt", ".abstract.md", ".overview.md", "nested/c.json"]:
+        acquire.reset_mock()
         await fs.write_file(root + "/" + name, "updated", ctx=ctx)
+        assert sum(c.args[0].endswith("/.overview.md") for c in acquire.call_args_list) == 1
         assert await read_directory_fields(fs, root + "/" + name, ctx=ctx) == initial
     assert await read_record(fs, ctx.account_id, root + "/a.md") is None
     assert (await TTLView(fs, ctx).fields(root))["expires_at"] == initial["expires_at"]
@@ -210,7 +214,7 @@ async def test_first_content_in_empty_nested_directory_gets_ttl(binding_fs, monk
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["ls", "tree", "stat"])
+@pytest.mark.parametrize("operation", ["ls", "tree", "stat", "glob", "grep"])
 async def test_public_read_shares_owner_deadline_without_caching_next_request(
     binding_fs, monkeypatch, operation
 ):
@@ -218,21 +222,39 @@ async def test_public_read_shares_owner_deadline_without_caching_next_request(
     from openviking.service.fs_service import FSService
 
     fs, ctx = binding_fs, root_ctx()
-    root = "viking://user/default/memories/events/2026/09/30"
+    root = "viking://user/default/" + (
+        "sessions/s1" if operation == "grep" else "memories/events/2026/09/30"
+    )
+    await fs.write_file(root + "/.meta.json", '{"expires_at":"2999-01-01T00:00:00Z"}', ctx=ctx)
+    await fs.ttl_registry.mark_account(ctx.account_id)
     for name in ("a.md", "b.md", "c.md"):
         await fs.write_file(root + "/" + name, "content", ctx=ctx)
     service = FSService(viking_fs=fs)
     reader = AsyncMock(wraps=module.read_directory_fields)
+    stat = AsyncMock(wraps=fs._async_agfs.stat)
     monkeypatch.setattr(module, "read_directory_fields", reader)
-    uri = root if operation in {"ls", "tree"} else root + "/a.md"
-    result = await getattr(service, operation)(uri, ctx=ctx)
-    rows = result.entries if operation in {"ls", "tree"} else [result]
-    assert len(rows) == (3 if operation in {"ls", "tree"} else 1)
-    assert all(row["expires_at"] == rows[0]["expires_at"] for row in rows)
+    monkeypatch.setattr(fs._async_agfs, "stat", stat)
+    kwargs = {"uri": root + "/a.md" if operation == "stat" else root, "ctx": ctx}
+    if operation == "glob":
+        kwargs.update(pattern="*.md", extra_fields=[])
+    elif operation == "grep":
+        kwargs["pattern"] = "content"
+    result = await getattr(service, operation)(**kwargs)
+    rows = (
+        result.entries
+        if operation in {"ls", "tree"}
+        else [result]
+        if operation == "stat"
+        else result["matches"]
+    )
+    assert len(rows) == (1 if operation == "stat" else 3)
+    assert all(row["expires_at"] == "2999-01-01T00:00:00Z" for row in rows)
     reader.assert_awaited_once()
+    metadata_path = fs._uri_to_path(root + "/.meta.json", ctx=ctx)
+    assert all(call.args[0] != metadata_path for call in stat.await_args_list)
     await fs.write_file(root + "/.meta.json", '{"expires_at":"2000-01-01T00:00:00Z"}', ctx=ctx)
     with pytest.raises(NotFoundError):
-        await getattr(service, operation)(uri, ctx=ctx)
+        await getattr(service, operation)(**kwargs)
 
 
 @pytest.mark.asyncio

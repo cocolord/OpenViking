@@ -46,7 +46,9 @@ async def patch(fs, manager, ctx, value):
 
 
 @pytest.mark.asyncio
-async def test_startup_applies_saved_policy_to_history_and_is_idempotent(configured_fs):
+async def test_startup_applies_saved_policy_to_history_and_is_idempotent(
+    configured_fs, monkeypatch
+):
     from openviking.service.ttl_policy import apply_startup_ttl
 
     fs, manager, ctx = configured_fs
@@ -65,6 +67,29 @@ async def test_startup_applies_saved_policy_to_history_and_is_idempotent(configu
     ) + timedelta(days=7)
     await apply_startup_ttl(fs)
     assert await read_directory_fields(fs, owner, ctx=ctx) == fields
+
+    listing = AsyncMock(wraps=fs._async_agfs.ls)
+    monkeypatch.setattr(fs._async_agfs, "ls", listing)
+    await patch(fs, manager, ctx, {"sessions": {"mode": "days", "ttl_days": 30}})
+    assert not any("/peers" in call.args[0] for call in listing.call_args_list)
+    assert await read_directory_fields(fs, owner, ctx=ctx) == fields
+    # Peer type changes, identical retries and removal still visit peer owners.
+    for value, days, scans_peers in [
+        ({"peer_events": {"mode": "days", "ttl_days": 30}}, 30, True),
+        ({"peer_events": {"mode": "days", "ttl_days": 30}}, 30, True),
+        ({"global": {"ttl_days": 9}}, 30, False),
+        ({"peer_events": {"mode": "inherit"}}, 9, True),
+        ({"peer_events": {"mode": "days", "ttl_days": 30}}, 30, True),
+        ({"peer_events": None}, 9, True),
+        ({"global": {"ttl_days": 10}}, 10, True),
+    ]:
+        listing.reset_mock()
+        await patch(fs, manager, ctx, value)
+        assert any("/peers" in call.args[0] for call in listing.call_args_list) is scans_peers
+        actual = await read_directory_fields(fs, owner, ctx=ctx)
+        assert parse_iso_datetime(actual["expires_at"]) == parse_iso_datetime(
+            original["received_at"]
+        ) + timedelta(days=days)
 
 
 @pytest.mark.asyncio
@@ -142,10 +167,10 @@ async def test_same_patch_retries_partial_application_failure(configured_fs, mon
     from openviking.service import ttl_policy
 
     fs, manager, ctx = configured_fs
-    owner = "viking://user/default/memories/events/2026/10/01"
+    owner = "viking://user/default/peers/peer1/memories/events/2026/10/01"
     await fs.write_file(owner + "/a.md", "body", ctx=ctx)
     original = await read_directory_fields(fs, owner, ctx=ctx)
-    policy = {"user_events": {"mode": "days", "ttl_days": 7}}
+    policy = {"peer_events": {"mode": "days", "ttl_days": 7}}
     with monkeypatch.context() as m:
         if failure == "metadata":
             m.setattr(

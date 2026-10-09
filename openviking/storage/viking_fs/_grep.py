@@ -42,6 +42,7 @@ class _GrepMixin:
         include_tags: bool = False,
         before_context: int = 0,
         after_context: int = 0,
+        ttl_view=None,
     ) -> Dict:
         """Content search by pattern or keywords.
 
@@ -69,10 +70,13 @@ class _GrepMixin:
         Returns:
             Dict with matches, count, match_count, files_scanned
         """
+        from openviking.storage.ttl_view import TTLView
+
+        ttl_view = ttl_view or TTLView(self, self._ctx_or_default(ctx))
         await self._ensure_access(uri, ctx)
         # Skip vector_store.count() — the count field is not needed for grep,
         # and avoiding it saves one VikingDB API call.
-        await self.stat(uri, ctx=ctx, skip_count=True)
+        await self.stat(uri, ctx=ctx, skip_count=True, ttl_view=ttl_view)
 
         # Read engine and threshold from grep_config (ov.conf)
         engine = self.grep_config.engine if self.grep_config else "auto"
@@ -121,6 +125,7 @@ class _GrepMixin:
                 allowed_uris=allowed_uris,
                 before_context=before_context,
                 after_context=after_context,
+                ttl_view=ttl_view,
             )
         else:  # "vikingdb_then_fs"
             result = await self._grep_vikingdb_then_fs(
@@ -290,6 +295,7 @@ class _GrepMixin:
         allowed_uris=None,
         before_context=0,
         after_context=0,
+        ttl_view=None,
     ):
         """Filesystem grep path: prefer native agfs grep and fall back if unavailable."""
         native_safe = (
@@ -318,6 +324,7 @@ class _GrepMixin:
                     ctx=ctx,
                     before_context=before_context,
                     after_context=after_context,
+                    ttl_view=ttl_view,
                 )
             except (AttributeError, AGFSNotSupportedError, NotImplementedError) as e:
                 logger.debug(f"agfs grep unavailable, falling back to VikingFS implementation: {e}")
@@ -586,6 +593,7 @@ class _GrepMixin:
         ctx: Optional[RequestContext] = None,
         before_context: int = 0,
         after_context: int = 0,
+        ttl_view=None,
     ) -> Dict:
         """Grep using agfs native implementation.
 
@@ -663,7 +671,7 @@ class _GrepMixin:
         if apply_ttl_filter:
             from openviking.storage.ttl_view import TTLView
 
-            ttl_view = TTLView(self, real_ctx)
+            ttl_view = ttl_view or TTLView(self, real_ctx)
             unique_uris = list(dict.fromkeys(match_uris))
             visible = await asyncio.gather(
                 *(

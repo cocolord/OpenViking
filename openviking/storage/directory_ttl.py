@@ -21,14 +21,16 @@ from openviking.utils.time_utils import get_current_timestamp
 from openviking_cli.exceptions import NotFoundError
 
 
-async def read_directory_fields(fs, uri, *, ctx):
+async def read_directory_fields(fs, uri, *, ctx, check_exists=True):
+    """Read owner metadata; lifecycle mutations also verify current existence."""
     target = ttl_object_for_uri(uri)
     if target is None:
         return {}
     kind, root = target
     path = fs._uri_to_path(ttl_metadata_uri(kind, root), ctx=ctx)
     try:
-        await fs._async_agfs.stat(path, bypass_cache=True)
+        if check_exists:
+            await fs._async_agfs.stat(path, bypass_cache=True)
         fields = json.loads(fs._handle_agfs_read(await fs._async_agfs.read(path)))
     except Exception as exc:
         if not is_storage_not_found(exc):
@@ -97,7 +99,15 @@ async def _has_content(fs, path):
 
 @asynccontextmanager
 async def content_update(
-    fs, uri, *, empty=False, ctx, lease_ref=None, source_lease=None, allow_empty_directory=False
+    fs,
+    uri,
+    *,
+    empty=False,
+    ctx,
+    lease_ref=None,
+    source_lease=None,
+    session_write=None,
+    allow_empty_directory=False,
 ):
     """Register a new bucket before publishing content; roll back failed writes."""
     target = ttl_object_for_uri(uri)
@@ -105,6 +115,11 @@ async def content_update(
         yield lease_ref
         return
     kind, root = target
+    # Internal callers may hand off metadata while still holding this Session's root lock.
+    if session_write and (
+        kind != OBJECT_TYPE_SESSION or session_write[0] != root or session_write[1] is None
+    ):
+        session_write = None
     if uri.rstrip("/") in {ttl_metadata_uri(kind, root), root + "/.ttl.json"}:
         yield lease_ref
         return
@@ -112,28 +127,34 @@ async def content_update(
     # Reuse the memory updater's overview lock or the Session write lock.
     # Session writers already hold their root before acquiring individual files.
     lock_path = fs._uri_to_path(directory_write_lock_uri(root), ctx=ctx)
+    body_path = fs._uri_to_path(uri, ctx=ctx)
     body_lease = lease = None
 
     async def release_admission():
         nonlocal lease
-        await fs._async_agfs.pathlock_release(lease)
+        if lease is not None:
+            await fs._async_agfs.pathlock_release(lease)
         lease = None
 
     try:
-        if kind == OBJECT_TYPE_SESSION:
+        if kind == OBJECT_TYPE_SESSION and session_write is None:
             lease = await fs._async_agfs.pathlock_acquire_exact(
                 lock_path, owner_lease_ref=lease_ref or source_lease, timeout_secs=30.0
             )
         body_lease = await fs._async_agfs.pathlock_acquire_exact(
-            fs._uri_to_path(uri, ctx=ctx),
-            owner_lease_ref=lease or lease_ref or source_lease,
+            body_path,
+            owner_lease_ref=session_write[1]
+            if session_write
+            else lease or lease_ref or source_lease,
             timeout_secs=30.0,
         )
-        if kind != OBJECT_TYPE_SESSION:
+        if kind != OBJECT_TYPE_SESSION and body_path != lock_path:
             lease = await fs._async_agfs.pathlock_acquire_exact(
                 lock_path, owner_lease_ref=body_lease, timeout_secs=30.0
             )
-        previous = await read_directory_fields(fs, root, ctx=ctx)
+        previous = session_write[2] if session_write else None
+        if previous is None:
+            previous = await read_directory_fields(fs, root, ctx=ctx)
         if hidden_by_ttl(previous.get("expires_at")):
             raise NotFoundError(root, "directory")
         if kind == OBJECT_TYPE_SESSION:

@@ -1174,7 +1174,10 @@ class FSService:
         after_context: int = 0,
     ) -> Dict:
         """Content search."""
+        from openviking.storage.ttl_view import TTLView
+
         viking_fs = self._ensure_initialized()
+        ttl_view = TTLView(viking_fs, ctx)
         normalized_tags = normalize_search_tags(tags, discard_invalid=True)
         tag_filter = None
         if normalized_tags:
@@ -1191,6 +1194,7 @@ class FSService:
             "include_tags": include_tags or bool(normalized_tags),
             "before_context": before_context,
             "after_context": after_context,
+            "ttl_view": ttl_view,
         }
         if _may_include_memory_content(uri):
             kwargs["content_transform"] = _visible_grep_content
@@ -1198,9 +1202,7 @@ class FSService:
         matches = result.get("matches", [])
         if include_tags and not normalized_tags and any("tags" not in match for match in matches):
             matches = await self._attach_and_filter_tags(matches, ctx, None, include_tags=True)
-        from openviking.storage.ttl_view import TTLView
-
-        result["matches"] = await TTLView(viking_fs, ctx).attach_many(matches)
+        result["matches"] = await ttl_view.attach_many(matches)
         result["count"] = len(matches)
         return result
 
@@ -1215,7 +1217,10 @@ class FSService:
         include_tags: bool = False,
     ) -> Dict:
         """File pattern matching."""
+        from openviking.storage.ttl_view import TTLView
+
         viking_fs = self._ensure_initialized()
+        ttl_view = TTLView(viking_fs, ctx)
         normalized_tags = normalize_search_tags(tags, discard_invalid=True)
         project_tags = bool(normalized_tags) or include_tags
         tag_filter = None
@@ -1233,15 +1238,12 @@ class FSService:
                 if extra_fields is not None
                 else ([] if project_tags else None),
                 tag_filter=tag_filter,
+                ttl_view=ttl_view,
             )
         )
         if not project_tags:
             if extra_fields is not None:
-                from openviking.storage.ttl_view import TTLView
-
-                result["matches"] = await TTLView(viking_fs, ctx).attach_many(
-                    result.get("matches", [])
-                )
+                result["matches"] = await ttl_view.attach_many(result.get("matches", []))
             return result
 
         matches = await self._attach_and_filter_tags(
@@ -1249,9 +1251,7 @@ class FSService:
         )
         if node_limit is not None and node_limit > 0:
             matches = matches[:node_limit]
-        from openviking.storage.ttl_view import TTLView
-
-        result["matches"] = await TTLView(viking_fs, ctx).attach_many(matches)
+        result["matches"] = await ttl_view.attach_many(matches)
         result["count"] = len(matches)
         return result
 

@@ -713,6 +713,7 @@ class Session:
                 meta_content = await self._viking_fs.read_file(
                     f"{self._session_uri}/.meta.json",
                     ctx=self.ctx,
+                    include_expired=True,
                 )
                 self._meta = SessionMeta.from_dict(json.loads(meta_content))
             except Exception as exc:
@@ -787,13 +788,16 @@ class Session:
                 self._messages = []
                 live_messages_missing = True
             in_memory_meta = self._meta
+            session_fields = None
             try:
                 meta_content = await self._viking_fs.read_file(
                     f"{self._session_uri}/.meta.json",
                     ctx=self.ctx,
                     include_expired=True,
                 )
-                self._meta = SessionMeta.from_dict(json.loads(meta_content))
+                fields = json.loads(meta_content)
+                self._meta = SessionMeta.from_dict(fields)
+                session_fields = fields
             except Exception:
                 # Legacy/malformed metadata must not prevent an otherwise safe
                 # append. Message correctness remains rooted in messages.jsonl.
@@ -809,6 +813,7 @@ class Session:
                     batch_content,
                     ctx=self.ctx,
                     lease_ref=lease,
+                    session_write=(self._session_uri, lease, session_fields),
                 )
             else:
                 await self._viking_fs.append_file(
@@ -816,6 +821,7 @@ class Session:
                     batch_content,
                     ctx=self.ctx,
                     lease_ref=lease,
+                    session_write=(self._session_uri, lease, session_fields),
                 )
             await self._save_meta(lease_ref=lease)
         finally:

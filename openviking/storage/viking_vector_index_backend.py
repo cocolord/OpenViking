@@ -1680,17 +1680,30 @@ class VikingVectorIndexBackend:
 
         ttl_view = TTLView(fs, ctx)
         requested = limit + offset
+        fetch_limit = requested
         base_filter = RawDSL(filter) if isinstance(filter, dict) else filter
         current_filter = base_filter
         excluded: set[str] = set()
         while True:
             records = await read(
-                filter=current_filter, limit=requested, offset=0, output_fields=fields, **kwargs
+                filter=current_filter, limit=fetch_limit, offset=0, output_fields=fields, **kwargs
             )
-            visibility = await self._ttl_visibility(fs, records, ctx, ttl_view=ttl_view)
-            visible = [record for record, keep in zip(records, visibility, strict=True) if keep]
-            hidden = [record for record, keep in zip(records, visibility, strict=True) if not keep]
-            if not hidden or len(records) < requested:
+            # Check after the query so another worker's first TTL write is visible.
+            if (
+                not excluded
+                and any(ttl_object_for_uri(str(record.get("uri") or "")) for record in records)
+                and not await fs.ttl_registry.account_may_have_records(ctx.account_id)
+            ):
+                visible, hidden = records, []
+                for record in visible:
+                    record["expires_at"] = None
+            else:
+                visibility = await self._ttl_visibility(fs, records, ctx, ttl_view=ttl_view)
+                visible = [record for record, keep in zip(records, visibility, strict=True) if keep]
+                hidden = [
+                    record for record, keep in zip(records, visibility, strict=True) if not keep
+                ]
+            if len(visible) >= requested or len(records) < requested:
                 page = visible[offset : offset + limit]
                 if output_fields is not None:
                     # Preserve adapter-added scores/IDs; only remove fields we
@@ -1704,6 +1717,8 @@ class VikingVectorIndexBackend:
                     excluded.add(target[1])
             if len(excluded) == old_size:
                 raise RuntimeError("Vector backend did not exclude rejected TTL candidates")
+            # Widen dense expiry only; sparse expiry keeps the original page size.
+            fetch_limit = max(requested, min(2 * len(hidden), 256))
             current_filter = self._merge_filters(
                 base_filter,
                 RawDSL(

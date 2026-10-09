@@ -128,7 +128,7 @@ async def test_glob_applies_node_limit_after_ttl_filter(monkeypatch, fs):
         lambda path, **_kwargs: path.replace("/local/test_account/", "viking://"),
     )
 
-    async def read_path_visible(_uri, path, _primary, _ctx):
+    async def read_path_visible(_uri, path, _primary, _ctx, ttl_view=None):
         return not path.endswith("expired.md")
 
     async def glob_directory(_path, _pattern, **kwargs):
@@ -473,7 +473,7 @@ async def test_glob_remote_entry_mode_fills_missing_stat_fields(monkeypatch, fs)
 
     stat_calls = []
 
-    async def fake_stat(uri, ctx=None, skip_count=False):
+    async def fake_stat(uri, ctx=None, skip_count=False, ttl_view=None):
         stat_calls.append({"uri": uri, "skip_count": skip_count})
         return {
             "uri": uri,

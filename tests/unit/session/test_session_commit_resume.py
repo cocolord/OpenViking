@@ -83,10 +83,10 @@ class _MemoryVikingFS:
             raise FileNotFoundError(uri)
         return self.files[uri]
 
-    async def write_file(self, uri, content, ctx=None, lease_ref=None):
+    async def write_file(self, uri, content, ctx=None, lease_ref=None, *, session_write=None):
         self.files[uri] = content
 
-    async def append_file(self, uri, content, ctx=None, lease_ref=None):
+    async def append_file(self, uri, content, ctx=None, lease_ref=None, *, session_write=None):
         self.files[uri] += content
 
     async def exists(self, uri, ctx=None, *, include_expired=False):

@@ -8,6 +8,8 @@ import pytest
 
 from openviking.message import Message, TextPart
 from openviking.session.session import Session, SessionMeta
+from tests.storage.test_transfer_merge_binding import binding_fs as binding_fs
+from tests.storage.test_transfer_merge_binding import root_ctx
 
 
 class _PathLock:
@@ -34,7 +36,6 @@ class _MetaVikingFS:
         self.meta_uri = f"{session_uri}/.meta.json"
         self.files = {self.meta_uri: json.dumps(persisted_meta.to_dict())}
         self._async_agfs = _PathLock()
-        self.writes = []
 
     def _uri_to_path(self, uri, ctx=None):
         del uri, ctx
@@ -50,9 +51,7 @@ class _MetaVikingFS:
         return self.files[uri]
 
     async def write_file(self, uri, content, ctx=None, lease_ref=None):
-        del ctx
         self.files[uri] = content
-        self.writes.append((uri, content, lease_ref))
 
 
 @pytest.mark.asyncio
@@ -100,24 +99,33 @@ async def test_commit_uses_event_tags_from_lock_protected_meta_snapshot(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_update_config_updates_policy_and_tags_in_one_locked_write():
+async def test_update_config_updates_policy_and_tags_in_one_locked_write(binding_fs, monkeypatch):
     session_uri = "viking://user/default/sessions/session-1"
     persisted_meta = SessionMeta(
         session_id="session-1",
         message_count=41,
         pending_tokens=8200,
+        expires_at="2999-01-01T00:00:00Z",
         auto_commit_policy={
             "pending_token_threshold": 8000,
             "message_count_threshold": 40,
         },
         event_search_tags=["channel=web"],
     )
-    viking_fs = _MetaVikingFS(session_uri, persisted_meta)
+    viking_fs = binding_fs
+    meta_uri = f"{session_uri}/.meta.json"
+    ctx = root_ctx()
+    await viking_fs.write_file(meta_uri, json.dumps(persisted_meta.to_dict()), ctx=ctx)
     session = Session(
         viking_fs=viking_fs,
         session_id="session-1",
         session_uri=session_uri,
+        ctx=ctx,
     )
+    calls = {}
+    for name in ("read", "write", "pathlock_acquire_exact", "pathlock_release"):
+        calls[name] = AsyncMock(wraps=getattr(viking_fs._async_agfs, name))
+        monkeypatch.setattr(viking_fs._async_agfs, name, calls[name])
 
     await session.update_config(
         event_search_tags=["channel=app"],
@@ -130,12 +138,15 @@ async def test_update_config_updates_policy_and_tags_in_one_locked_write():
         },
     )
 
-    saved_meta = SessionMeta.from_dict(json.loads(viking_fs.files[viking_fs.meta_uri]))
+    calls["read"].assert_awaited_once_with(viking_fs._uri_to_path(meta_uri, ctx=ctx))
+    assert calls["write"].await_count == 1
+    assert [call.args[0] for call in calls["pathlock_acquire_exact"].await_args_list] == [
+        viking_fs._uri_to_path(uri, ctx=ctx) for uri in (session_uri, meta_uri)
+    ]
+    assert calls["pathlock_release"].await_count == 2
+    saved_meta = SessionMeta.from_dict(json.loads(calls["write"].await_args.args[1]))
     assert saved_meta.event_search_tags == ["channel=app"]
     assert saved_meta.auto_commit_policy["message_count_threshold"] == 25
     assert saved_meta.message_count == 41
     assert saved_meta.pending_tokens == 8200
-    assert len(viking_fs.writes) == 1
-    assert viking_fs.writes[0][2] is None
-    assert viking_fs._async_agfs.acquired == 1
-    assert viking_fs._async_agfs.released == 1
+    assert saved_meta.expires_at == persisted_meta.expires_at

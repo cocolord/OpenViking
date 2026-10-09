@@ -1320,6 +1320,7 @@ class _OpsMixin:
         ctx: Optional[RequestContext] = None,
         extra_fields: Optional[List[str]] = None,
         tag_filter: Optional[Dict[str, Any]] = None,
+        ttl_view=None,
     ) -> Dict:
         """File pattern matching, supports **/*.md recursive.
 
@@ -1328,15 +1329,20 @@ class _OpsMixin:
         request additional augmentation (locked, id, count). An empty list still returns dicts
         (with name/uri/size/mode/mtime/isDir populated from stat) for CLI table rendering.
         """
+        from openviking.storage.ttl_view import TTLView
+
         _ensure_non_empty_search_query(pattern)
         await self._ensure_access(uri, ctx)
         real_ctx = self._ctx_or_default(ctx)
+        ttl_view = ttl_view or TTLView(self, real_ctx)
         return_entries = extra_fields is not None
         aug_fields = list(extra_fields) if extra_fields else []
         primary_path = self._uri_to_path(uri, ctx=ctx)
         path: Optional[str] = None
         for candidate_path in self._read_paths(uri, ctx=ctx):
-            if not await self._read_path_visible(uri, candidate_path, primary_path, real_ctx):
+            if not await self._read_path_visible(
+                uri, candidate_path, primary_path, real_ctx, ttl_view=ttl_view
+            ):
                 continue
             if await self._agfs_path_exists(candidate_path):
                 path = candidate_path
@@ -1354,6 +1360,7 @@ class _OpsMixin:
             extra_fields=aug_fields,
             tag_filter=tag_filter,
             ctx=real_ctx,
+            ttl_view=ttl_view,
         )
         if remote_result is not None:
             return remote_result
@@ -1388,7 +1395,9 @@ class _OpsMixin:
                     acl_enabled=acl_enabled,
                 ):
                     continue
-                if not await self._read_path_visible(uri, entry["path"], primary_path, real_ctx):
+                if not await self._read_path_visible(
+                    uri, entry["path"], primary_path, real_ctx, ttl_view=ttl_view
+                ):
                     continue
                 entry_uri = self._alias_uri_for_path(
                     request_uri=uri,
@@ -1407,7 +1416,9 @@ class _OpsMixin:
                     continue
                 if return_entries:
                     try:
-                        entry_stat = await self.stat(entry_uri, ctx=ctx, skip_count=True)
+                        entry_stat = await self.stat(
+                            entry_uri, ctx=ctx, skip_count=True, ttl_view=ttl_view
+                        )
                     except NotFoundError:
                         name = entry.get("name") or entry["path"].rsplit("/", 1)[-1]
                         entry_stat = {
@@ -1449,6 +1460,7 @@ class _OpsMixin:
         extra_fields: List[str],
         tag_filter: Optional[Dict[str, Any]],
         ctx: RequestContext,
+        ttl_view=None,
     ) -> Optional[Dict[str, Any]]:
         if not await self._should_use_vikingdb_glob(
             pattern=pattern,
@@ -1510,7 +1522,9 @@ class _OpsMixin:
             entries = entries[:node_limit]
 
         if return_entries:
-            await self._fill_remote_glob_entry_fields(entries, extra_fields, ctx=ctx)
+            await self._fill_remote_glob_entry_fields(
+                entries, extra_fields, ctx=ctx, ttl_view=ttl_view
+            )
             return {"matches": entries, "count": len(entries)}
 
         return {
@@ -1682,6 +1696,7 @@ class _OpsMixin:
         entries: List[Dict[str, Any]],
         extra_fields: List[str],
         ctx: Optional[RequestContext] = None,
+        ttl_view=None,
     ) -> None:
         requested_stat_fields = {
             field for field in extra_fields if field in _REMOTE_GLOB_LOCAL_STAT_FIELDS
@@ -1699,7 +1714,7 @@ class _OpsMixin:
             if not entry_uri:
                 continue
             try:
-                stat = await self.stat(entry_uri, ctx=ctx, skip_count=True)
+                stat = await self.stat(entry_uri, ctx=ctx, skip_count=True, ttl_view=ttl_view)
             except Exception:
                 continue
             stat.update({k: v for k, v in entry.items() if v is not None})
@@ -2103,6 +2118,7 @@ class _OpsMixin:
         auto_pathlock: bool = True,
         *,
         allow_empty_directory: bool = False,
+        session_write=None,
     ) -> Any:
         """Write file directly. Encryption lock handled internally by EncryptionWrappedFS.
 
@@ -2115,12 +2131,13 @@ class _OpsMixin:
         await self._ensure_access(uri, ctx, action=AclAction.WRITE)
         real_ctx = self._ctx_or_default(ctx)
         async with (
-            commit_write(self, real_ctx, lease_ref) as source_lease,
+            commit_write(self, real_ctx, lease_ref) as (source_lease, commit_session_write),
             content_update(
                 self,
                 uri,
                 empty=not content,
                 source_lease=source_lease,
+                session_write=session_write or commit_session_write,
                 ctx=real_ctx,
                 lease_ref=lease_ref,
                 allow_empty_directory=allow_empty_directory,
@@ -2402,6 +2419,8 @@ class _OpsMixin:
         content: str,
         ctx: Optional[RequestContext] = None,
         lease_ref: Dict[str, Any] | None = None,
+        *,
+        session_write=None,
     ) -> None:
         """Append content to file while holding one exact pathlock lease."""
         await self._ensure_access(uri, ctx, action=AclAction.WRITE)
@@ -2434,7 +2453,9 @@ class _OpsMixin:
             except AGFSClientError:
                 raise
 
-            await self.write_file(uri, existing + content, ctx=ctx, lease_ref=lease)
+            await self.write_file(
+                uri, existing + content, ctx=ctx, lease_ref=lease, session_write=session_write
+            )
 
         except Exception as e:
             logger.error(f"[VikingFS] Failed to append to file {uri}: {e}")
