@@ -407,3 +407,81 @@ async def test_native_page_can_exceed_ttl_budget_when_account_stays_unmanaged(se
     assert len(result) == 2
     assert len(s.calls) == 1
     s.fs._async_agfs.read.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["query", "search_by_keywords", "search_by_random"])
+@pytest.mark.parametrize(
+    "offset,limit", [(0, 10), (100, 10), (115, 10), (120, 10), (9000, 10), (0, 9000)]
+)
+async def test_unmanaged_pagination_matches_native_backend(setup, method, offset, limit):
+    """TTL-off pages preserve native filtering, order, scores and page boundaries."""
+    s = setup
+    s.fs.ttl_registry.account_may_have_records = AsyncMock(return_value=False)
+    # 120 matching rows interleaved with rows rejected by the backend filter.
+    s.rows.extend(
+        {
+            "uri": f"{ROOT}/2026/09/01/{i}.md",
+            "level": i % 2,
+            "account_id": "acct",
+            "_score": 240 - i,
+        }
+        for i in range(240)
+    )
+    predicate = Eq("level", 1)
+    projection = ["_score", "level"]
+    native = await getattr(s.single, method)(
+        filter=predicate, limit=limit, offset=offset, output_fields=projection
+    )
+    s.calls.clear()
+    kwargs = {
+        "ctx": s.ctx,
+        "filter": predicate,
+        "limit": limit,
+        "offset": offset,
+        "output_fields": projection,
+    }
+    if method == "query":
+        kwargs["include_expired"] = False
+    elif method == "search_by_keywords":
+        kwargs.update(query="meeting", mode="bm25", fields=["content"])
+    result = await getattr(s.backend, method)(**kwargs)
+    # The TTL response contract adds null expiry; native fields remain unchanged.
+    assert result == [{**row, "expires_at": None} for row in native]
+    assert len(s.calls) == 1
+    assert (s.calls[0]["offset"], s.calls[0]["limit"]) == (offset, limit)
+    s.fs._async_agfs.read.assert_not_awaited()
+    if method == "search_by_keywords":
+        assert s.calls[0]["query"] == "meeting"
+        assert s.calls[0]["mode"] == "bm25"
+        assert s.calls[0]["fields"] == ["content"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("descending", [False, True])
+async def test_unmanaged_sorted_offset_matches_native_order(setup, descending):
+    s = setup
+    s.fs.ttl_registry.account_may_have_records = AsyncMock(return_value=False)
+    s.rows.extend(
+        {"uri": f"{ROOT}/2026/09/01/{i}.md", "rank": i, "_score": i / 120}
+        for i in reversed(range(120))
+    )
+    advance = {"time_decay": {"protection": "0"}}
+    result = await s.backend.query(
+        ctx=s.ctx,
+        limit=10,
+        offset=100,
+        order_by="rank",
+        order_desc=descending,
+        output_fields=["rank", "_score"],
+        advance=advance,
+        include_expired=False,
+    )
+    expected = sorted(s.rows, key=lambda row: row["rank"], reverse=descending)[100:110]
+    assert result == [
+        {"rank": row["rank"], "_score": row["_score"], "expires_at": None} for row in expected
+    ]
+    assert len(s.calls) == 1
+    assert s.calls[0]["advance"] == advance
+    assert (s.calls[0]["offset"], s.calls[0]["limit"]) == (100, 10)
+    s.fs._async_agfs.read.assert_not_awaited()
