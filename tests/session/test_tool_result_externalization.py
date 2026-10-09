@@ -12,9 +12,8 @@ from openviking.message import ToolPart
 from openviking.server.config import ToolOutputExternalizationConfig
 from openviking.session import Session
 from openviking.session.tool_result_store import ToolResultStore
-from openviking.storage.viking_fs import VikingFS
 from openviking_cli.exceptions import FailedPreconditionError
-from tests.utils.mock_agfs import MockLocalAGFS
+from tests.storage.test_transfer_merge_binding import binding_fs as binding_fs
 
 
 @pytest.fixture(autouse=True)
@@ -23,11 +22,10 @@ def _drain_background_tasks():
 
 
 @pytest.fixture
-def session(tmp_path):
-    return Session(
-        VikingFS(agfs=MockLocalAGFS(root_path=tmp_path)),
-        session_id="test_session_tool_results",
-    )
+async def session(binding_fs):
+    session = Session(binding_fs, session_id="test_session_tool_results")
+    await session.ensure_exists()
+    return session
 
 
 @pytest.fixture

@@ -14,9 +14,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 from openviking.core.ttl import (
-    OBJECT_TYPE_SESSION,
     hidden_by_ttl,
-    ttl_metadata_uri,
     ttl_object_for_uri,
 )
 from openviking.server.identity import RequestContext, Role
@@ -24,7 +22,7 @@ from openviking.service.task_store import SYSTEM_TASK_ACCOUNT_ID, SYSTEM_TASK_US
 from openviking.service.task_tracker import get_task_tracker
 from openviking.service.task_tracker_concurrency import run_to_completion
 from openviking.service.ttl_policy import _directories, _owners, _roots
-from openviking.storage.directory_ttl import read_directory_fields
+from openviking.storage.directory_ttl import directory_write_lock_uri, read_directory_fields
 from openviking.storage.errors import LockAcquisitionError, ResourceBusyError
 from openviking.storage.queuefs.named_queue import DequeueHandlerBase
 from openviking.storage.queuefs.process_result import ProcessResult
@@ -113,20 +111,14 @@ class TTLCleanupService:
             user=UserIdentifier(scheduled.account_id, SYSTEM_TASK_USER_ID),
             role=Role.ROOT,
         )
-        metadata_path = fs._uri_to_path(
-            ttl_metadata_uri(scheduled.object_type, scheduled.object_uri), ctx=ctx
-        )
+        owner_path = fs._uri_to_path(directory_write_lock_uri(scheduled.object_uri), ctx=ctx)
         requests = [
-            {"path": metadata_path, "kind": "exact"},
+            {"path": owner_path, "kind": "exact"},
             {
                 "path": TTLRegistry.vector_lock_path(scheduled.account_id, scheduled.object_uri),
                 "kind": "exact",
             },
         ]
-        if scheduled.object_type == OBJECT_TYPE_SESSION:
-            requests.append(
-                {"path": fs._uri_to_path(scheduled.object_uri, ctx=ctx), "kind": "exact"}
-            )
         lease = await fs._async_agfs.pathlock_acquire_batch(requests, timeout_secs=0.0)
         return ctx, lease
 

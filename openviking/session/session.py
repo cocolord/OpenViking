@@ -642,7 +642,7 @@ class Session:
         lease = await fs._async_agfs.pathlock_acquire_batch(
             [
                 {"path": fs._uri_to_path(uri, ctx=self.ctx), "kind": "exact"}
-                for uri in [self._session_uri, meta_uri, messages_uri]
+                for uri in [self._session_uri, messages_uri]
             ],
             timeout_secs=30.0,
         )
@@ -735,7 +735,7 @@ class Session:
                     existing = dict(self._meta.auto_commit_policy or {})
                     existing.update(auto_commit_policy)
                     self._meta.auto_commit_policy = AutoCommitPolicy.from_dict(existing).to_dict()
-            await self._save_meta()
+            await self._save_meta(lease_ref=lease)
         finally:
             await self._viking_fs._async_agfs.pathlock_release(lease)
 
@@ -808,14 +808,16 @@ class Session:
                     f"{self._session_uri}/messages.jsonl",
                     batch_content,
                     ctx=self.ctx,
+                    lease_ref=lease,
                 )
             else:
                 await self._viking_fs.append_file(
                     f"{self._session_uri}/messages.jsonl",
                     batch_content,
                     ctx=self.ctx,
+                    lease_ref=lease,
                 )
-            await self._save_meta()
+            await self._save_meta(lease_ref=lease)
         finally:
             await self._viking_fs._async_agfs.pathlock_release(lease)
 
@@ -1203,6 +1205,7 @@ class Session:
                 await self._write_failed_marker(
                     archive_uri,
                     stage="phase1_recovery",
+                    lease_ref=lease,
                     error=error,
                 )
                 if task_id:
@@ -1228,6 +1231,7 @@ class Session:
                 await self._write_failed_marker(
                     archive_uri,
                     stage="phase1_recovery",
+                    lease_ref=lease,
                     error=f"Cannot verify Phase 1 state: {exc}",
                 )
                 return False
@@ -1241,6 +1245,7 @@ class Session:
                 await self._write_failed_marker(
                     archive_uri,
                     stage="phase1_recovery",
+                    lease_ref=lease,
                     error="Root rewrite was not durably completed before process interruption",
                 )
                 return False
@@ -1275,8 +1280,8 @@ class Session:
             )
             self._meta.last_commit_at = get_current_timestamp()
             await self._rebuild_pending_tokens()
-            await self._save_meta()
-            await self._write_phase1_ready_marker(archive_uri)
+            await self._save_meta(lease_ref=lease)
+            await self._write_phase1_ready_marker(archive_uri, lease_ref=lease)
             logger.warning("Recovered interrupted Session Phase 1: %s", archive_uri)
             return True
         finally:
@@ -1512,9 +1517,9 @@ class Session:
                     retained_message_token_budget=effective_token_budget if turn_mode else 0,
                     min_raw_tail_steps=effective_min_tail,
                 )
-                await self._save_meta()
+                await self._save_meta(lease_ref=lease)
                 if reset_context:
-                    await self._append_context_reset_archive()
+                    await self._append_context_reset_archive(lease_ref=lease)
                 get_current_telemetry().set("memory.extracted", 0)
                 return {
                     "session_id": self.session_id,
@@ -1536,7 +1541,7 @@ class Session:
                 # whose aggregate exceeds the configured inline budget.
                 for turn in build_turns(self._messages):
                     await self._tool_outputs.externalize_group(
-                        turn.messages, self._tool_output_externalization_config
+                        turn.messages, self._tool_output_externalization_config, lease_ref=lease
                     )
                 retention_plan = plan_retention(
                     self._messages,
@@ -1558,7 +1563,7 @@ class Session:
             # remember the policy for subsequent add_message accounting.
             if not messages_to_archive:
                 self._messages = retained_messages
-                await self._write_to_agfs_async(messages=self._messages)
+                await self._write_to_agfs_async(messages=self._messages, lease_ref=lease)
                 self._meta.pending_tokens = 0
                 self._meta.message_count = total
                 self._remember_retention_policy(
@@ -1568,7 +1573,7 @@ class Session:
                     retained_message_token_budget=effective_token_budget if turn_mode else 0,
                     min_raw_tail_steps=effective_min_tail,
                 )
-                await self._save_meta()
+                await self._save_meta(lease_ref=lease)
                 get_current_telemetry().set("memory.extracted", 0)
                 return {
                     "session_id": self.session_id,
@@ -1618,6 +1623,7 @@ class Session:
                         min_raw_tail_steps=effective_min_tail,
                         agent_evolution_enabled=agent_evolution_enabled,
                         agent_memory_skip_reason=agent_memory_skip_reason,
+                        lease_ref=lease,
                     )
                 ]
                 if self._viking_fs:
@@ -1627,6 +1633,7 @@ class Session:
                             uri=f"{archive_uri}/messages.jsonl",
                             content="\n".join(lines) + "\n",
                             ctx=self.ctx,
+                            lease_ref=lease,
                         )
                     )
                 archive_persist_results = await asyncio.gather(
@@ -1647,6 +1654,7 @@ class Session:
                                 min_raw_tail_steps=effective_min_tail,
                             )
                         },
+                        lease_ref=lease,
                     )
 
                 phase1_stage = "queue_enqueue"
@@ -1666,7 +1674,7 @@ class Session:
 
                 phase1_stage = "phase1_persist"
                 self._messages = retained_messages
-                await self._write_to_agfs_async(messages=self._messages)
+                await self._write_to_agfs_async(messages=self._messages, lease_ref=lease)
                 self._meta.message_count = len(self._messages)
                 self._meta.pending_tokens = 0
                 self._remember_retention_policy(
@@ -1686,8 +1694,8 @@ class Session:
                     # commit boundary, so an idle scan and a concurrent worker
                     # never see a stale state.
                     self._meta.last_auto_commit_at = get_current_timestamp()
-                await self._save_meta()
-                await self._write_phase1_ready_marker(archive_uri)
+                await self._save_meta(lease_ref=lease)
+                await self._write_phase1_ready_marker(archive_uri, lease_ref=lease)
             except Exception as e:
                 logger.error(f"[commit] Failed during {phase1_stage}: {e}")
                 # Whether the queue write failed or a queued Phase 1 stopped
@@ -1697,6 +1705,7 @@ class Session:
                     await self._write_failed_marker(
                         archive_uri,
                         stage=phase1_stage,
+                        lease_ref=lease,
                         error=str(e),
                     )
                 except Exception:
@@ -1708,7 +1717,7 @@ class Session:
                 self._compression.compression_index -= 1
                 raise
             if reset_context:
-                await self._append_context_reset_archive()
+                await self._append_context_reset_archive(lease_ref=lease)
         finally:
             await self._viking_fs._async_agfs.pathlock_release(lease)
         # Lock released; Phase 1 intent, queue item, retained root, metadata and
@@ -1732,7 +1741,7 @@ class Session:
             "budget_exceeded": retention_plan.budget_exceeded if retention_plan else False,
         }
 
-    async def _append_context_reset_archive(self) -> None:
+    async def _append_context_reset_archive(self, lease_ref: Any) -> None:
         """Publish a boundary archive while holding the Phase 1 session lock.
 
         The directory holds only ``.done``: terminal archives never have their
@@ -1754,14 +1763,17 @@ class Session:
                 f"{archive_uri}/.done",
                 json.dumps({"context_reset": True, "enable_working_memory": False}),
                 ctx=self.ctx,
+                lease_ref=lease_ref,
             )
         except Exception as exc:
             # A directory left without any marker reads as pending and would
             # block the next Phase 2 forever; no queue owns this archive.
-            await self._write_failed_marker(archive_uri, stage="context_reset", error=str(exc))
+            await self._write_failed_marker(
+                archive_uri, stage="context_reset", error=str(exc), lease_ref=lease_ref
+            )
             raise
         self._meta.commit_count = self._compression.compression_index
-        await self._save_meta()
+        await self._save_meta(lease_ref=lease_ref)
 
     @commit_scope
     async def finalize_cancelled_commit(self, archive_uri: str, *, task_id: str) -> None:

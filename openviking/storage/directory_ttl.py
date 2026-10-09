@@ -51,11 +51,24 @@ async def read_directory_fields(fs, uri, *, ctx):
     return fields
 
 
+def directory_write_lock_uri(uri):
+    kind, root = ttl_object_for_uri(uri)
+    return root if kind == OBJECT_TYPE_SESSION else root + "/.overview.md"
+
+
 async def write_directory_fields(fs, root, fields, *, ctx, lease_ref):
     kind, owner = ttl_object_for_uri(root)
-    await fs.write_file(
-        ttl_metadata_uri(kind, owner), json.dumps(fields), ctx=ctx, lease_ref=lease_ref
-    )
+    uri, content = ttl_metadata_uri(kind, owner), json.dumps(fields).encode("utf-8")
+    path = fs._uri_to_path(uri, ctx=ctx)
+    # The owner lock orders lifecycle changes; this is the actual file write lock.
+    lease = await fs._async_agfs.pathlock_acquire_exact(path, owner_lease_ref=lease_ref)
+    try:
+        await fs._mark_ttl_write(uri, content, ctx=ctx)
+        await fs._async_agfs.write(
+            path, content, fs_ctx=fs._pathlock_fs_ctx(ctx, lease), auto_pathlock=False
+        )
+    finally:
+        await fs._async_agfs.pathlock_release(lease)
 
 
 def is_ttl_content(uri):
@@ -83,7 +96,9 @@ async def _has_content(fs, path):
 
 
 @asynccontextmanager
-async def content_update(fs, uri, content, *, ctx, lease_ref=None, allow_empty_directory=False):
+async def content_update(
+    fs, uri, *, empty=False, ctx, lease_ref=None, source_lease=None, allow_empty_directory=False
+):
     """Register a new bucket before publishing content; roll back failed writes."""
     target = ttl_object_for_uri(uri)
     if target is None:
@@ -94,13 +109,10 @@ async def content_update(fs, uri, content, *, ctx, lease_ref=None, allow_empty_d
         yield lease_ref
         return
     content_file = is_ttl_content(uri)
-    # Every writer takes a body lock before admission. Once admitted, ordinary
-    # body I/O runs in parallel; cleanup checks these outstanding file leases
-    # while holding the metadata lock, including not-yet-materialized files.
-    body_lease = await fs._async_agfs.pathlock_acquire_exact(
-        fs._uri_to_path(uri, ctx=ctx), owner_lease_ref=lease_ref, timeout_secs=30.0
-    )
-    lease = None
+    # Reuse the memory updater's overview lock or the Session write lock.
+    # Session writers already hold their root before acquiring individual files.
+    lock_path = fs._uri_to_path(directory_write_lock_uri(root), ctx=ctx)
+    body_lease = lease = None
 
     async def release_admission():
         nonlocal lease
@@ -108,16 +120,24 @@ async def content_update(fs, uri, content, *, ctx, lease_ref=None, allow_empty_d
         lease = None
 
     try:
-        lease = await fs._async_agfs.pathlock_acquire_exact(
-            fs._uri_to_path(ttl_metadata_uri(kind, root), ctx=ctx),
-            owner_lease_ref=body_lease,
+        if kind == OBJECT_TYPE_SESSION:
+            lease = await fs._async_agfs.pathlock_acquire_exact(
+                lock_path, owner_lease_ref=lease_ref or source_lease, timeout_secs=30.0
+            )
+        body_lease = await fs._async_agfs.pathlock_acquire_exact(
+            fs._uri_to_path(uri, ctx=ctx),
+            owner_lease_ref=lease or lease_ref or source_lease,
             timeout_secs=30.0,
         )
+        if kind != OBJECT_TYPE_SESSION:
+            lease = await fs._async_agfs.pathlock_acquire_exact(
+                lock_path, owner_lease_ref=body_lease, timeout_secs=30.0
+            )
         previous = await read_directory_fields(fs, root, ctx=ctx)
         if hidden_by_ttl(previous.get("expires_at")):
             raise NotFoundError(root, "directory")
         if kind == OBJECT_TYPE_SESSION:
-            if not previous and not (uri == root + "/messages.jsonl" and not content):
+            if not previous and not (uri == root + "/messages.jsonl" and empty):
                 # Legacy sessions may have messages without metadata. A deleted
                 # session has neither, so delayed archive writes stop here.
                 try:
@@ -129,12 +149,11 @@ async def content_update(fs, uri, content, *, ctx, lease_ref=None, allow_empty_d
                         await fs._remove_empty_lock_directory(fs._uri_to_path(root, ctx=ctx))
                         raise NotFoundError(root, "session") from exc
                     raise
-            await release_admission()
             yield body_lease
             return
         if not content_file:
             # Derived summaries never initialize a new event bucket. Checking
-            # under the metadata lock also prevents a late summary resurrecting it.
+            # under the owner lock also prevents a late summary resurrecting it.
             if not previous and not allow_empty_directory:
                 if not await _has_content(fs, fs._uri_to_path(root, ctx=ctx)):
                     await fs._remove_empty_lock_directory(fs._uri_to_path(root, ctx=ctx))
@@ -159,33 +178,7 @@ async def content_update(fs, uri, content, *, ctx, lease_ref=None, allow_empty_d
             await write_directory_fields(fs, root, previous, ctx=ctx, lease_ref=lease)
             raise
     finally:
+        if body_lease is not None:
+            await fs._async_agfs.pathlock_release(body_lease)
         if lease is not None:
             await fs._async_agfs.pathlock_release(lease)
-        await fs._async_agfs.pathlock_release(body_lease)
-
-
-@asynccontextmanager
-async def directory_write(fs, uri, content, *, ctx, lease_ref=None, allow_empty_directory=False):
-    """Admit a file write against both its source commit and target directory."""
-    from openviking.session.commit_lifetime import commit_write
-
-    async with commit_write(fs, ctx, lease_ref) as source_lease:
-        file_lease = None
-        try:
-            if source_lease is not lease_ref:
-                # The source Session lease does not cover the target file.
-                file_lease = await fs._async_agfs.pathlock_acquire_exact(
-                    fs._uri_to_path(uri, ctx=ctx), owner_lease_ref=source_lease, timeout_secs=30.0
-                )
-            async with content_update(
-                fs,
-                uri,
-                content,
-                ctx=ctx,
-                lease_ref=file_lease or source_lease,
-                allow_empty_directory=allow_empty_directory,
-            ) as lease:
-                yield lease
-        finally:
-            if file_lease is not None:
-                await fs._async_agfs.pathlock_release(file_lease)

@@ -33,7 +33,7 @@ from openviking.storage.abstract_overview import (
     rewrite_abstract_overview_for_transfer,
 )
 from openviking.storage.acl import AclAction, is_acl_uri
-from openviking.storage.directory_ttl import content_update, directory_write
+from openviking.storage.directory_ttl import content_update, directory_write_lock_uri
 from openviking.storage.errors import StorageException
 from openviking.storage.expr import And, PathScope, RawDSL
 from openviking.storage.internal_names import is_storage_internal_name
@@ -469,16 +469,8 @@ class _OpsMixin:
 
         await self._ensure_transfer_parent_directory(new_path, new_uri, operation="cp")
         await self._ensure_transfer_target_type(new_path, new_uri, is_dir=is_dir)
-        lock_requests = (
-            self._directory_transfer_lock_requests(old_path, new_path)
-            if is_dir
-            else [
-                {"path": old_path, "kind": "exact"},
-                {"path": new_path, "kind": "exact"},
-            ]
-        )
         lease = await self._async_agfs.pathlock_acquire_batch(
-            lock_requests,
+            self._transfer_lock_requests(old_path, new_path, is_dir=is_dir, ctx=ctx),
             owner_lease_ref=lease_ref,
         )
         operation_id = uuid.uuid4().hex
@@ -706,15 +698,23 @@ class _OpsMixin:
     def _transfer_parent_path(path: str) -> str:
         return path.rstrip("/").rsplit("/", 1)[0] or "/"
 
-    @classmethod
-    def _directory_transfer_lock_requests(
-        cls, old_path: str, new_path: str
-    ) -> List[Dict[str, str]]:
-        """Cover both transfer subtrees without blocking unrelated siblings."""
-        return [
-            {"path": old_path, "kind": "tree"},
-            {"path": new_path, "kind": "tree"},
+    def _transfer_lock_requests(self, old_path, new_path, *, is_dir, ctx):
+        requests = [
+            {"path": path, "kind": "tree" if is_dir else "exact"} for path in (old_path, new_path)
         ]
+        # Acquire lifecycle and file locks together; a body-first transfer must
+        # not wait on a Session writer that already holds its root.
+        for path in (old_path, new_path):
+            uri = self._path_to_uri(path, ctx=ctx)
+            if ttl_object_for_uri(uri):
+                owner = self._uri_to_path(directory_write_lock_uri(uri), ctx=ctx)
+                if not any(
+                    owner == r["path"]
+                    or (r["kind"] == "tree" and owner.startswith(r["path"].rstrip("/") + "/"))
+                    for r in requests
+                ):
+                    requests.append({"path": owner, "kind": "exact"})
+        return requests
 
     async def _copy_agfs_entry(
         self,
@@ -745,9 +745,12 @@ class _OpsMixin:
         if target_owner and (source_owner is None or source_owner == target_owner):
             # A content-only transfer into a bucket follows its shared lifetime.
             # Whole-directory transfers carry the owner's saved metadata intact.
-            raw = self._handle_agfs_read(await self._async_agfs.read(old_path))
+            empty = (
+                new_uri == target_owner[1] + "/messages.jsonl"
+                and (await self._async_agfs.stat(old_path, bypass_cache=True))["size"] == 0
+            )
             async with content_update(
-                self, new_uri, raw, ctx=real_ctx, lease_ref=lease_ref
+                self, new_uri, empty=empty, ctx=real_ctx, lease_ref=lease_ref
             ) as content_lease:
                 await self._async_agfs.cp(
                     old_path,
@@ -848,19 +851,10 @@ class _OpsMixin:
                         details={"from_uri": old_uri, "to_uri": new_uri},
                     )
 
-        if is_dir:
-            lease = await self._async_agfs.pathlock_acquire_batch(
-                self._directory_transfer_lock_requests(old_path, new_path),
-                owner_lease_ref=lease_ref,
-            )
-        else:
-            lease = await self._async_agfs.pathlock_acquire_batch(
-                [
-                    {"path": old_path, "kind": "exact"},
-                    {"path": new_path, "kind": "exact"},
-                ],
-                owner_lease_ref=lease_ref,
-            )
+        lease = await self._async_agfs.pathlock_acquire_batch(
+            self._transfer_lock_requests(old_path, new_path, is_dir=is_dir, ctx=ctx),
+            owner_lease_ref=lease_ref,
+        )
 
         operation_id = uuid.uuid4().hex
         try:
@@ -2116,15 +2110,22 @@ class _OpsMixin:
         automatic pathlock disabled. Only safe for URIs that are never written
         concurrently (e.g. unique-per-request shared upload directories).
         """
+        from openviking.session.commit_lifetime import commit_write
+
         await self._ensure_access(uri, ctx, action=AclAction.WRITE)
-        async with directory_write(
-            self,
-            uri,
-            content,
-            ctx=self._ctx_or_default(ctx),
-            lease_ref=lease_ref,
-            allow_empty_directory=allow_empty_directory,
-        ) as effective_lease:
+        real_ctx = self._ctx_or_default(ctx)
+        async with (
+            commit_write(self, real_ctx, lease_ref) as source_lease,
+            content_update(
+                self,
+                uri,
+                empty=not content,
+                source_lease=source_lease,
+                ctx=real_ctx,
+                lease_ref=lease_ref,
+                allow_empty_directory=allow_empty_directory,
+            ) as effective_lease,
+        ):
             path = self._uri_to_path(uri, ctx=ctx)
             await self._ensure_parent_dirs(path, ctx=ctx, lease_ref=effective_lease)
             if isinstance(content, str):
@@ -2310,9 +2311,9 @@ class _OpsMixin:
         return str(json.loads(content).get("expires_at") or "") or None
 
     async def _remove_empty_lock_directory(self, path):
-        """Remove empty directories recreated by metadata lock acquisition.
+        """Remove empty directories recreated by owner lock acquisition.
 
-        The caller holds the owner metadata lease. Never remove residual payload.
+        The caller holds the owner write lease. Never remove residual payload.
         """
 
         async def empty(directory):
@@ -2341,7 +2342,7 @@ class _OpsMixin:
     async def _remove_directory_files(self, path, *, ctx, lease_ref):
         """Delete a directory bottom-up with exact file locks, metadata last.
 
-        The owner metadata lease excludes scoped writes until removal completes.
+        The owner write lease excludes scoped writes until removal completes.
         Only empty directories and runtime lock artifacts remain at the final rm.
         A busy file is retried; no tree lock or per-file TTL lookup is used.
         """
@@ -2411,7 +2412,10 @@ class _OpsMixin:
             await self._ensure_parent_dirs(path, ctx=ctx, lease_ref=lease_ref)
             lease = lease_ref
             if lease is None:
-                lease = await self._async_agfs.pathlock_acquire_exact(path)
+                paths = [path]
+                if ttl_object_for_uri(uri):
+                    paths.append(self._uri_to_path(directory_write_lock_uri(uri), ctx=ctx))
+                lease = await self._async_agfs.pathlock_acquire_exact_batch(paths)
                 owned_lease = lease
             fs_ctx = self._pathlock_fs_ctx(ctx, lease)
 

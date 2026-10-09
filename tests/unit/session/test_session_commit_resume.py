@@ -86,7 +86,7 @@ class _MemoryVikingFS:
     async def write_file(self, uri, content, ctx=None, lease_ref=None):
         self.files[uri] = content
 
-    async def append_file(self, uri, content, ctx=None):
+    async def append_file(self, uri, content, ctx=None, lease_ref=None):
         self.files[uri] += content
 
     async def exists(self, uri, ctx=None, *, include_expired=False):

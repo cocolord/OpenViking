@@ -63,7 +63,19 @@ async def test_late_commit_cannot_recreate_event_or_corrupt_reused_session(bindi
     async def delayed_extraction(**kwargs):
         entered.set()
         await finish.wait()
-        await fs.write_file(event + "/late.md", "late output", ctx=ctx)
+        # One successful write owns each lock once and reads each source once,
+        # including the nested initialization of a new event's metadata.
+        with monkeypatch.context() as patch:
+            acquire = AsyncMock(wraps=fs._async_agfs.pathlock_acquire_exact)
+            read = AsyncMock(wraps=fs._async_agfs.read)
+            patch.setattr(fs._async_agfs, "pathlock_acquire_exact", acquire)
+            patch.setattr(fs._async_agfs, "read", read)
+            await fs.write_file(event + "/late.md", "late output", ctx=ctx)
+            paths = [call.args[0] for call in acquire.call_args_list]
+            assert len(paths) == len(set(paths))
+            for owner in (session.uri, msg.archive_uri):
+                path = fs._uri_to_path(owner + "/.meta.json", ctx=ctx)
+                assert sum(call.args[0] == path for call in read.call_args_list) == 1
 
     monkeypatch.setattr(session, "_run_memory_extraction", delayed_extraction)
     monkeypatch.setattr(session, "_can_run_archive", AsyncMock(return_value=True))

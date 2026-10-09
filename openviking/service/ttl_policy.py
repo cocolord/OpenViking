@@ -12,7 +12,6 @@ from openviking.core.ttl import (
     OBJECT_TYPE_SESSION,
     hidden_by_ttl,
     policy_ttl_fields,
-    ttl_metadata_uri,
     ttl_object_for_uri,
     ttl_scope_for_uri,
 )
@@ -21,6 +20,7 @@ from openviking.server.identity import RequestContext, Role
 from openviking.service.task_tracker_concurrency import run_to_completion
 from openviking.storage.directory_ttl import (
     _has_content,
+    directory_write_lock_uri,
     read_directory_fields,
     write_directory_fields,
 )
@@ -117,10 +117,9 @@ async def _apply_owner(fs, uri, ctx, config):
     # and recheck metadata inside the lock before changing an existing owner.
     await fs._async_agfs.stat(path, bypass_cache=True)
     before = await read_directory_fields(fs, uri, ctx=ctx)
-    requests = [{"path": fs._uri_to_path(ttl_metadata_uri(kind, uri), ctx=ctx), "kind": "exact"}]
-    if kind == OBJECT_TYPE_SESSION:
-        requests.append({"path": path, "kind": "exact"})
-    lease = await fs._async_agfs.pathlock_acquire_batch(requests, timeout_secs=30.0)
+    lease = await fs._async_agfs.pathlock_acquire_exact(
+        fs._uri_to_path(directory_write_lock_uri(uri), ctx=ctx), timeout_secs=30.0
+    )
     try:
         fields = await read_directory_fields(fs, uri, ctx=ctx)
         if fields.get("expires_at"):

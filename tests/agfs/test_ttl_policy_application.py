@@ -148,7 +148,11 @@ async def test_same_patch_retries_partial_application_failure(configured_fs, mon
     policy = {"user_events": {"mode": "days", "ttl_days": 7}}
     with monkeypatch.context() as m:
         if failure == "metadata":
-            m.setattr(fs, "write_file", AsyncMock(side_effect=OSError("metadata unavailable")))
+            m.setattr(
+                ttl_policy,
+                "write_directory_fields",
+                AsyncMock(side_effect=OSError("metadata unavailable")),
+            )
         elif failure == "config":
             current = await ttl_policy._config(fs, ctx.account_id)
             m.setattr(
@@ -204,6 +208,8 @@ async def test_sibling_body_io_is_parallel_with_ttl_off_or_on(configured_fs, mon
     owner = "viking://user/default/memories/events/2026/10/01"
     await fs.write_file(owner + "/seed.md", "first", ctx=ctx)
     original = fs._async_agfs.write
+    acquire = AsyncMock(wraps=fs._async_agfs.pathlock_acquire_exact)
+    monkeypatch.setattr(fs._async_agfs, "pathlock_acquire_exact", acquire)
     all_entered, finish = asyncio.Event(), asyncio.Event()
     entered = 0
 
@@ -227,6 +233,7 @@ async def test_sibling_body_io_is_parallel_with_ttl_off_or_on(configured_fs, mon
         finish.set()
         await asyncio.gather(*tasks)
     assert entered == 8
+    assert not any(call.args[0].endswith("/.meta.json") for call in acquire.call_args_list)
 
 
 @pytest.mark.asyncio

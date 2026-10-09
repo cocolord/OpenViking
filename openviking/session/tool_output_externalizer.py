@@ -242,6 +242,7 @@ class ToolOutputExternalizer:
         group_id: str,
         group_original_chars: int,
         synopsis: Optional[ToolResultSynopsis] = None,
+        lease_ref: Any = None,
     ) -> None:
         store = self.tool_result_store()
         original_output = part.tool_output or ""
@@ -261,6 +262,7 @@ class ToolOutputExternalizer:
                 preview_chars=preview_chars,
                 mime_type=part.tool_output_mime_type or "text/plain",
                 synopsis=synopsis,
+                lease_ref=lease_ref,
             )
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
@@ -314,6 +316,8 @@ class ToolOutputExternalizer:
         self,
         messages: List[Message],
         cfg: ToolOutputExternalizationConfig,
+        *,
+        lease_ref: Any = None,
     ) -> None:
         if not cfg.enabled:
             return
@@ -442,4 +446,5 @@ class ToolOutputExternalizer:
                 group_id=group_id,
                 group_original_chars=group_original_chars,
                 synopsis=synopsis,
+                lease_ref=lease_ref,
             )

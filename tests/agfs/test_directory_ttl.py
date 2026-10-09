@@ -6,6 +6,7 @@ import asyncio
 import json
 from datetime import timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -112,7 +113,7 @@ async def test_failed_first_write_cannot_clear_successful_sibling_lifetime(bindi
         return await original_write(path, data, **kwargs)
 
     async def acquire(path, **kwargs):
-        if asyncio.current_task().get_name() == "sibling" and path.endswith("/.meta.json"):
+        if asyncio.current_task().get_name() == "sibling" and path.endswith("/.overview.md"):
             sibling_ready.set()
         return await original_lock(path, **kwargs)
 
@@ -186,11 +187,22 @@ async def test_concurrent_sibling_writes_share_one_lifetime(binding_fs):
 
 
 @pytest.mark.asyncio
-async def test_first_content_in_empty_nested_directory_gets_ttl(binding_fs):
+@pytest.mark.parametrize("operation", ["write", "copy"])
+async def test_first_content_in_empty_nested_directory_gets_ttl(binding_fs, monkeypatch, operation):
     fs, ctx = binding_fs, root_ctx()
     root = "viking://user/default/memories/events/2026/09/30"
     await fs.mkdir(root + "/nested", ctx=ctx)
-    await fs.write_file(root + "/nested/a.md", "first content", ctx=ctx)
+    target = root + "/nested/a.md"
+    if operation == "copy":
+        source = "viking://resources/source.md"
+        await fs.write_file(source, "first content", ctx=ctx)
+        read = AsyncMock(wraps=fs._async_agfs.read)
+        monkeypatch.setattr(fs._async_agfs, "read", read)
+        await fs.cp(source, target, ctx=ctx)
+        assert all(call.args[0] != fs._uri_to_path(source, ctx=ctx) for call in read.call_args_list)
+    else:
+        await fs.write_file(target, "first content", ctx=ctx)
+    assert await fs.read_file(target, ctx=ctx) == "first content"
     fields = await read_directory_fields(fs, root, ctx=ctx)
     assert parse_iso_datetime(fields["expires_at"]) - parse_iso_datetime(
         fields["received_at"]
@@ -202,8 +214,6 @@ async def test_first_content_in_empty_nested_directory_gets_ttl(binding_fs):
 async def test_public_read_shares_owner_deadline_without_caching_next_request(
     binding_fs, monkeypatch, operation
 ):
-    from unittest.mock import AsyncMock
-
     import openviking.storage.ttl_view as module
     from openviking.service.fs_service import FSService
 
