@@ -341,6 +341,11 @@ function PolicyForm({
           />
         </label>
       )}
+      {mode === 'days' && !valid && (
+        <p role="alert" className="text-sm text-destructive">
+          {t('ttl.invalidDays')}
+        </p>
+      )}
       {mode === 'absolute' && (
         <label className="block space-y-2 text-sm">
           <span>{t('ttl.absolute')}</span>

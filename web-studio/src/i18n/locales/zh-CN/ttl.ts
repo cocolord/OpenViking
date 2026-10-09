@@ -16,6 +16,7 @@ export default {
   invalidRoot:
     '请输入用户 events 或 sessions 根目录 URI，具体 Session、日期目录和文件不支持单独配置。Peer events 统一使用 Peer events 默认策略。',
   policy: '当前库的覆盖策略',
+  invalidDays: '请输入 1–365000 之间的整数天数，必须大于 0；0 不表示关闭 TTL。',
   modes: {
     server: '使用服务端配置（移除库级覆盖）',
     inherit: '继承类型／库默认策略',

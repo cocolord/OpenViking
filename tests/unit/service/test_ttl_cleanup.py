@@ -106,3 +106,65 @@ async def _cleanup_once(cleanup, record):
         return await cleanup._cleanup_record(record, ctx, lease)
     finally:
         await cleanup._service.viking_fs._async_agfs.pathlock_release(lease)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["acquire", "delete"])
+async def test_contention_retry_rechecks_changed_deadline(cleanup_case, monkeypatch, stage):
+    from openviking.storage.errors import LockAcquisitionError, ResourceBusyError
+
+    fs, ctx, cleanup, queue, tracker, record = cleanup_case
+    acquire = cleanup._acquire_object_lock
+    release = AsyncMock(wraps=fs._async_agfs.pathlock_release)
+    monkeypatch.setattr(fs._async_agfs, "pathlock_release", release)
+    monkeypatch.setattr(ttl_cleanup.random, "uniform", lambda *args: 0)
+    calls = 0
+
+    async def contend_then_extend(target):
+        nonlocal calls
+        calls += 1
+        if calls == 1 and stage == "acquire":
+            raise LockAcquisitionError("busy")
+        if calls == 2:
+            if stage == "delete":
+                assert release.await_count == 1
+            await fs.write_file(
+                record.object_uri + "/.meta.json",
+                '{"expires_at":"2999-01-01T00:00:00Z"}',
+                ctx=ctx,
+            )
+        return await acquire(target)
+
+    monkeypatch.setattr(cleanup, "_acquire_object_lock", contend_then_extend)
+    delete = AsyncMock(side_effect=ResourceBusyError("busy", uri=record.object_uri))
+    monkeypatch.setattr(fs, "rm", delete)
+    result = await cleanup._process(ttl_cleanup._ttl_cleanup_message(record=record))
+    assert result.outcome is ProcessOutcome.SUCCESS
+    assert result.value == {"deleted": False, "skipped": "live_or_unmanaged"}
+    assert calls == 2
+    assert delete.await_count == int(stage == "delete")
+    assert not queue.mock_calls
+
+
+@pytest.mark.asyncio
+async def test_persistent_contention_is_bounded_and_preserves_deadline(cleanup_case, monkeypatch):
+    from openviking.storage.errors import ResourceBusyError
+
+    fs, ctx, cleanup, queue, tracker, record = cleanup_case
+    monkeypatch.setattr(ttl_cleanup.random, "uniform", lambda *args: 0)
+    delete = AsyncMock(side_effect=ResourceBusyError("busy", uri=record.object_uri))
+    monkeypatch.setattr(fs, "rm", delete)
+    release = AsyncMock(wraps=fs._async_agfs.pathlock_release)
+    monkeypatch.setattr(fs._async_agfs, "pathlock_release", release)
+    message = ttl_cleanup._ttl_cleanup_message(record=record)
+    result = await cleanup._process(message)
+    assert result.outcome is ProcessOutcome.SUCCESS
+    assert delete.await_count == release.await_count == 3
+    task = await tracker.get(
+        message["task_id"], account_id=message["account_id"], user_id=message["user_id"]
+    )
+    assert task.result == {"deleted": False, "skipped": "busy"}
+    assert not queue.mock_calls
+    assert b"2000-01-01" in await fs._async_agfs.read(
+        fs._uri_to_path(record.object_uri + "/.meta.json", ctx=ctx)
+    )

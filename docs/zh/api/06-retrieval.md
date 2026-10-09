@@ -1,5 +1,7 @@
 # 检索
 
+TTL 过滤在确认完整结果前耗尽候选扫描或排除目录预算时，返回 HTTP 429（`RESOURCE_EXHAUSTED`，`details.reason: ttl_query_budget_exceeded`），不会静默返回被截断的结果页。可缩小查询范围或减少深分页；过期数据积压不变时，直接重试相同请求仍可能超限。详见 [TTL 查询预算](../concepts/17-ttl.md#有界查询与争用重试)。
+
 OpenViking 提供多种检索方法，包括简单的向量相似度搜索、关键词搜索、带会话上下文的智能检索、正则表达式匹配搜索和文件模式匹配。
 
 ## find 与 search 对比

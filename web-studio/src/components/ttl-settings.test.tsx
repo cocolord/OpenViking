@@ -330,3 +330,54 @@ it('includes initial TTL in the account creation request and allows server defau
   await waitFor(() => expect(requests).toHaveLength(2))
   expect(JSON.parse(requests[1].data)).not.toHaveProperty('settings')
 })
+
+it.each(['1', '30', '365000'])(
+  'submits %s retention days without converting to seconds',
+  async (value) => {
+    render(view())
+    await days(value)
+    await save()
+    expect(JSON.parse(patches()[0].data)).toEqual({
+      settings: { ttl: { global: { mode: 'days', ttl_days: Number(value) } } },
+    })
+  },
+)
+
+it.each(['0', '365001'])(
+  'rejects %s days with an explanation and no configuration write',
+  async (value) => {
+    render(view())
+    await days(value)
+    expect(screen.getByRole('alert').textContent).toContain('1 to 365000')
+    const button = screen.getByRole<HTMLButtonElement>('button', {
+      name: 'Save and apply',
+    })
+    expect(button.disabled).toBe(true)
+    fireEvent.click(button)
+    expect(patches()).toHaveLength(0)
+    expect(
+      screen.getByLabelText<HTMLInputElement>('Retention days').value,
+    ).toBe(value)
+  },
+)
+
+it('preserves a failed days draft and allows correction without showing false success', async () => {
+  render(view())
+  await days('30')
+  rejectPatch = true
+  fireEvent.click(screen.getByRole('button', { name: 'Save and apply' }))
+  await screen.findByText('1 directory failed; retry')
+  expect(screen.getByLabelText<HTMLInputElement>('Retention days').value).toBe(
+    '30',
+  )
+  expect(screen.queryByText('TTL policy applied.')).toBeNull()
+  fireEvent.change(screen.getByLabelText('Retention days'), {
+    target: { value: '31' },
+  })
+  rejectPatch = false
+  await save()
+  expect(JSON.parse(patches()[1].data).settings.ttl.global).toEqual({
+    mode: 'days',
+    ttl_days: 31,
+  })
+})

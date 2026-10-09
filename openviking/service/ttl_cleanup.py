@@ -81,14 +81,12 @@ class TTLCleanupService:
             "account_id": SYSTEM_TASK_ACCOUNT_ID,
             "user_id": SYSTEM_TASK_USER_ID,
         }
-        lease = None
         try:
             await tracker.create(
                 "ttl_cleanup", resource_id=record.object_uri, task_id=task_id, **owner
             )
             await tracker.start(task_id, stage="strict_cleanup", **owner)
-            ctx, lease = await self._acquire_object_lock(record)
-            result = await self._cleanup_record(record, ctx, lease)
+            result = await self._cleanup_with_contention_retry(record)
             await tracker.complete(task_id, result, **owner)
             return ProcessResult.success(result)
         except (LockAcquisitionError, ResourceBusyError):
@@ -101,9 +99,23 @@ class TTLCleanupService:
                 "TTL cleanup failed; retained for next scan: %s: %s", record.object_uri, exc
             )
             return ProcessResult.failed(str(exc))
-        finally:
-            if lease is not None:
-                await self._service.viking_fs._async_agfs.pathlock_release(lease)
+
+    async def _cleanup_with_contention_retry(self, record: TTLRecord) -> dict[str, Any]:
+        for attempt in range(3):
+            if self._closed or not _cleanup_settings().enabled:
+                return {"deleted": False, "skipped": "paused"}
+            lease = None
+            try:
+                ctx, lease = await self._acquire_object_lock(record)
+                return await self._cleanup_record(record, ctx, lease)
+            except (LockAcquisitionError, ResourceBusyError):
+                if attempt == 2:
+                    raise
+            finally:
+                if lease is not None:
+                    await self._service.viking_fs._async_agfs.pathlock_release(lease)
+            # Never retain a partial attempt's locks while backing off.
+            await asyncio.sleep(random.uniform(0.0, (0.25, 0.75)[attempt]))
 
     async def _acquire_object_lock(self, scheduled: TTLRecord) -> tuple[RequestContext, Any]:
         fs = self._service.viking_fs

@@ -1,5 +1,7 @@
 # Retrieval
 
+TTL filtering can return HTTP 429 (`RESOURCE_EXHAUSTED`, `details.reason: ttl_query_budget_exceeded`) when candidate scanning or excluded-owner limits are reached before a complete result can be established. It does not silently return a truncated page. Narrow the query scope or reduce deep pagination; retrying the same query without changing the expired-data backlog may hit the same limit. See [TTL read budgets](../concepts/17-ttl.md#bounded-reads-and-contention-retries).
+
 OpenViking provides multiple retrieval methods, including simple vector similarity search, keyword search, intelligent retrieval with session context, regex pattern matching, and file pattern matching.
 
 ## find vs search

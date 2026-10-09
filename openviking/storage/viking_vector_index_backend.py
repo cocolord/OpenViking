@@ -46,11 +46,15 @@ from openviking.storage.vectordb_adapters import create_collection_adapter
 from openviking.utils.tags import merge_search_tags, preserve_memory_type_tag
 from openviking.utils.time_decay import parse_duration_ms
 from openviking.utils.time_utils import get_current_timestamp
-from openviking_cli.exceptions import InvalidArgumentError
+from openviking_cli.exceptions import InvalidArgumentError, ResourceExhaustedError
 from openviking_cli.utils import get_logger
 from openviking_cli.utils.config.vectordb_config import DEFAULT_INDEX_NAME, VectorDBBackendConfig
 
 logger = get_logger(__name__)
+
+# Bound total backend work and exclusion-filter growth for one TTL read.
+_TTL_MAX_CANDIDATES = 8192
+_TTL_MAX_EXCLUDED_OWNERS = 1024
 
 _LOCAL_PURE_DENSE_SCORE_SCALES = {
     "cosine": "cosine_affine_0_1",
@@ -1678,6 +1682,25 @@ class VikingVectorIndexBackend:
         fields = list(dict.fromkeys([*output_fields, "uri"])) if output_fields is not None else None
         from openviking.storage.ttl_view import TTLView
 
+        def project(page):
+            if output_fields is None:
+                return page
+            extra = {"uri"} - set(output_fields)
+            return [{k: v for k, v in row.items() if k not in extra} for row in page]
+
+        candidates = 0
+        # Preserve native pagination without missing another worker's first TTL write.
+        # Large native pages also bypass the TTL-only budget when still unmanaged.
+        if (offset > 0 or limit > _TTL_MAX_CANDIDATES) and not (
+            await fs.ttl_registry.account_may_have_records(ctx.account_id)
+        ):
+            records = await read(
+                filter=filter, limit=limit, offset=offset, output_fields=fields, **kwargs
+            )
+            candidates += limit
+            if not await fs.ttl_registry.account_may_have_records(ctx.account_id):
+                return project([{**record, "expires_at": None} for record in records])
+
         ttl_view = TTLView(fs, ctx)
         requested = limit + offset
         fetch_limit = requested
@@ -1685,6 +1708,19 @@ class VikingVectorIndexBackend:
         current_filter = base_filter
         excluded: set[str] = set()
         while True:
+            if (
+                candidates + fetch_limit > _TTL_MAX_CANDIDATES
+                or len(excluded) > _TTL_MAX_EXCLUDED_OWNERS
+            ):
+                raise ResourceExhaustedError(
+                    "TTL query budget exceeded before a complete page could be established",
+                    details={
+                        "reason": "ttl_query_budget_exceeded",
+                        "candidate_budget": _TTL_MAX_CANDIDATES,
+                        "excluded_owner_budget": _TTL_MAX_EXCLUDED_OWNERS,
+                    },
+                )
+            candidates += fetch_limit
             records = await read(
                 filter=current_filter, limit=fetch_limit, offset=0, output_fields=fields, **kwargs
             )
@@ -1704,13 +1740,8 @@ class VikingVectorIndexBackend:
                     record for record, keep in zip(records, visibility, strict=True) if not keep
                 ]
             if len(visible) >= requested or len(records) < requested:
-                page = visible[offset : offset + limit]
-                if output_fields is not None:
-                    # Preserve adapter-added scores/IDs; only remove fields we
-                    # added solely to validate the source.
-                    extra = {"uri"} - set(output_fields)
-                    page = [{k: v for k, v in row.items() if k not in extra} for row in page]
-                return page
+                # Preserve adapter-added scores/IDs and remove only our added URI.
+                return project(visible[offset : offset + limit])
             old_size = len(excluded)
             for record in hidden:
                 if target := ttl_object_for_uri(record["uri"]):

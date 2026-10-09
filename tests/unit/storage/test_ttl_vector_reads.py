@@ -310,7 +310,8 @@ async def test_unmanaged_reads_notice_ttl_enablement_even_with_default_off(
         include_expired=False,
     ) == [{"_score": 2, "expires_at": None}]
     assert s.calls[0]["advance"] == advance
-    assert s.fs._async_agfs.stat_calls == [TTLRegistry.marker_path(s.ctx.account_id)]
+    assert s.fs._async_agfs.stat_calls == [TTLRegistry.marker_path(s.ctx.account_id)] * 2
+    assert (s.calls[0]["limit"], s.calls[0]["offset"]) == (1, 1)
     s.fs._async_agfs.read.assert_not_awaited()
 
     async def enable():
@@ -340,4 +341,69 @@ async def test_count_uses_backend_total_until_physical_cleanup(setup):
     s = setup
     s.single.count = AsyncMock(return_value=2)
     assert await s.backend.count(ctx=s.ctx) == 2
+    s.fs._async_agfs.read.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_native_offset_restarts_when_ttl_is_enabled_during_query(setup):
+    s = setup
+    s.fs.ttl_registry.account_may_have_records = AsyncMock(side_effect=[False, True, True])
+    for i, expiry in ((1, PAST), (2, FUTURE), (3, FUTURE)):
+        uri = f"{ROOT}/2026/09/{i:02}/body.md"
+        s.rows.append({"uri": uri, "_score": i})
+        s.source(uri, expiry)
+    result = await s.backend.query(
+        ctx=s.ctx, limit=1, offset=1, output_fields=["_score"], include_expired=False
+    )
+    assert result == [{"_score": 3, "expires_at": FUTURE}]
+    assert [(call["limit"], call["offset"]) for call in s.calls] == [(1, 1), (2, 0), (2, 0)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("budget", ["candidates", "owners"])
+async def test_ttl_refill_budget_errors_instead_of_returning_partial_results(
+    setup, monkeypatch, budget
+):
+    from openviking.storage import viking_vector_index_backend as module
+    from openviking_cli.exceptions import ResourceExhaustedError
+
+    s = setup
+    monkeypatch.setattr(module, "_TTL_MAX_CANDIDATES", 6 if budget == "candidates" else 100)
+    monkeypatch.setattr(module, "_TTL_MAX_EXCLUDED_OWNERS", 2 if budget == "owners" else 100)
+    for i in range(1, 8):
+        uri = f"{ROOT}/2026/09/{i:02}/body.md"
+        s.rows.append({"uri": uri})
+        s.source(uri, PAST if i < 7 else FUTURE)
+    with pytest.raises(ResourceExhaustedError, match="TTL query budget exceeded"):
+        await s.backend.query(ctx=s.ctx, limit=1, include_expired=False)
+    assert [call["limit"] for call in s.calls] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_ttl_budget_counts_initial_offset_and_speculative_native_page(setup, monkeypatch):
+    from openviking.storage import viking_vector_index_backend as module
+    from openviking_cli.exceptions import ResourceExhaustedError
+
+    s = setup
+    monkeypatch.setattr(module, "_TTL_MAX_CANDIDATES", 2)
+    with pytest.raises(ResourceExhaustedError):
+        await s.backend.query(ctx=s.ctx, limit=1, offset=2, include_expired=False)
+    assert s.calls == []
+    s.fs.ttl_registry.account_may_have_records = AsyncMock(side_effect=[False, True])
+    with pytest.raises(ResourceExhaustedError):
+        await s.backend.query(ctx=s.ctx, limit=1, offset=1, include_expired=False)
+    assert [(call["limit"], call["offset"]) for call in s.calls] == [(1, 1)]
+
+
+@pytest.mark.asyncio
+async def test_native_page_can_exceed_ttl_budget_when_account_stays_unmanaged(setup, monkeypatch):
+    from openviking.storage import viking_vector_index_backend as module
+
+    s = setup
+    monkeypatch.setattr(module, "_TTL_MAX_CANDIDATES", 1)
+    s.fs.ttl_registry.account_may_have_records = AsyncMock(return_value=False)
+    s.rows.extend({"uri": f"{ROOT}/2026/09/01/{i}.md"} for i in range(3))
+    result = await s.backend.query(ctx=s.ctx, limit=2, include_expired=False)
+    assert len(result) == 2
+    assert len(s.calls) == 1
     s.fs._async_agfs.read.assert_not_awaited()

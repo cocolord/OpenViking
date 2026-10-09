@@ -137,3 +137,14 @@ def test_root_policy_overrides_type_then_library_default(root_policy):
     assert config.resolve_uri_policy("viking://user/u2/sessions/s1", "sessions") == TTLPolicy(
         mode="days", ttl_days=7
     )
+
+
+@pytest.mark.parametrize("days", [1, 30, 365000])
+def test_days_boundary_values_remain_days(days):
+    assert TTLPolicy(mode="days", ttl_days=days).model_dump()["ttl_days"] == days
+
+
+@pytest.mark.parametrize("days", [0, 365001])
+def test_days_outside_supported_range_are_rejected(days):
+    with pytest.raises(ValidationError):
+        TTLPolicy(mode="days", ttl_days=days)

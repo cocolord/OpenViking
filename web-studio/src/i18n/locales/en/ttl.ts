@@ -16,6 +16,8 @@ export default {
   invalidRoot:
     'Enter a user events or sessions root URI. Individual sessions, dates and files cannot be configured. Peer events share the Peer events default.',
   policy: 'Library override',
+  invalidDays:
+    'Enter a whole number from 1 to 365000 days. Zero does not disable TTL.',
   modes: {
     server: 'Use server configuration (remove library override)',
     inherit: 'Inherit type / library default',
