@@ -1,4 +1,5 @@
 import vikingbot from './zh-CN/vikingbot'
+import contextGateway from './zh-CN/context-gateway'
 import compile from './zh-CN/compile'
 import memoryPolicy from './zh-CN/user-memory-policy'
 import workspace from './zh-CN/workspace'
@@ -8,6 +9,7 @@ import memoryTemplates from './zh-CN/memory-templates'
 import ttl from './zh-CN/ttl'
 
 const zhCN = {
+  contextGateway,
   compile,
   vikingbot,
   ...workspace,

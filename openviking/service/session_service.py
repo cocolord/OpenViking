@@ -394,6 +394,7 @@ class SessionService:
         ctx: RequestContext,
         keep_recent_count: int = 0,
         *,
+        enable_working_memory: Optional[bool] = None,
         retention_mode: Optional[str] = None,
         keep_recent_turn_count: Optional[int] = None,
         retained_message_token_budget: Optional[int] = None,
@@ -416,6 +417,7 @@ class SessionService:
             session_id,
             ctx,
             keep_recent_count=keep_recent_count,
+            enable_working_memory=enable_working_memory,
             retention_mode=retention_mode,
             keep_recent_turn_count=keep_recent_turn_count,
             retained_message_token_budget=retained_message_token_budget,
@@ -430,6 +432,7 @@ class SessionService:
         ctx: RequestContext,
         keep_recent_count: int = 0,
         *,
+        enable_working_memory: Optional[bool] = None,
         retention_mode: Optional[str] = None,
         keep_recent_turn_count: Optional[int] = None,
         retained_message_token_budget: Optional[int] = None,
@@ -455,6 +458,7 @@ class SessionService:
         session = await self.get(session_id, ctx)
         commit_kwargs: Dict[str, Any] = {"keep_recent_count": keep_recent_count}
         optional_retention = {
+            "enable_working_memory": enable_working_memory,
             "retention_mode": retention_mode,
             "keep_recent_turn_count": keep_recent_turn_count,
             "retained_message_token_budget": retained_message_token_budget,

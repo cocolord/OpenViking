@@ -1,4 +1,4 @@
-# 服务端配置
+# 服务端配置字段
 
 首次配置建议使用 `openviking-server init`，保存后运行 `openviking-server doctor`。
 
@@ -19,6 +19,8 @@ openviking-server --config /path/to/ov.conf
 
 ## 配置结构
 
+下面只展示常用顶层分组，不是可直接运行的完整配置。首次启动可从本页的[最小示例](#最小示例)开始，填写实际模型与凭据；后续示例中的片段应合并到同一个 `ov.conf`。
+
 ```json
 {
   "embedding": {},
@@ -36,7 +38,7 @@ openviking-server --config /path/to/ov.conf
 }
 ```
 
-未配置的可选模块使用默认值。`ov.conf` 及账户配置会忽略未知字段，兼容旧版本遗留配置；已知字段仍校验类型和取值。字段名拼写错误也会被忽略，但服务端会输出 WARNING，逐项列出未被采用的字段。
+未配置的可选模块使用默认值。`ov.conf` 及账户配置会忽略未知字段（`context_gateway` 部分除外），兼容旧版本遗留配置；已知字段仍校验类型和取值。字段名拼写错误也会被忽略，但服务端会输出 WARNING，逐项列出未被采用的字段。
 
 ## 顶层配置
 
@@ -46,7 +48,7 @@ openviking-server --config /path/to/ov.conf
 | `default_user` | string | `"default"` | Service context 使用的默认用户 |
 | `embedding` | object | 内置本地 Dense 模型 | 向量化模型和稀疏/混合检索配置；默认使用 `local` / `bge-small-zh-v1.5-f16` |
 | `vlm` | object | 空配置 | 内容理解、摘要和记忆抽取使用的模型；使用相关能力前需要配置可用模型 |
-| `query_planner` | object / `null` | `null` | 检索意图分析模型；未配置时回退到 `vlm` |
+| `query_planner` | object / `null` | `null` | 检索意图分析和召回改写使用的模型。未配置或为空时回退到 `vlm`；`auto` 模式的召回改写要求配置集群级 `query_planner`，或账户级 `query_planner` / `vlm` 覆盖项 |
 | `rerank` | object | disabled | 检索结果重排模型 |
 | `retrieval` | object | 见下表 | 检索排序和意图分析策略 |
 | `grep` | object | 内置默认值 | 文本搜索引擎配置 |
@@ -65,6 +67,7 @@ openviking-server --config /path/to/ov.conf
 | `log` | object | 控制台日志 | 日志级别、格式和文件输出 |
 | `telemetry` | object | disabled | OpenTelemetry trace 上报 |
 | `oauth` | object | disabled | MCP OAuth 2.1 配置 |
+| `context_gateway` | object | disabled | 上下文网关配置，网关为使用 API Key 的模型客户端补充 OpenViking 记忆。这一部分的未知字段会直接报错，见[配置参考](../guides/22-context-gateway-operations.md#配置参考) |
 | `prompts` | object | 内置模板 | 自定义 Prompt 模板目录 |
 | `ingest` | object | 内置默认值 | 会话日志导入配置 |
 | `output_language_override` | string | `""` | 强制摘要和记忆输出语言；空值表示自动识别 |
@@ -146,13 +149,14 @@ API 型 `embedding`、`vlm`、`query_planner` 和 `rerank` 配置会复用部分
 |---|---|---|---|
 | `provider` | `vikingdb`、`cohere`、`openai`、`litellm`、`jev` / `null` | `null` | Rerank 服务类型；省略时根据凭证字段推断 |
 | `model` | string / `null` | `null` | OpenAI 兼容、LiteLLM 或 Jev Rerank 模型 |
+| `mode` | `noul`、`choice` 或 `null` | `noul` | Jev Rerank 模式；`null` 同样使用 `noul` |
 | `threshold` | number | `0.1` | 判定结果相关的最低分数 |
 | `max_input_tokens` | integer；`0` 或 `>= 128` | `0` | 每个 query-document pair 的最大估算 token；`0` 表示不截断 |
 | `log_payloads` | boolean | `false` | 记录完整 rerank 请求和响应；日志可能包含 query 和文档内容 |
 
 Rerank 没有单独的 `enabled` 字段；配置了对应 provider 所需的凭证后才会启用。
 
-`jev` 通过现有 `api_base` 和 `model` 字段同时支持 TypeSafe 直连（`https://api.typesafe.ai`，模型 `jev-latest`）和 Vercel AI Gateway 的 TypeSafe 兼容端点（`https://ai-gateway.vercel.sh/typesafe`，模型 `typesafe-ai/jev`），两者协议相同。它将 query 和候选文档作为结构化 `state`，为每个候选提出一个独立的相关性问题，并将各自的 yes 概率作为 rerank 分数。显式指定 `provider` 时必须提供该 provider 所需的凭证：`vikingdb` 需要 `ak` 和 `sk`，`cohere` 和 `jev` 需要 `api_key`，`openai` 需要 `api_key` 和 `api_base`，`litellm` 需要 `model`。凭证不全的配置在加载时即被拒绝。
+`jev` 通过现有 `api_base` 和 `model` 字段同时支持 TypeSafe 直连（`https://api.typesafe.ai`，模型 `jev-latest`）和 Vercel AI Gateway 的 TypeSafe 兼容端点（`https://ai-gateway.vercel.sh/typesafe`，模型 `typesafe-ai/jev`），两者协议相同。默认 `noul` 模式独立评估每个候选；可选的 `choice` 模式横向比较所有候选并返回相对概率，使用时应将 `threshold` 设为 `0`。显式指定 `provider` 时必须提供该 provider 所需的凭证：`vikingdb` 需要 `ak` 和 `sk`，`cohere` 和 `jev` 需要 `api_key`，`openai` 需要 `api_key` 和 `api_base`，`litellm` 需要 `model`。凭证不全的配置在加载时即被拒绝。
 
 ## 检索配置
 
@@ -357,13 +361,15 @@ Provider 和密钥管理配置见[加密指南](../guides/08-encryption.md)。
 
 | 字段 | 类型 / 可选值 | 默认值 | 作用 |
 |---|---|---|---|
-| `custom_templates_dir` | path | `""` | 附加的自定义记忆模板目录 |
+| `custom_templates_dir` | path | `""` | 自定义记忆模板目录；同名 `memory_type` 覆盖已加载模板 |
 | `experimental_memory_switch` | boolean | `false` | 是否启用实验性记忆模板 |
 | `eager_prefetch` | boolean | `true` | 是否在抽取前预取并读取记忆内容 |
 | `prefetch_search_topn` | integer，`>= 1` | `5` | 预取时读取的检索结果数量 |
 | `extraction_enabled` | boolean | `true` | session commit 时是否抽取长期记忆 |
 | `session_skill_extraction_enabled` | boolean | `false` | 是否同时抽取可复用 Skill |
 | `link_enabled` | boolean | `false` | 是否生成和解析记忆链接 |
+
+自动提交还需要单独设置策略：记忆抽取开关不会让会话自动提交。详见[配置指南](../guides/01-configuration.md)的 `memory.session_auto_commit` 和[会话 API](../api/05-sessions.md)。模板目录的加载顺序和生效方式见 [Prompt 指南](../guides/10-prompt-guide.md)。
 
 ## 解析器配置
 

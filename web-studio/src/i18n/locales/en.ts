@@ -6,8 +6,10 @@ import resources from './en/resources'
 import activity from './en/activity'
 import memoryTemplates from './en/memory-templates'
 import ttl from './en/ttl'
+import contextGateway from './en/context-gateway'
 
 const en = {
+  contextGateway,
   compile,
   vikingbot,
   ...workspace,

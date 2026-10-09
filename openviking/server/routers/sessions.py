@@ -5,7 +5,7 @@
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, StrictBool, field_validator, model_validator
 
 from openviking.core.path_variables import resolve_path_variables
 from openviking.core.peer_id import normalize_peer_id
@@ -615,6 +615,10 @@ class CommitRequest(BaseModel):
     behavior.
     """
 
+    enable_working_memory: Optional[StrictBool] = Field(
+        default=None,
+        description="Override only Working Memory generation for this commit; null inherits policy.",
+    )
     reset_context: bool = Field(
         default=False,
         strict=True,
@@ -696,6 +700,7 @@ async def commit_session(
     service = get_service()
     commit_kwargs: Dict[str, Any] = {"keep_recent_count": body.keep_recent_count}
     optional_retention = {
+        "enable_working_memory": body.enable_working_memory,
         "retention_mode": body.retention_mode,
         "keep_recent_turn_count": body.keep_recent_turn_count,
         "retained_message_token_budget": body.retained_message_token_budget,
