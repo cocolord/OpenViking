@@ -94,6 +94,49 @@ async def test_failed_first_write_does_not_start_lifetime(binding_fs, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_failed_first_write_cannot_clear_successful_sibling_lifetime(binding_fs, monkeypatch):
+    """Two commits target one date; the first storage write fails mid-flight."""
+    fs, ctx = binding_fs, root_ctx()
+    root = "viking://user/default/memories/events/2026/09/28"
+    entered, sibling_ready, fail_first = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original_write = fs._async_agfs.write
+    original_lock = fs._async_agfs.pathlock_acquire_exact
+
+    async def write(path, data, **kwargs):
+        if path.endswith("/first.md"):
+            entered.set()
+            await fail_first.wait()
+            raise OSError("first body failed")
+        if path.endswith("/second.md"):
+            sibling_ready.set()
+        return await original_write(path, data, **kwargs)
+
+    async def acquire(path, **kwargs):
+        if asyncio.current_task().get_name() == "sibling" and path.endswith("/.meta.json"):
+            sibling_ready.set()
+        return await original_lock(path, **kwargs)
+
+    monkeypatch.setattr(fs._async_agfs, "write", write)
+    monkeypatch.setattr(fs._async_agfs, "pathlock_acquire_exact", acquire)
+    first = asyncio.create_task(fs.write_file(root + "/first.md", "first", ctx=ctx))
+    second = None
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        second = asyncio.create_task(
+            fs.write_file(root + "/second.md", "second", ctx=ctx), name="sibling"
+        )
+        await asyncio.wait_for(sibling_ready.wait(), 5)
+    finally:
+        fail_first.set()
+        results = await asyncio.gather(first, *([second] if second else []), return_exceptions=True)
+    assert isinstance(results[0], OSError)
+    assert len(results) == 2 and not isinstance(results[1], BaseException)
+    assert await fs.read_file(root + "/second.md", ctx=ctx) == "second"
+    fields = await read_directory_fields(fs, root, ctx=ctx)
+    assert fields.get("received_at") and fields.get("expires_at")
+
+
+@pytest.mark.asyncio
 async def test_legacy_event_metadata_preserves_existing_deadline(binding_fs):
     fs, ctx = binding_fs, root_ctx()
     root = "viking://user/default/memories/events/2026/09/28"

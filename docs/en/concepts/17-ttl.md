@@ -54,7 +54,7 @@ Scanning costs O(owner directories in accounts that have used TTL) per pass. Eac
 
 System strict cleanup deletes vectors directly by directory URI scope, avoiding a separate file-tree traversal to collect vector URIs. File deletion still takes individual locks and confirms the result.
 
-Result batches share owner metadata reads. Directory `count` uses the backend total and converges after physical cleanup, avoiding a full vector scan for real-time expiry counts. Returned content still enforces expiry immediately. Billing may lag physical deletion. OV cleanup alone does not verify cloud billing, gateway forwarding or backup erasure.
+Vector queries share owner metadata reads across candidate refill rounds and check directory expiry without checking each body or summary file. Legacy objects without metadata require an existing owner directory. Refill excludes the entire expired or deleted owner subtree while retaining live candidates from other directories. Individual file deletion relies on the existing vector deletion path. Directory `count` uses the backend total and converges after physical cleanup, avoiding a full vector scan for real-time expiry counts. Returned content still enforces expiry immediately. Billing may lag physical deletion. OV cleanup alone does not verify cloud billing, gateway forwarding or backup erasure.
 
 ## Interfaces
 

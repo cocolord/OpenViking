@@ -18,7 +18,7 @@ from openviking.core.namespace import (
     uri_parts,
     visible_roots,
 )
-from openviking.core.ttl import TTL_FIELD_NAMES, ttl_enabled
+from openviking.core.ttl import TTL_FIELD_NAMES, ttl_enabled, ttl_object_for_uri
 from openviking.server.identity import RequestContext, Role
 from openviking.service.task_tracker_concurrency import KeyedAsyncLockPool, run_to_completion
 from openviking.storage.acl import (
@@ -1645,14 +1645,7 @@ class VikingVectorIndexBackend:
             if not uri:
                 raise ValueError("Vector candidate has no URI for TTL validation")
             record["expires_at"] = (await ttl_view.fields(uri))["expires_at"]
-            source_uri = uri
-            if record.get("level") in (0, 1) and not uri.endswith(
-                ("/.abstract.md", "/.overview.md")
-            ):
-                source_uri += "/.abstract.md" if record["level"] == 0 else "/.overview.md"
-            return await fs._ttl_uri_visible(
-                source_uri, ctx, require_source=True, ttl_view=ttl_view
-            )
+            return await ttl_view.visible(uri, require_owner=True)
 
         result = []
         for start in range(0, len(records), 16):
@@ -1672,7 +1665,7 @@ class VikingVectorIndexBackend:
     ) -> List[Dict[str, Any]]:
         """Fill a visible candidate page using only existing vector fields.
 
-        Source metadata is authoritative. Exclude rejected (URI, level) pairs
+        Directory metadata is authoritative. Exclude expired owner subtrees
         and query again *before* the retrieval layer spends its candidate
         budget. A one-shot post-filter would let expired rows crowd out live
         ones. Raw maintenance queries deliberately bypass this read barrier.
@@ -1682,18 +1675,14 @@ class VikingVectorIndexBackend:
             return await read(
                 filter=filter, limit=limit, offset=offset, output_fields=output_fields, **kwargs
             )
-        fields = (
-            list(dict.fromkeys([*output_fields, "uri", "level", "abstract"]))
-            if output_fields is not None
-            else None
-        )
+        fields = list(dict.fromkeys([*output_fields, "uri"])) if output_fields is not None else None
         from openviking.storage.ttl_view import TTLView
 
         ttl_view = TTLView(fs, ctx)
         requested = limit + offset
         base_filter = RawDSL(filter) if isinstance(filter, dict) else filter
         current_filter = base_filter
-        excluded: dict[int, set[str]] = {}
+        excluded: set[str] = set()
         while True:
             records = await read(
                 filter=current_filter, limit=requested, offset=0, output_fields=fields, **kwargs
@@ -1706,32 +1695,20 @@ class VikingVectorIndexBackend:
                 if output_fields is not None:
                     # Preserve adapter-added scores/IDs; only remove fields we
                     # added solely to validate the source.
-                    extra = {"uri", "level", "abstract"} - set(output_fields)
+                    extra = {"uri"} - set(output_fields)
                     page = [{k: v for k, v in row.items() if k not in extra} for row in page]
                 return page
-            old_size = sum(map(len, excluded.values()))
+            old_size = len(excluded)
             for record in hidden:
-                excluded.setdefault(int(record.get("level", 2)), set()).add(record["uri"])
-            if sum(map(len, excluded.values())) == old_size:
+                if target := ttl_object_for_uri(record["uri"]):
+                    excluded.add(target[1])
+            if len(excluded) == old_size:
                 raise RuntimeError("Vector backend did not exclude rejected TTL candidates")
             current_filter = self._merge_filters(
                 base_filter,
-                *[
-                    Or(
-                        [
-                            RawDSL({"op": "must_not", "field": "level", "conds": [level]}),
-                            RawDSL(
-                                {
-                                    "op": "must_not",
-                                    "field": "uri",
-                                    "conds": sorted(uris),
-                                    "para": "-d=0",
-                                }
-                            ),
-                        ]
-                    )
-                    for level, uris in sorted(excluded.items())
-                ],
+                RawDSL(
+                    {"op": "must_not", "field": "uri", "conds": sorted(excluded), "para": "-d=-1"}
+                ),
             )
 
     async def query(

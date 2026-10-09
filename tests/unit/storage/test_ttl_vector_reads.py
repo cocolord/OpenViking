@@ -231,6 +231,52 @@ async def test_orphan_vectors_hidden_but_raw_cleanup_query_can_find_them(setup):
 
 
 @pytest.mark.asyncio
+async def test_live_owner_does_not_stat_each_vector_source(setup):
+    s = setup
+    owner = ROOT + "/2026/09/01"
+    s.source(owner + "/body.md", FUTURE)
+    # Leaf/summary existence is not part of directory TTL visibility.
+    s.rows.extend(
+        [{"uri": owner, "level": 0}, {"uri": owner, "level": 1}]
+        + [{"uri": owner + f"/{i}.md", "level": 2} for i in range(20)]
+    )
+    result = await s.backend.query(ctx=s.ctx, limit=22, include_expired=False)
+    assert len(result) == 22
+    assert s.fs._async_agfs.stat_calls == [s.fs._uri_to_path(owner + "/.meta.json", ctx=s.ctx)]
+    assert s.fs._async_agfs.read.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_legacy_owner_is_checked_once_and_deleted_owner_is_hidden(setup):
+    s = setup
+    owner = ROOT + "/2026/09/01"
+    body = owner + "/body.md"
+    s.files[s.fs._uri_to_path(body, ctx=s.ctx)] = b"legacy"
+    s.rows.extend([{"uri": owner + f"/{i}.md", "level": 2} for i in range(20)])
+    assert len(await s.backend.query(ctx=s.ctx, limit=20, include_expired=False)) == 20
+    assert s.fs._async_agfs.stat_calls.count(s.fs._uri_to_path(owner, ctx=s.ctx)) == 1
+    del s.files[s.fs._uri_to_path(body, ctx=s.ctx)]
+    assert await s.backend.query(ctx=s.ctx, limit=20, include_expired=False) == []
+
+
+@pytest.mark.asyncio
+async def test_refill_excludes_whole_expired_owner_across_levels_and_nested_files(setup):
+    s = setup
+    expired = ROOT + "/2026/09/01"
+    live = ROOT + "/2026/09/10"  # A textual prefix must not exclude this sibling.
+    s.source(expired + "/body.md", PAST)
+    s.source(live + "/body.md", FUTURE)
+    s.rows.extend(
+        [{"uri": expired, "level": level} for level in (0, 1)]
+        + [{"uri": expired + f"/nested/{i}.md", "level": 2} for i in range(20)]
+        + [{"uri": live + f"/{i}.md", "level": 2} for i in range(2)]
+    )
+    result = await s.backend.query(ctx=s.ctx, limit=2, include_expired=False)
+    assert [row["uri"] for row in result] == [live + "/0.md", live + "/1.md"]
+    assert len(s.calls) == 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "error", [OSError("storage unavailable"), AGFSNetworkError("endpoint not found")]
 )

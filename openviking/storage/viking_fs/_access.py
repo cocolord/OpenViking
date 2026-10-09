@@ -18,7 +18,7 @@ from openviking.core.namespace import (
 )
 from openviking.core.ttl import ttl_object_for_uri
 from openviking.resource.watch_storage import is_watch_task_control_uri
-from openviking.server.error_mapping import is_not_found_error, is_storage_not_found
+from openviking.server.error_mapping import is_not_found_error
 from openviking.server.identity import RequestContext, Role
 from openviking.storage.acl import (
     AclAction,
@@ -797,29 +797,18 @@ class _AccessMixin:
         uri: str,
         ctx: RequestContext,
         *,
-        require_source: bool = False,
         ttl_view=None,
     ) -> bool:
         """Check the owner deadline for every level, including directories.
 
         Source metadata remains authoritative when new TTL policies are off.
-        Vector hits additionally require a live source after physical cleanup.
         """
         target = ttl_object_for_uri(uri)
         if target is None:
             return True
         from openviking.storage.ttl_view import TTLView
 
-        if not await (ttl_view or TTLView(self, ctx)).visible(uri):
-            return False
-        if require_source:
-            try:
-                await self._async_agfs.stat(self._uri_to_path(uri, ctx=ctx), bypass_cache=True)
-            except Exception as exc:
-                if is_storage_not_found(exc):
-                    return False
-                raise
-        return True
+        return await (ttl_view or TTLView(self, ctx)).visible(uri)
 
     def _alias_uri_for_path(
         self,
