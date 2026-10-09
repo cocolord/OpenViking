@@ -363,11 +363,6 @@ enum AclCommands {
 #[derive(Subcommand)]
 enum Commands {
     // --- Data Operations ---
-    /// [Data] Inspect directory expiry and inherited TTL policy
-    Ttl {
-        #[command(subcommand)]
-        action: TtlCommands,
-    },
     /// [Data] Add resources into OpenViking
     AddResource {
         /// Local path or URL to import
@@ -2072,12 +2067,6 @@ enum PrivacyCommands {
 }
 
 #[derive(Subcommand)]
-enum TtlCommands {
-    /// Read a directory lifetime or inherited policy
-    Get { uri: String },
-}
-
-#[derive(Subcommand)]
 enum AdminCommands {
     /// Read runtime configuration overrides (omit --account-id for cluster settings)
     GetConfiguration {
@@ -3464,17 +3453,6 @@ async fn main() {
                 ))
             }
         }
-        Commands::Ttl { action } => {
-            let client = ctx.get_client();
-            let result: Result<serde_json::Value> = match action {
-                TtlCommands::Get { uri } => {
-                    client
-                        .get("/api/v1/content/ttl", &[("uri".into(), uri)])
-                        .await
-                }
-            };
-            result.map(|value| output::output_success(&value, ctx.output_format, ctx.compact))
-        }
         Commands::AddSkill(args) => {
             handlers::handle_add_skill(args, legacy_upload_options, ctx).await
         }
@@ -4092,7 +4070,7 @@ mod tests {
             assert!(Cli::try_parse_from(args).is_err());
         }
         assert!(
-            Cli::try_parse_from(["ov", "ttl", "get", "viking://user/alice/sessions/s1"]).is_ok()
+            Cli::try_parse_from(["ov", "ttl", "get", "viking://user/alice/sessions/s1"]).is_err()
         );
     }
 

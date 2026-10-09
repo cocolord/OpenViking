@@ -103,13 +103,6 @@ class ReindexRequest(BaseModel):
 router = APIRouter(prefix="/api/v1/content", tags=["content"])
 
 
-@router.get("/ttl")
-async def get_ttl(uri: str = Query(...), _ctx: RequestContext = Depends(get_request_context)):
-    """Read an event or session path's effective directory expiry."""
-    uri = validate_request_viking_uri(resolve_path_variables(uri), _ctx)
-    return Response(status="ok", result=await get_service().fs.get_ttl(uri, _ctx))
-
-
 def _authorize_reindex_uri(uri: str, ctx: RequestContext) -> str:
     """Allow users to reindex only their own private namespace."""
     if ctx.role != Role.USER:

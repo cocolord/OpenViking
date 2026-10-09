@@ -59,7 +59,7 @@ Vector queries share owner metadata reads across candidate refill rounds and che
 ## Interfaces
 
 - [TTL configuration](../configuration/01-server.md#ttl): library/type/root policies.
-- [Expiry query](../api/12-content.md#document-expiry): `GET /api/v1/content/ttl`, SDK/MCP `get_ttl`, CLI `ov ttl get`.
+- [Expiry query](../api/12-content.md#document-expiry): `GET /api/v1/fs/stat`, SDK `stat`, CLI `ov stat`.
 - [Sessions](../api/05-sessions.md#session-ttl): create/config APIs inherit the root policy and accept no TTL input.
 
 Asynchronous Session commit writes validate the original Phase 1 `task_id` under a short Session lock. Old work cannot modify a replacement Session with the same ID or recreate events from a deleted source. A fresh Session may still import an older calendar date. Ordinary body I/O releases the common metadata lock; cleanup blocks new admissions and checks existing file leases, including writes whose file does not yet exist.

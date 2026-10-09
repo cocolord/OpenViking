@@ -59,7 +59,7 @@ UTC 时间达到 `expires_at` 后，目录及全部后代不可见。直接访�
 ## 接口
 
 - [TTL 配置](../configuration/01-server.md#ttl)：库、类型及根目录策略。
-- [期限查询](../api/12-content.md#文档到期时间)：`GET /api/v1/content/ttl`，SDK/MCP `get_ttl`，CLI `ov ttl get`。
+- [期限查询](../api/12-content.md#文档到期时间)：`GET /api/v1/fs/stat`，SDK `stat`，CLI `ov stat`。
 - [Session](../api/05-sessions.md#session-ttl)：统一继承根目录策略，创建/配置接口不接收 TTL 参数。
 
 异步 Session commit 写回会在短暂的 Session 锁内核对原 Phase 1 的 `task_id`。旧任务不能把已删除 Session 的结果写入复用同 ID 的新 Session，也不能从已删除来源重建 event。新的 Session 仍可导入历史日期的事件。普通正文 I/O 不持有公共元数据锁；清理在阻止新写入后检查已有文件锁，包括正文尚未落盘的写入。

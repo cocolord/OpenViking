@@ -51,6 +51,13 @@ async def request(client, method, path, **kwargs):
 
 
 @pytest.mark.asyncio
+async def test_standalone_ttl_endpoint_is_removed(client):
+    for method in ("get", "patch"):
+        response = await getattr(client, method)("/api/v1/content/ttl")
+        assert response.status_code == 404, response.text
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "node",
     [
@@ -174,10 +181,6 @@ async def test_object_ttl_inputs_are_rejected_including_null(client, field, valu
     assert response.status_code == 400, response.text
     response = await client.patch("/api/v1/sessions/s1/config", json={field: value})
     assert response.status_code == 400, response.text
-    response = await client.patch(
-        "/api/v1/content/ttl", json={"uri": ROOT + "/sessions/s1", field: value}
-    )
-    assert response.status_code == 405
 
 
 @pytest.mark.asyncio
@@ -214,9 +217,7 @@ async def test_event_visibility_projection_and_all_public_filters(client, servic
     await fs.write_file(owner + "/a.txt", "find TTL test", ctx=ctx)
     await fs.write_file(owner + "/nested/b.txt", "find TTL test nested", ctx=ctx)
     await fs.write_file(sibling + "/live.txt", "find TTL test live", ctx=ctx)
-    expiry = (await request(client, "get", "/api/v1/content/ttl", params={"uri": owner}))[
-        "expires_at"
-    ]
+    expiry = (await request(client, "get", "/api/v1/fs/stat", params={"uri": owner}))["expires_at"]
     for endpoint in ["stat", "attrs"]:
         result = await request(
             client, "get", "/api/v1/fs/" + endpoint, params={"uri": owner + "/a.txt"}
@@ -343,7 +344,7 @@ async def test_root_patch_updates_existing_event_and_session_before_return(clien
         CONFIG,
         json={"settings": {"ttl": {"global": {"mode": "days", "ttl_days": 7}}}},
     )
-    event_fields = await request(client, "get", "/api/v1/content/ttl", params={"uri": event})
+    event_fields = await request(client, "get", "/api/v1/fs/stat", params={"uri": event})
     session_fields = await request(client, "get", "/api/v1/sessions/existing")
     assert event_fields["expires_at"] and session_fields["expires_at"]
     await request(
@@ -352,7 +353,7 @@ async def test_root_patch_updates_existing_event_and_session_before_return(clien
         CONFIG,
         json={"settings": {"ttl": {"global": {"mode": "days", "ttl_days": 30}}}},
     )
-    extended = await request(client, "get", "/api/v1/content/ttl", params={"uri": event})
+    extended = await request(client, "get", "/api/v1/fs/stat", params={"uri": event})
     from datetime import timedelta
 
     from openviking.utils.time_utils import parse_iso_datetime

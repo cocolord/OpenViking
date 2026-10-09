@@ -83,7 +83,7 @@ export function createTtlApi(
     },
     get: (uri: string) =>
       getOvResult<TtlReport>(
-        client.get({ url: '/api/v1/content/ttl', query: { uri } }),
+        client.get({ url: '/api/v1/fs/stat', query: { uri } }),
       ),
   }
 }

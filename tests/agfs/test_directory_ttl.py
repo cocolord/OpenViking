@@ -198,7 +198,7 @@ async def test_first_content_in_empty_nested_directory_gets_ttl(binding_fs):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["ls", "tree", "stat", "get_ttl"])
+@pytest.mark.parametrize("operation", ["ls", "tree", "stat"])
 async def test_public_read_shares_owner_deadline_without_caching_next_request(
     binding_fs, monkeypatch, operation
 ):

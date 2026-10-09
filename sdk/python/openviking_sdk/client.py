@@ -770,13 +770,6 @@ class AsyncHTTPClient:
         response = await self._request("POST", "/api/v1/resources", json=request_data)
         return self._handle_response_data(response).get("result", {})
 
-    async def get_ttl(self, uri: str) -> Dict[str, Any]:
-        """Read an event or session path's effective directory expiry."""
-        response = await self._request(
-            "GET", "/api/v1/content/ttl", params={"uri": VikingURI.normalize(uri)}
-        )
-        return self._handle_response_data(response).get("result", {})
-
     async def admin_get_configuration(self, account_id: Optional[str] = None) -> Dict[str, Any]:
         """Read explicit runtime settings; omit account_id for the cluster layer."""
         prefix = f"accounts/{self._path_segment(account_id)}/" if account_id else ""
@@ -2401,9 +2394,6 @@ class SyncHTTPClient:
                 options=options,
             )
         )
-
-    def get_ttl(self, uri: str) -> Dict[str, Any]:
-        return run_async(self._async_client.get_ttl(uri))
 
     def admin_get_configuration(self, account_id: Optional[str] = None) -> Dict[str, Any]:
         return run_async(self._async_client.admin_get_configuration(account_id))

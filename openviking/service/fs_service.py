@@ -390,18 +390,6 @@ class FSService:
 
         return await TTLView(self._ensure_initialized(), ctx).fields(uri)
 
-    async def get_ttl(self, uri: str, ctx: RequestContext) -> dict:
-        from openviking.core.ttl import ttl_scope_for_uri
-        from openviking.storage.ttl_view import TTLView
-
-        self._reject_storage_internal_target(uri)
-        fs = self._ensure_initialized()
-        ttl_view = TTLView(fs, ctx)
-        stat = await fs.stat(uri, ctx=ctx, ttl_view=ttl_view)
-        if ttl_scope_for_uri(uri) is None:
-            raise InvalidArgumentError("TTL only supports events and sessions")
-        return {"uri": uri, **await ttl_view.fields(uri, is_dir=stat.get("isDir", False))}
-
     async def mkdir(
         self,
         uri: str,

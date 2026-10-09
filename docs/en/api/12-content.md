@@ -857,8 +857,8 @@ Task records are persisted under `/local/{account_id}/_system/tasks/{user_id}/{t
 
 ## Document expiry
 
-`GET /api/v1/content/ttl?uri=...` returns the owning date directory or Session deadline. `ttl_days` is exposed only within policy configuration, not repeated in object lifetime fields. `expires_at` is explicitly null without TTL. Descendants and L0/L1/L2 inherit the owner deadline; policy roots also return `policy` and `effective_policy`.
+`GET /api/v1/fs/stat?uri=...` returns the owning date directory or Session deadline. `ttl_days` is exposed only within policy configuration, not repeated in object lifetime fields. `expires_at` is explicitly null without TTL. Descendants and L0/L1/L2 inherit the owner deadline; policy roots also return `policy` and `effective_policy`.
 
-Use SDK/MCP `get_ttl` or CLI `ov ttl get <uri>`. Deadlines are read-only; configure [library and root policies](../configuration/01-server.md#ttl) for new and existing live lifecycle directories. The former per-object TTL update endpoint, `update_ttl`, and `ov ttl set` have been removed.
+Use the existing SDK `stat` or CLI `ov stat <uri>`. Deadlines are read-only; configure [library and root policies](../configuration/01-server.md#ttl) for new and existing live lifecycle directories.
 
 See [Directory TTL](../concepts/17-ttl.md).

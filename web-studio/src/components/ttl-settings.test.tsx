@@ -88,7 +88,7 @@ beforeEach(async () => {
                 }
               : {
                   status: 'ok',
-                  result: config.url?.includes('/content/ttl')
+                  result: config.url?.includes('/fs/stat')
                     ? {
                         uri: root,
                         expires_at: null,
