@@ -555,9 +555,13 @@ class _AccessMixin:
         directories_only: bool = False,
         *,
         include_expired: bool = False,
+        ttl_view=None,
     ):
         """Yield one visible tree page after namespace and ACL filtering."""
+        from openviking.storage.ttl_view import TTLView
+
         real_ctx = self._ctx_or_default(ctx)
+        ttl_view = ttl_view or TTLView(self, real_ctx)
         primary_path = self._uri_to_path(uri, ctx=ctx)
         path: Optional[str] = None
         for candidate_path in self._read_paths(uri, ctx=ctx):
@@ -567,6 +571,7 @@ class _AccessMixin:
                 primary_path,
                 real_ctx,
                 include_expired=include_expired,
+                ttl_view=ttl_view,
             ):
                 continue
             if await self._agfs_path_exists(candidate_path):
@@ -616,6 +621,7 @@ class _AccessMixin:
                     primary_path,
                     real_ctx,
                     include_expired=include_expired,
+                    ttl_view=ttl_view,
                 ):
                     continue
                 entry_uri = self._alias_uri_for_path(
@@ -766,6 +772,7 @@ class _AccessMixin:
         ctx: RequestContext,
         *,
         include_expired: bool = False,
+        ttl_view=None,
     ) -> bool:
         if path != primary_path and self._legacy_session_alias(request_uri):
             owner_user_id = self._safe_uri_parts(request_uri)[1]
@@ -783,7 +790,7 @@ class _AccessMixin:
             visible_uri = (
                 request_root if not relative_path else f"{request_root}{separator}{relative_path}"
             )
-        return await self._ttl_uri_visible(visible_uri, ctx)
+        return await self._ttl_uri_visible(visible_uri, ctx, ttl_view=ttl_view)
 
     async def _ttl_uri_visible(
         self,
@@ -1003,12 +1010,13 @@ class _AccessMixin:
         sort_by: Optional[str] = None,
         sort_order: str = "asc",
         ctx: Optional[RequestContext] = None,
+        ttl_view=None,
     ) -> tuple[List[tuple[Dict[str, Any], str]], int, bool]:
         """Return one mapped RagFS page, consumed count, and exhaustion state."""
         from openviking.storage.ttl_view import TTLView
 
         real_ctx = self._ctx_or_default(ctx)
-        ttl_view = TTLView(self, real_ctx)
+        ttl_view = ttl_view or TTLView(self, real_ctx)
         if self._is_session_root_uri(uri):
             items = await self._session_root_items(uri, real_ctx)
             visible_items = []
@@ -1043,7 +1051,9 @@ class _AccessMixin:
 
             # Missing legacy directories need no owner probes. Check visibility
             # before merging entries from a directory that actually exists.
-            if not await self._read_path_visible(uri, path, primary_path, real_ctx):
+            if not await self._read_path_visible(
+                uri, path, primary_path, real_ctx, ttl_view=ttl_view
+            ):
                 continue
 
             found_path = True

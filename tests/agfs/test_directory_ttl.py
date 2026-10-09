@@ -43,11 +43,8 @@ async def test_event_deadline_is_frozen_on_first_content_write(binding_fs, prefi
     for name in ["a.md", "b.txt", ".abstract.md", ".overview.md", "nested/c.json"]:
         await fs.write_file(root + "/" + name, "updated", ctx=ctx)
         assert await read_directory_fields(fs, root + "/" + name, ctx=ctx) == initial
-    assert (await read_record(fs, ctx.account_id, root)).expires_at == initial["expires_at"]
     assert await read_record(fs, ctx.account_id, root + "/a.md") is None
-    assert (await fs._async_agfs.stat(fs._uri_to_path(root, ctx=ctx)))["expires_at"] == initial[
-        "expires_at"
-    ]
+    assert (await TTLView(fs, ctx).fields(root))["expires_at"] == initial["expires_at"]
 
 
 @pytest.mark.asyncio
@@ -126,7 +123,6 @@ async def test_transfer_bucket_preserves_deadline(binding_fs, operation, metadat
         root, dest, ctx=ctx, **({"recursive": True} if operation == "cp" else {})
     )
     assert await read_directory_fields(fs, dest, ctx=ctx) == initial
-    assert (await read_record(fs, ctx.account_id, dest)).expires_at == initial["expires_at"]
 
 
 @pytest.mark.asyncio
@@ -147,28 +143,6 @@ async def test_concurrent_sibling_writes_share_one_lifetime(binding_fs):
 
 
 @pytest.mark.asyncio
-async def test_native_directory_metadata_patch_preserves_business_fields(binding_fs):
-    fs, ctx = binding_fs, root_ctx()
-    root = "viking://user/default/sessions/metadata"
-    await fs.write_file(
-        root + "/.meta.json",
-        json.dumps({"session_id": "metadata", "config": {"keep": True}}),
-        ctx=ctx,
-    )
-    path = fs._uri_to_path(root, ctx=ctx)
-    await asyncio.gather(
-        *[fs._async_agfs.update_directory_metadata(path, {f"field_{i}": i}) for i in range(5)]
-    )
-    await fs._async_agfs.update_directory_metadata(path, {"expires_at": "2999-01-01T00:00:00Z"})
-    result = await read_directory_fields(fs, root, ctx=ctx)
-    assert result["session_id"] == "metadata" and result["config"] == {"keep": True}
-    assert all(result[f"field_{i}"] == i for i in range(5))
-    assert (await fs._async_agfs.stat(path))["expires_at"] == result["expires_at"]
-    await fs._async_agfs.update_directory_metadata(path, {"expires_at": None})
-    assert (await fs._async_agfs.stat(path))["expires_at"] is None
-
-
-@pytest.mark.asyncio
 async def test_first_content_in_empty_nested_directory_gets_ttl(binding_fs):
     fs, ctx = binding_fs, root_ctx()
     root = "viking://user/default/memories/events/2026/09/30"
@@ -181,19 +155,31 @@ async def test_first_content_in_empty_nested_directory_gets_ttl(binding_fs):
 
 
 @pytest.mark.asyncio
-async def test_batch_projection_reads_one_owner_once(binding_fs, monkeypatch):
+@pytest.mark.parametrize("operation", ["ls", "tree", "stat", "get_ttl"])
+async def test_public_read_shares_owner_deadline_without_caching_next_request(
+    binding_fs, monkeypatch, operation
+):
     from unittest.mock import AsyncMock
 
     import openviking.storage.ttl_view as module
+    from openviking.service.fs_service import FSService
 
     fs, ctx = binding_fs, root_ctx()
     root = "viking://user/default/memories/events/2026/09/30"
-    await fs.write_file(root + "/a.md", "content", ctx=ctx)
+    for name in ("a.md", "b.md", "c.md"):
+        await fs.write_file(root + "/" + name, "content", ctx=ctx)
+    service = FSService(viking_fs=fs)
     reader = AsyncMock(wraps=module.read_directory_fields)
     monkeypatch.setattr(module, "read_directory_fields", reader)
-    rows = await TTLView(fs, ctx).attach_many([{"uri": f"{root}/{i}.md"} for i in range(100)])
-    assert len(rows) == 100 and all(row["expires_at"] == rows[0]["expires_at"] for row in rows)
+    uri = root if operation in {"ls", "tree"} else root + "/a.md"
+    result = await getattr(service, operation)(uri, ctx=ctx)
+    rows = result.entries if operation in {"ls", "tree"} else [result]
+    assert len(rows) == (3 if operation in {"ls", "tree"} else 1)
+    assert all(row["expires_at"] == rows[0]["expires_at"] for row in rows)
     reader.assert_awaited_once()
+    await fs.write_file(root + "/.meta.json", '{"expires_at":"2000-01-01T00:00:00Z"}', ctx=ctx)
+    with pytest.raises(NotFoundError):
+        await getattr(service, operation)(uri, ctx=ctx)
 
 
 @pytest.mark.asyncio

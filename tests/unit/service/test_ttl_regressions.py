@@ -85,7 +85,7 @@ async def test_public_write_entrypoints_share_directory_ttl(
     record = await read_record(fs, ctx.account_id, root)
     assert record is not None
     assert record.object_type == "event"
-    assert record.expires_at == "2026-01-02T00:00:00.000Z"
+    assert record.object_uri == root
     assert "event body" in await fs.read_file(uri, ctx=ctx)
     # Changing defaults alone cannot override the persisted deadline.
     config.global_default.mode = "disabled"

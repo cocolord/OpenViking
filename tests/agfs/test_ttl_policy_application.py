@@ -136,18 +136,47 @@ async def test_priority_absolute_sessions_and_shortening_never_revive_expired(co
 
 
 @pytest.mark.asyncio
-async def test_same_patch_retries_partial_metadata_failure(configured_fs, monkeypatch):
+@pytest.mark.parametrize("failure", ["metadata", "users", "owners", "config"])
+async def test_same_patch_retries_partial_application_failure(configured_fs, monkeypatch, failure):
+    from openviking.config.scope import ConfigScope
+    from openviking.service import ttl_policy
+
     fs, manager, ctx = configured_fs
     owner = "viking://user/default/memories/events/2026/10/01"
     await fs.write_file(owner + "/a.md", "body", ctx=ctx)
+    original = await read_directory_fields(fs, owner, ctx=ctx)
     policy = {"user_events": {"mode": "days", "ttl_days": 7}}
     with monkeypatch.context() as m:
-        m.setattr(fs, "write_file", AsyncMock(side_effect=OSError("metadata unavailable")))
-        with pytest.raises(FailedPreconditionError, match="Retry the same configuration"):
+        if failure == "metadata":
+            m.setattr(fs, "write_file", AsyncMock(side_effect=OSError("metadata unavailable")))
+        elif failure == "config":
+            current = await ttl_policy._config(fs, ctx.account_id)
+            m.setattr(
+                ttl_policy,
+                "_config",
+                AsyncMock(side_effect=[current, OSError("config unavailable")]),
+            )
+        else:
+            path = "viking://user" if failure == "users" else owner.rsplit("/", 3)[0]
+            failed_path = fs._uri_to_path(path, ctx=ctx)
+            original_ls = fs._async_agfs.ls
+
+            async def fail_listing(path, **kwargs):
+                if path == failed_path:
+                    raise OSError("listing unavailable")
+                return await original_ls(path, **kwargs)
+
+            m.setattr(fs._async_agfs, "ls", fail_listing)
+        with pytest.raises(FailedPreconditionError, match="Retry the same configuration") as error:
             await patch(fs, manager, ctx, policy)
+        assert error.value.details["failed_count"] == 1
+        assert error.value.details["failures"][0]["account_id"] == ctx.account_id
+        assert (await manager.get_settings(ConfigScope.account(ctx.account_id)))["ttl"] == policy
     await patch(fs, manager, ctx, policy)
     fields = await read_directory_fields(fs, owner, ctx=ctx)
-    assert (await read_record(fs, ctx.account_id, owner)).expires_at == fields["expires_at"]
+    assert parse_iso_datetime(fields["expires_at"]) == parse_iso_datetime(
+        original["received_at"]
+    ) + timedelta(days=7)
 
 
 @pytest.mark.asyncio

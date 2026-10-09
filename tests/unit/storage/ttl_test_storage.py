@@ -77,7 +77,7 @@ async def read_record(fs, account_id, uri):
     from openviking.core.ttl import ttl_object_for_uri
     from openviking.server.identity import RequestContext, Role
     from openviking.storage.directory_ttl import read_directory_fields
-    from openviking.storage.ttl_registry import record_from_fields
+    from openviking.storage.ttl_registry import TTLRecord
     from openviking_cli.session.user_id import UserIdentifier
 
     target = ttl_object_for_uri(uri)
@@ -85,9 +85,5 @@ async def read_record(fs, account_id, uri):
         return None
     user_id = uri.removeprefix("viking://").split("/")[1]
     ctx = RequestContext(user=UserIdentifier(account_id, user_id), role=Role.ROOT)
-    return record_from_fields(
-        uri=uri,
-        object_type=target[0],
-        fields=await read_directory_fields(fs, uri, ctx=ctx),
-        ctx=ctx,
-    )
+    fields = await read_directory_fields(fs, uri, ctx=ctx)
+    return TTLRecord(uri, target[0], account_id) if fields.get("expires_at") else None

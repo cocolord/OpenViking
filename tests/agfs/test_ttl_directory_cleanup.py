@@ -140,7 +140,9 @@ async def test_busy_file_defers_cleanup_without_tree_lock(binding_fs, monkeypatc
         with pytest.raises(Exception) as failure:
             await asyncio.wait_for(_cleanup_once(cleanup, record), timeout=3)
         assert not isinstance(failure.value, (AssertionError, TimeoutError))
-        assert (await read_directory_fields(fs, root, ctx=ctx))["expires_at"] == record.expires_at
+        assert (await read_directory_fields(fs, root, ctx=ctx))[
+            "expires_at"
+        ] == "2000-01-01T00:00:00Z"
         assert await read_record(fs, ctx.account_id, root) == record
     finally:
         await fs._async_agfs.pathlock_release(lock)

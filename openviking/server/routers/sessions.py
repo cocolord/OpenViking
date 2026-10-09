@@ -83,6 +83,8 @@ class AutoCommitPolicyRequest(BaseModel):
     the HTTP, SDK, and CLI entrypoints.
     """
 
+    model_config = {"extra": "forbid"}
+
     pending_token_threshold: Optional[int] = None
     message_count_threshold: Optional[int] = None
     idle_timeout_seconds: Optional[int] = None

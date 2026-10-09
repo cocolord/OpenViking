@@ -2587,19 +2587,11 @@ class Session:
         }
         if blocked_by:
             payload["blocked_by"] = blocked_by
-        if lease_ref is not None:
-            await self._viking_fs.write_file(
-                uri=f"{archive_uri}/.failed.json",
-                content=json.dumps(payload, ensure_ascii=False),
-                ctx=self.ctx,
-                lease_ref=lease_ref,
-            )
-            return
         await self._viking_fs.write_file(
             uri=f"{archive_uri}/.failed.json",
             content=json.dumps(payload, ensure_ascii=False),
             ctx=self.ctx,
-            lease_ref=None,
+            lease_ref=lease_ref,
         )
 
     async def get_session_context(self, token_budget: int = 128_000) -> Dict[str, Any]:

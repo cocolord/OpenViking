@@ -501,7 +501,6 @@ class StreamingMemoryUpdater:
                 operations,
                 viking_fs,
                 request.ctx,
-                request=request,
             )
             try:
                 updater = MemoryUpdater(
@@ -2212,8 +2211,6 @@ async def acquire_memory_operation_lease(
     operations: ResolvedOperations,
     viking_fs: Any | None,
     ctx: RequestContext,
-    *,
-    request: MemoryUpdateRequest | None = None,
 ) -> Any | None:
     # Materialize implicit URI changes only at the final apply boundary. Doing
     # this before second-stage patch merging would present the same rename as

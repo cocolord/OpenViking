@@ -1185,6 +1185,7 @@ class _OpsMixin:
         include_lock_status: bool = False,
         *,
         include_expired: bool = False,
+        ttl_view=None,
     ) -> Dict[str, Any]:
         """
         File/directory information.
@@ -1217,7 +1218,10 @@ class _OpsMixin:
                 Leave disabled for internal metadata checks to avoid the extra
                 PathLock filesystem lookup.
         """
+        from openviking.storage.ttl_view import TTLView
+
         real_ctx = self._ctx_or_default(ctx)
+        ttl_view = ttl_view or TTLView(self, real_ctx)
         uri = await self.resolve_uri(uri, real_ctx)
         await self._ensure_access(uri, ctx)
         primary_path = self._uri_to_path(uri, ctx=ctx)
@@ -1230,6 +1234,7 @@ class _OpsMixin:
                 primary_path,
                 real_ctx,
                 include_expired=include_expired,
+                ttl_view=ttl_view,
             ):
                 continue
             try:
@@ -1893,6 +1898,7 @@ class _OpsMixin:
         include_abstract: Optional[bool] = None,
         include_overview: bool = False,
         overview_limit: int = 4000,
+        ttl_view=None,
     ) -> List[Dict[str, Any]]:
         """
         Recursively list all contents (includes rel_path).
@@ -1928,6 +1934,7 @@ class _OpsMixin:
             sort_by=sort_by,
             sort_order=sort_order,
             ctx=ctx,
+            ttl_view=ttl_view,
         )
         return await self._finalize_listing_entries(
             entries,
@@ -1952,6 +1959,7 @@ class _OpsMixin:
         sort_order: str = "asc",
         ctx: Optional[RequestContext] = None,
         directories_only: bool = False,
+        ttl_view=None,
     ) -> List[Dict[str, Any]]:
         """Recursively list all contents (original format)."""
         result = []
@@ -1965,6 +1973,7 @@ class _OpsMixin:
             sort_by=sort_by,
             sort_order=sort_order,
             ctx=ctx,
+            ttl_view=ttl_view,
         ):
             info = entry["info"]
             if entry.get("access") == "denied":
@@ -2445,6 +2454,7 @@ class _OpsMixin:
         ctx: Optional[RequestContext] = None,
         extra_fields: Optional[List[str]] = None,
         offset: int = 0,
+        ttl_view=None,
     ) -> List[Dict[str, Any]]:
         """
         List directory contents (URI version).
@@ -2484,6 +2494,7 @@ class _OpsMixin:
             sort_by=sort_by,
             sort_order=sort_order,
             ctx=ctx,
+            ttl_view=ttl_view,
         )
         return await self._finalize_listing_entries(
             entries,
@@ -2567,6 +2578,7 @@ class _OpsMixin:
         sort_by: Optional[str] = None,
         sort_order: str = "asc",
         ctx: Optional[RequestContext] = None,
+        ttl_view=None,
     ) -> List[Dict[str, Any]]:
         """List directory contents (URI version)."""
         entry_items = await self._ls_browsable_items(
@@ -2577,6 +2589,7 @@ class _OpsMixin:
             sort_by=sort_by,
             sort_order=sort_order,
             ctx=ctx,
+            ttl_view=ttl_view,
         )
         # AGFS returns read-only structure, need to create new dict
         all_entries = []
@@ -2629,6 +2642,7 @@ class _OpsMixin:
         sort_by: Optional[str] = None,
         sort_order: str = "asc",
         ctx: Optional[RequestContext] = None,
+        ttl_view=None,
     ) -> List[tuple[Dict[str, Any], str]]:
         """Return one visible page while preserving RagFS ordering."""
         if offset < 0:
@@ -2636,6 +2650,9 @@ class _OpsMixin:
         if node_limit == 0:
             return []
 
+        from openviking.storage.ttl_view import TTLView
+
+        ttl_view = ttl_view or TTLView(self, self._ctx_or_default(ctx))
         raw_offset = 0
         raw_limit = None if node_limit is None else max(node_limit, 256)
         remaining_offset = offset
@@ -2652,6 +2669,7 @@ class _OpsMixin:
                 sort_by=sort_by,
                 sort_order=sort_order,
                 ctx=ctx,
+                ttl_view=ttl_view,
             )
             if merge_paths:
                 entry_items = self._sort_ls_entry_items(entry_items, sort_by, sort_order)

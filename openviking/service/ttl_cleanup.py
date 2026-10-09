@@ -28,7 +28,7 @@ from openviking.storage.directory_ttl import read_directory_fields
 from openviking.storage.errors import LockAcquisitionError, ResourceBusyError
 from openviking.storage.queuefs.named_queue import DequeueHandlerBase
 from openviking.storage.queuefs.process_result import ProcessResult
-from openviking.storage.ttl_registry import TTLRecord, TTLRegistry, record_from_fields
+from openviking.storage.ttl_registry import TTLRecord, TTLRegistry
 from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils.config import get_openviking_config
 from openviking_cli.utils.logger import get_logger
@@ -65,16 +65,24 @@ class TTLCleanupService:
         await self._scheduler.stop()
 
     async def _process(self, message: dict[str, Any]) -> ProcessResult:
+        try:
+            record = TTLRecord.from_dict(message["target"])
+            task_id = message["task_id"]
+            if not task_id or not record.account_id or not record.object_uri:
+                raise ValueError("Invalid TTL cleanup message")
+        except (KeyError, TypeError, ValueError) as exc:
+            return ProcessResult.failed(str(exc))
         # Cancellation must not release the object lease during physical I/O.
-        return await run_to_completion(lambda: self._run_delivery(message))
+        return await run_to_completion(lambda: self._run_delivery(record, str(task_id)))
 
-    async def _run_delivery(self, message: dict[str, Any]) -> ProcessResult:
-        record = TTLRecord.from_dict(message["target"])
+    async def _run_delivery(self, record: TTLRecord, task_id: str) -> ProcessResult:
         if ttl_object_for_uri(record.object_uri) != (record.object_type, record.object_uri):
             return ProcessResult.failed("Invalid TTL cleanup target")
         tracker = get_task_tracker()
-        task_id = message["task_id"]
-        owner = {"account_id": message["account_id"], "user_id": message["user_id"]}
+        owner: dict[str, Any] = {
+            "account_id": SYSTEM_TASK_ACCOUNT_ID,
+            "user_id": SYSTEM_TASK_USER_ID,
+        }
         lease = None
         try:
             await tracker.create(
@@ -102,7 +110,7 @@ class TTLCleanupService:
     async def _acquire_object_lock(self, scheduled: TTLRecord) -> tuple[RequestContext, Any]:
         fs = self._service.viking_fs
         ctx = RequestContext(
-            user=UserIdentifier(scheduled.account_id, scheduled.user_id or SYSTEM_TASK_USER_ID),
+            user=UserIdentifier(scheduled.account_id, SYSTEM_TASK_USER_ID),
             role=Role.ROOT,
         )
         metadata_path = fs._uri_to_path(
@@ -227,7 +235,7 @@ class TTLCleanupScheduler:
                 fields = await read_directory_fields(self._service.viking_fs, uri, ctx=ctx)
                 if hidden_by_ttl(fields.get("expires_at")):
                     kind, _ = ttl_object_for_uri(uri)
-                    record = record_from_fields(uri=uri, object_type=kind, fields=fields, ctx=ctx)
+                    record = TTLRecord(object_uri=uri, object_type=kind, account_id=ctx.account_id)
                     await queue.enqueue(_ttl_cleanup_message(record=record))
             except Exception:
                 # One corrupt owner or failed enqueue must not starve its siblings.
@@ -248,14 +256,9 @@ class _TTLCleanupProcessor(DequeueHandlerBase):
             payload = data.get("data", data)
             if isinstance(payload, str):
                 payload = json.loads(payload)
-            record = TTLRecord.from_dict(payload["target"])
-            if not (payload["task_id"] and record.account_id and record.object_uri):
-                raise ValueError("Invalid TTL cleanup message")
-            # Queue work is system-owned regardless of fields in the envelope.
-            message = _ttl_cleanup_message(record=record, task_id=str(payload["task_id"]))
         except (KeyError, TypeError, ValueError) as exc:
             return ProcessResult.failed(str(exc))
-        return await self._cleanup_service._process(message)
+        return await self._cleanup_service._process(payload)
 
 
 async def setup_ttl_cleanup(*, service: Any) -> Optional[TTLCleanupService]:

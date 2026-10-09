@@ -11,11 +11,10 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping
 
 from openviking.pyagfs import AsyncAGFSClient
 from openviking.server.error_mapping import is_storage_not_found
-from openviking.server.identity import RequestContext
 from openviking.service.task_store import SYSTEM_TASK_ACCOUNT_ID
 
 _ROOT = "/local"
@@ -28,8 +27,6 @@ class TTLRecord:
     object_uri: str
     object_type: str
     account_id: str
-    user_id: str
-    expires_at: str
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "TTLRecord":
@@ -37,8 +34,6 @@ class TTLRecord:
             object_uri=str(value["object_uri"]),
             object_type=str(value["object_type"]),
             account_id=str(value["account_id"]),
-            user_id=str(value.get("user_id") or ""),
-            expires_at=str(value["expires_at"]),
         )
 
 
@@ -79,22 +74,3 @@ class TTLRegistry:
             await self._agfs.ensure_parent_dirs(marker)
             await self._agfs.write(marker, b"1", auto_pathlock=False)
             self._known_accounts.add(account_id)
-
-
-def record_from_fields(
-    *,
-    uri: str,
-    object_type: str,
-    fields: Mapping[str, Any],
-    ctx: RequestContext,
-) -> Optional[TTLRecord]:
-    expires_at = str(fields.get("expires_at") or "")
-    if not expires_at:
-        return None
-    return TTLRecord(
-        object_uri=uri,
-        object_type=object_type,
-        account_id=ctx.account_id,
-        user_id=ctx.user.user_id,
-        expires_at=expires_at,
-    )

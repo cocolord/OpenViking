@@ -286,7 +286,10 @@ class FSService:
             sort_order: Sort direction, "asc" or "desc"
             extra_fields: Optional extra fields to include (locked, id, count)
         """
+        from openviking.storage.ttl_view import TTLView
+
         viking_fs = self._ensure_initialized()
+        ttl_view = TTLView(viking_fs, ctx)
         extra_fields = extra_fields or []
         use_simple_paths = simple and not extra_fields
 
@@ -296,6 +299,7 @@ class FSService:
                 return await viking_fs.tree(
                     uri,
                     ctx=ctx,
+                    ttl_view=ttl_view,
                     output="original",
                     abs_limit=abs_limit,
                     include_abstract=None,
@@ -312,6 +316,7 @@ class FSService:
             return await viking_fs.ls(
                 uri,
                 ctx=ctx,
+                ttl_view=ttl_view,
                 output="original",
                 abs_limit=abs_limit,
                 include_abstract=None,
@@ -369,9 +374,6 @@ class FSService:
                 ),
                 has_more=page.has_more,
             )
-        from openviking.storage.ttl_view import TTLView
-
-        ttl_view = TTLView(viking_fs, ctx)
         page.entries = await ttl_view.attach_many(page.entries)
         return page
 
@@ -394,10 +396,11 @@ class FSService:
 
         self._reject_storage_internal_target(uri)
         fs = self._ensure_initialized()
-        stat = await fs.stat(uri, ctx=ctx)
+        ttl_view = TTLView(fs, ctx)
+        stat = await fs.stat(uri, ctx=ctx, ttl_view=ttl_view)
         if ttl_scope_for_uri(uri) is None:
             raise InvalidArgumentError("TTL only supports events and sessions")
-        return {"uri": uri, **await TTLView(fs, ctx).fields(uri, is_dir=stat.get("isDir", False))}
+        return {"uri": uri, **await ttl_view.fields(uri, is_dir=stat.get("isDir", False))}
 
     async def mkdir(
         self,
@@ -1017,6 +1020,7 @@ class FSService:
             return await viking_fs.tree(
                 uri,
                 ctx=ctx,
+                ttl_view=ttl_view,
                 output="original" if tags else output,
                 abs_limit=abs_limit,
                 include_abstract=None if tags else include_abstract,
@@ -1080,16 +1084,18 @@ class FSService:
         include_lock_status: bool = False,
     ) -> Dict[str, Any]:
         """Get resource status."""
+        from openviking.storage.ttl_view import TTLView
+
         viking_fs = self._ensure_initialized()
+        ttl_view = TTLView(viking_fs, ctx)
         entry = await viking_fs.stat(
             uri,
             ctx=ctx,
+            ttl_view=ttl_view,
             skip_count=skip_count,
             include_lock_status=include_lock_status,
         )
-        from openviking.storage.ttl_view import TTLView
-
-        return await TTLView(viking_fs, ctx).attach(entry)
+        return await ttl_view.attach(entry)
 
     async def ensure_write_access(self, uri: str, ctx: RequestContext) -> None:
         """Validate write access without mutating the target."""

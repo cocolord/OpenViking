@@ -9,7 +9,6 @@
 
 pub mod builder;
 pub mod context;
-pub mod directory_metadata;
 pub mod encryption_wrapper;
 pub mod errors;
 pub mod filesystem;

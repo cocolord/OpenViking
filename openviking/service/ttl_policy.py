@@ -162,8 +162,12 @@ async def _apply_owner(fs, uri, ctx, config):
 async def apply_account_ttl(fs, account_id, *, previous=None, patch=None, config=None):
     """Apply current effective policies with bounded storage work and errors."""
     ctx = RequestContext(user=UserIdentifier(account_id, "__system__"), role=Role.ROOT)
-    config = config or await _config(fs, account_id)
     result: dict[str, Any] = {"updated": 0, "skipped": 0, "failed": 0, "failures": []}
+
+    def failed(uri, exc):
+        result["failed"] += 1
+        if len(result["failures"]) < 100:
+            result["failures"].append({"account_id": account_id, "uri": uri, "reason": str(exc)})
 
     async def apply(uri):
         try:
@@ -171,25 +175,30 @@ async def apply_account_ttl(fs, account_id, *, previous=None, patch=None, config
         except Exception as exc:
             if is_storage_not_found(exc):
                 result["skipped"] += 1
-                return
-            result["failed"] += 1
-            if len(result["failures"]) < 100:
-                result["failures"].append(
-                    {"account_id": account_id, "uri": uri, "reason": str(exc)}
-                )
+            else:
+                failed(uri, exc)
         else:
             result["updated" if status == "updated" else "skipped"] += 1
 
     batch = []
-    async for root in _roots(fs, ctx):
-        scope = ttl_scope_for_uri(root)
-        if not _affected(root, scope, config, previous, patch):
-            continue
-        async for uri in _owners(fs, root, ctx):
-            batch.append(uri)
-            if len(batch) == _CONCURRENCY:
-                await asyncio.gather(*(apply(uri) for uri in batch))
-                batch.clear()
+    try:
+        config = config or await _config(fs, account_id)
+        async for root in _roots(fs, ctx):
+            scope = ttl_scope_for_uri(root)
+            if not _affected(root, scope, config, previous, patch):
+                continue
+            try:
+                async for uri in _owners(fs, root, ctx):
+                    batch.append(uri)
+                    if len(batch) == _CONCURRENCY:
+                        await asyncio.gather(*(apply(uri) for uri in batch))
+                        batch.clear()
+            except Exception as exc:
+                # Discovery cannot count unseen owners; report its root once.
+                failed(root, exc)
+    except Exception as exc:
+        # Includes fresh config reads and account/user/peer discovery failures.
+        failed("viking://user", exc)
     if batch:
         await asyncio.gather(*(apply(uri) for uri in batch))
     return result

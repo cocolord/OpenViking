@@ -385,3 +385,20 @@ async def test_root_patch_updates_existing_event_and_session_before_return(clien
         client, "patch", CONFIG, json={"settings": {"ttl": {"global": {"mode": "disabled"}}}}
     )
     assert (await request(client, "get", "/api/v1/sessions/existing"))["expires_at"] is None
+
+
+@pytest.mark.parametrize(
+    "policy", [{"message_count_threshold": None}, {"message_count_threshhold": 10}]
+)
+async def test_auto_commit_policy_rejects_invalid_fields(client: httpx.AsyncClient, policy):
+    resp = await client.post("/api/v1/sessions", json={"auto_commit_policy": policy})
+    assert resp.status_code == 400
+    if "message_count_threshold" in policy:
+        assert "auto_commit_policy=null" in resp.json()["error"]["message"]
+
+    created = await client.post("/api/v1/sessions", json={})
+    session_id = created.json()["result"]["session_id"]
+    resp = await client.patch(
+        f"/api/v1/sessions/{session_id}/config", json={"auto_commit_policy": policy}
+    )
+    assert resp.status_code == 400

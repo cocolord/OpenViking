@@ -14,6 +14,7 @@ from openviking.server.identity import RequestContext, Role
 from openviking.service.fs_service import FSService, ListingPage
 from openviking.storage.abstract_overview import body_for_preview
 from openviking.storage.errors import LockAcquisitionError
+from openviking.storage.ttl_view import TTLView
 from openviking.storage.viking_fs import VikingFS
 from openviking_cli.exceptions import InvalidArgumentError
 from openviking_cli.session.user_id import UserIdentifier
@@ -76,12 +77,18 @@ async def test_stat_forwards_optional_fields_without_changing_defaults(request_c
     )
     await service.stat("viking://resources", request_context)
 
+    first_view = viking_fs.stat.await_args_list[0].kwargs["ttl_view"]
+    second_view = viking_fs.stat.await_args_list[1].kwargs["ttl_view"]
+    assert isinstance(first_view, TTLView) and isinstance(second_view, TTLView)
+    assert first_view is not second_view
     assert viking_fs.stat.await_args_list[0].kwargs == {
+        "ttl_view": first_view,
         "ctx": request_context,
         "skip_count": True,
         "include_lock_status": True,
     }
     assert viking_fs.stat.await_args_list[1].kwargs == {
+        "ttl_view": second_view,
         "ctx": request_context,
         "skip_count": False,
         "include_lock_status": False,
