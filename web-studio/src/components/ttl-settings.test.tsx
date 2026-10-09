@@ -174,7 +174,12 @@ it('limits the global form and rejects invalid days and child directory edits', 
   expect(screen.getByRole('alert').textContent).toContain('Individual sessions')
   expect(screen.queryByRole('button', { name: 'Save and apply' })).toBeNull()
   expect(() => ttlPolicyPatch(`${root}/2026`, { mode: 'disabled' })).toThrow()
-  expect(isTtlRoot('viking://user/alice/peers/bob/memories/events/')).toBe(true)
+  const peerRoot = 'viking://user/alice/peers/bob/memories/events/'
+  expect(isTtlRoot(peerRoot)).toBe(true)
+  expect(() => ttlPolicyPatch(peerRoot, { mode: 'disabled' })).toThrow()
+  select('Root directory URI', peerRoot)
+  expect(screen.getByRole('alert').textContent).toContain('Peer events')
+  expect(screen.queryByRole('button', { name: 'Save and apply' })).toBeNull()
   expect(isTtlRoot('viking://user/alice/sessions/s1')).toBe(false)
   expect(patches()).toHaveLength(0)
 })
@@ -265,6 +270,12 @@ it('shows server expiry in both languages, preserves null and omits unknown valu
   rendered.rerender(view(<TtlExpiry />))
   expect(rendered.container.textContent).toBe('')
   rendered.rerender(view(<RootTtlSettings uri={`${root}/2026/10/08`} />))
+  expect(rendered.container.textContent).toBe('')
+  rendered.rerender(
+    view(
+      <RootTtlSettings uri="viking://user/alice/peers/bob/memories/events" />,
+    ),
+  )
   expect(rendered.container.textContent).toBe('')
   expect(
     normalizeFsEntry({ name: 's1', expires_at: null }, root).expiresAt,

@@ -14,7 +14,7 @@ export default {
   },
   rootUri: '根目录 URI',
   invalidRoot:
-    '请输入 events 或 sessions 根目录 URI，具体 Session、日期目录和文件不支持单独配置。',
+    '请输入用户 events 或 sessions 根目录 URI，具体 Session、日期目录和文件不支持单独配置。Peer events 统一使用 Peer events 默认策略。',
   policy: '当前库的覆盖策略',
   modes: {
     server: '使用服务端配置（移除库级覆盖）',

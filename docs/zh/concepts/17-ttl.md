@@ -4,13 +4,12 @@ TTL 默认关闭，作用于用户和 peer 的 `events/YYYY/MM/DD` 日期目录�
 
 ## 配置与全量应用
 
-TTL 复用实例默认配置和 Account 配置覆盖（Web Studio 中的“库”对应 Account），支持全局默认、类型默认和以下三类根：
+TTL 复用实例默认配置和 Account 配置覆盖（Web Studio 中的“库”对应 Account），支持全局默认、类型默认，以及以下用户根的独立覆盖：
 
 - `viking://user/{user_id}/memories/events`
-- `viking://user/{user_id}/peers/{peer_id}/memories/events`
 - `viking://user/{user_id}/sessions`
 
-每个具体根 URI 都能独立配置；不同 user、不同 peer 可以使用不同期限，并非全库只有三个配置项。Session 位于 user 下，没有 peer sessions 根。未覆盖的根继承对应类型，新建 user／peer 的目录也自动继承。
+上述用户根可以独立配置。所有 Peer events 统一使用当前 Account 的 `peer_events` 有效策略，不支持单个 Peer 根覆盖；向 `directories` 传入 Peer 根策略返回 `400 INVALID_ARGUMENT`。Session 位于 user 下，没有 peer sessions 根。未覆盖的用户根继承对应类型，新建 user／peer 的目录也自动继承。
 
 先合并同一节点的 Account 覆盖 → 实例运行时配置 → 启动配置，再选择具体根 → 类型（`user_events`、`peer_events`、`sessions`）→ `global`。Account 的 `global` 不会盖掉实例中更具体的类型默认；例如实例 `sessions=30 天`，需要通过 Account 的 `sessions` 节点覆盖该类型。user／peer 身份用于定位根，不增加配置层。
 

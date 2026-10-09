@@ -57,6 +57,23 @@ async def test_standalone_ttl_endpoint_is_removed(client):
         assert response.status_code == 404, response.text
 
 
+async def assert_settings_rejected(client, settings, message=None):
+    for method, path in (
+        ("post", "/api/v1/admin/accounts"),
+        ("patch", CONFIG),
+        ("patch", "/api/v1/admin/configuration"),
+    ):
+        body = {"settings": settings}
+        if method == "post":
+            body.update(account_id="invalid-settings", admin_user_id="alice")
+        response = await getattr(client, method)(path, json=body)
+        assert response.status_code == 400, response.text
+        error = response.json()["error"]
+        assert error["code"] == "INVALID_ARGUMENT"
+        if message:
+            assert message in error["message"]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "node",
@@ -67,7 +84,6 @@ async def test_standalone_ttl_endpoint_is_removed(client):
         "peer_events",
         "sessions",
         ROOT + "/memories/events",
-        ROOT + "/peers/p1/memories/events",
         ROOT + "/sessions",
     ],
 )
@@ -90,19 +106,7 @@ async def test_policy_mode_is_required_before_create_or_patch(client, service, n
             for scope in (ConfigScope.cluster(), ConfigScope.account("default"))
         ]
         for policy in ({}, {"ttl_days": 30}, {"ttl_absolute": 4102444800}, {"mode": None}):
-            for method, path in (
-                ("post", "/api/v1/admin/accounts"),
-                ("patch", CONFIG),
-                ("patch", "/api/v1/admin/configuration"),
-            ):
-                body = {"settings": settings(policy)}
-                if method == "post":
-                    body.update(account_id="missing-mode", admin_user_id="alice")
-                response = await getattr(client, method)(path, json=body)
-                assert response.status_code == 400, response.text
-                error = response.json()["error"]
-                assert error["code"] == "INVALID_ARGUMENT"
-                assert "mode is required" in error["message"]
+            await assert_settings_rejected(client, settings(policy), "mode is required")
         assert before == [
             await manager.get_settings(scope)
             for scope in (ConfigScope.cluster(), ConfigScope.account("default"))
@@ -403,3 +407,19 @@ async def test_auto_commit_policy_rejects_invalid_fields(client: httpx.AsyncClie
         f"/api/v1/sessions/{session_id}/config", json={"auto_commit_policy": policy}
     )
     assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_peer_root_override_is_rejected_without_changing_shared_policy(client):
+    await request(
+        client,
+        "patch",
+        CONFIG,
+        json={"settings": {"ttl": {"peer_events": {"mode": "days", "ttl_days": 30}}}},
+    )
+    before = await request(client, "get", CONFIG)
+    root = ROOT + "/peers/p1/memories/events"
+    await assert_settings_rejected(
+        client, {"ttl": {"directories": {root: {"mode": "days", "ttl_days": 7}}}}
+    )
+    assert await request(client, "get", CONFIG) == before

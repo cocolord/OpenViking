@@ -92,7 +92,7 @@ async def test_account_policy_mode_replaces_incompatible_cluster_fields(runtime,
 async def test_policy_switches_are_atomic_and_keep_other_directories(runtime, account):
     fs, manager, _ = runtime()
     first = "viking://user/u1/memories/events"
-    sibling = "viking://user/u1/peers/p1/memories/events"
+    sibling = "viking://user/u2/memories/events"
 
     async def patch(value):
         if account:

@@ -31,13 +31,7 @@ def _is_supported_directory_uri(uri: str) -> bool:
     if parts[2] == "sessions":
         # A session ID is an object root, not a configurable directory.
         return len(parts) == 3
-    if len(parts) >= 4 and parts[2:4] == ["memories", "events"]:
-        suffix = parts[4:]
-    elif len(parts) >= 6 and parts[2] == "peers" and parts[4:6] == ["memories", "events"]:
-        suffix = parts[6:]
-    else:
-        return False
-    return not suffix
+    return len(parts) == 4 and parts[2:4] == ["memories", "events"]
 
 
 class TTLPolicy(BaseModel):
@@ -101,7 +95,7 @@ class TTLConfig(BaseModel):
         default_factory=dict,
         description=(
             "TTL overrides keyed by a concrete in-scope Viking directory URI. "
-            "Only events and sessions roots are configurable."
+            "Only user events and sessions roots are configurable; peers use peer_events."
         ),
     )
 
@@ -119,8 +113,8 @@ class TTLConfig(BaseModel):
             uri = raw_uri.rstrip("/")
             if not _is_supported_directory_uri(uri):
                 raise ValueError(
-                    "ttl.directories keys must be concrete user events, peer events, "
-                    "or sessions roots; child directories are read-only"
+                    "ttl.directories keys must be concrete user events or sessions roots; "
+                    "peer events use the shared peer_events policy"
                 )
             if uri in normalized:
                 raise ValueError(f"duplicate ttl directory after normalization: {uri}")

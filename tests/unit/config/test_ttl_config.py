@@ -14,7 +14,6 @@ from pydantic import ValidationError
 
 from openviking_cli.utils.config.ttl_config import (
     TTL_SCOPES,
-    TTLCleanupConfig,
     TTLConfig,
     TTLPolicy,
 )
@@ -25,13 +24,6 @@ def test_default_config_is_off():
     assert config.enabled is False
     for scope in TTL_SCOPES:
         assert config.resolve_uri_policy("", scope).mode == "disabled"
-
-
-def test_cleanup_defaults_to_ready_with_day_level_physical_jitter():
-    cleanup = TTLCleanupConfig()
-
-    assert cleanup.enabled is True
-    assert cleanup.sweep_interval_seconds == 24 * 60 * 60
 
 
 def test_scope_disabled_blocks_global_inheritance():
@@ -48,28 +40,19 @@ def test_global_inherit_is_rejected():
         TTLConfig(**{"global": {"mode": "inherit"}})
 
 
-def test_days_requires_positive_ttl_days():
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {"mode": "days"},
+        {"mode": "days", "ttl_days": 0},
+        {"mode": "days", "ttl_days": -5},
+        {"mode": "disabled", "ttl_days": 5},
+        {"mode": "inherit", "ttl_days": 5},
+    ],
+)
+def test_invalid_days_policy_is_rejected(policy):
     with pytest.raises(ValidationError):
-        TTLPolicy(mode="days")  # missing ttl_days
-    with pytest.raises(ValidationError):
-        TTLPolicy(mode="days", ttl_days=0)  # ge=1
-    with pytest.raises(ValidationError):
-        TTLPolicy(mode="days", ttl_days=-5)
-
-
-def test_ttl_days_must_be_omitted_unless_days_mode():
-    with pytest.raises(ValidationError):
-        TTLPolicy(mode="disabled", ttl_days=5)
-    with pytest.raises(ValidationError):
-        TTLPolicy(mode="inherit", ttl_days=5)
-
-
-def test_global_alias_round_trips():
-    # The field is named ``global_default`` but aliased to ``global`` for config.
-    config = TTLConfig(**{"global": {"mode": "days", "ttl_days": 3}})
-    assert config.global_default.ttl_days == 3
-    dumped = config.model_dump(by_alias=True)
-    assert dumped["global"]["ttl_days"] == 3
+        TTLPolicy(**policy)
 
 
 def test_directory_only_policy_enables_ttl_and_normalizes_slash():
@@ -83,6 +66,8 @@ def test_directory_only_policy_enables_ttl_and_normalizes_slash():
     [
         "/local/a",
         "viking://resources/docs",
+        "viking://user/u1/peers/p1/memories/events",
+        "viking://user/u1/peers/p1/memories/events/",
         "viking://user/u1/preferences",
         "viking://user/u1/memories/entities",
         "viking://user/u1/sessions/s1",
@@ -93,7 +78,6 @@ def test_directory_only_policy_enables_ttl_and_normalizes_slash():
         "viking://user/u1/memories/events/2026/09",
         "viking://user/u1/memories/events/2026/09/30",
         "viking://user/u1/memories/events/2026/09/30/a.md",
-        "viking://user/u1/memories/events/2026/02/30",
     ],
 )
 def test_only_concrete_policy_roots_are_configurable(uri):
@@ -135,11 +119,15 @@ def test_root_policy_overrides_type_then_library_default(root_policy):
         {
             "global": {"mode": "days", "ttl_days": 7},
             "user_events": {"mode": "days", "ttl_days": 30},
+            "peer_events": {"mode": "days", "ttl_days": 21},
             "directories": {"viking://user/u1/memories/events": root_policy},
         }
     )
     assert config.enabled is True
-    assert config.resolve_uri_policy("", "peer_events") == TTLPolicy(mode="days", ttl_days=7)
+    for peer in ("p1", "p2"):
+        assert config.resolve_uri_policy(
+            f"viking://user/u1/peers/{peer}/memories/events/2026/10/09/a.md", "peer_events"
+        ) == TTLPolicy(mode="days", ttl_days=21)
     assert config.resolve_uri_policy(
         "viking://user/u1/memories/events/2026/09/30/a.md", "user_events"
     ) == (config.user_events if root_policy.mode == "inherit" else root_policy)

@@ -4,13 +4,12 @@ TTL is off by default. It covers user and peer `events/YYYY/MM/DD` directories a
 
 ## Configuration and policy application
 
-TTL uses instance defaults and Account overrides (a Web Studio "library" is an Account). Configure global defaults, type defaults, or one of these three kinds of policy root:
+TTL uses instance defaults and Account overrides (a Web Studio "library" is an Account). Configure global defaults, type defaults, or overrides for these user roots:
 
 - `viking://user/{user_id}/memories/events`
-- `viking://user/{user_id}/peers/{peer_id}/memories/events`
 - `viking://user/{user_id}/sessions`
 
-Each concrete root URI can have its own policy. Different users and peers can use different deadlines; a library is not limited to three entries. Sessions belong to users, with no peer sessions root. Roots without overrides inherit their type default, including roots for newly created users and peers.
+The user roots above can have individual overrides. All Peer events share the current Account’s effective `peer_events` policy; setting an individual Peer root in `directories` returns `400 INVALID_ARGUMENT`. Sessions belong to users, with no peer sessions root. User roots without overrides inherit their type default, including newly created users; new peers inherit `peer_events`.
 
 For each node, merge Account overrides → instance runtime settings → startup settings. Then select concrete root → type (`user_events`, `peer_events`, `sessions`) → `global`. An Account `global` policy does not override a more specific instance type default: overriding instance `sessions=30 days` requires an Account `sessions` policy. User and peer identities locate roots; they add no configuration layer.
 

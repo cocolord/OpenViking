@@ -14,7 +14,7 @@ export default {
   },
   rootUri: 'Root directory URI',
   invalidRoot:
-    'Enter an events or sessions root URI. Individual sessions, dates and files cannot be configured.',
+    'Enter a user events or sessions root URI. Individual sessions, dates and files cannot be configured. Peer events share the Peer events default.',
   policy: 'Library override',
   modes: {
     server: 'Use server configuration (remove library override)',

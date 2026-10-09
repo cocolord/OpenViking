@@ -2,7 +2,7 @@ import { useId, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { useTtlManagement } from '#/hooks/use-ttl-management'
-import { isTtlRoot, ttlScopes } from '#/lib/ttl'
+import { isConfigurableTtlRoot, isTtlRoot, ttlScopes } from '#/lib/ttl'
 import type { TtlConfig, TtlPolicy, TtlScope } from '#/lib/ttl'
 import { Button } from '#/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '#/components/ui/card'
@@ -145,7 +145,7 @@ function LibraryEditor({ state }: { state: Management }) {
           <Input value={uri} onChange={(e) => setUri(e.target.value)} />
         </label>
       )}
-      {scope !== 'directory' || isTtlRoot(target) ? (
+      {scope !== 'directory' || isConfigurableTtlRoot(target) ? (
         <TtlEditor key={target} target={target} state={state} />
       ) : (
         <p role="alert" className="text-sm text-destructive">
@@ -158,7 +158,7 @@ function LibraryEditor({ state }: { state: Management }) {
 
 export function RootTtlSettings({ uri }: { uri: string }) {
   // Do not load management state or settings for individual objects.
-  if (!isTtlRoot(uri)) return null
+  if (!isConfigurableTtlRoot(uri)) return null
   return <RootControl uri={uri.replace(/\/+$/, '')} />
 }
 

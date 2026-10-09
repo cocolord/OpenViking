@@ -40,9 +40,13 @@ export function isTtlRoot(uri: string) {
   return Boolean(normalized && ttlRootForPath(normalized) === normalized)
 }
 
+export function isConfigurableTtlRoot(uri: string) {
+  return isTtlRoot(uri) && !/^viking:\/\/user\/[^/]+\/peers\//.test(uri)
+}
+
 export function ttlPolicyPatch(target: string, policy: TtlPolicy | null) {
   if (ttlScopes.includes(target as TtlScope)) return { [target]: policy }
-  if (!isTtlRoot(target))
+  if (!isConfigurableTtlRoot(target))
     throw new Error('TTL configuration requires an events or sessions root URI')
   return { directories: { [target.replace(/\/+$/, '')]: policy } }
 }
