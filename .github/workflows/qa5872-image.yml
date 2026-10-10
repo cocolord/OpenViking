@@ -1,0 +1,35 @@
+name: QA 5872 kernel image
+on:
+  push:
+    branches: [feat/qa5872-image]
+permissions:
+  contents: read
+  packages: write
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: 45a8b45b8ab9be3b0c56d6dc1a3fdd6390fcc38c
+          submodules: recursive
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/cocolord/openviking:v0.5.0-qa5872
+          labels: |
+            org.opencontainers.image.revision=45a8b45b8ab9be3b0c56d6dc1a3fdd6390fcc38c
+            org.opencontainers.image.source=https://github.com/volcengine/OpenViking
+          build-args: |
+            OPENVIKING_VERSION=0.5.0+qa5872.45a8b45b8
+          cache-from: type=gha,scope=qa5872
+          cache-to: type=gha,mode=max,scope=qa5872
