@@ -782,6 +782,24 @@ def test_python_syntax_error_includes_offending_source_line():
     assert "^" in error
 
 
+@pytest.mark.parametrize("ending", ["sdk.commit(", "sdk.commit())"])
+@pytest.mark.parametrize(
+    "wrapper", ["{}", "```python\n{}\n```", "Explanation\n```python\n{}\n```\nDone."]
+)
+def test_python_rejects_invalid_program_containing_fenced_example(ending, wrapper):
+    context = _context([_profile_schema()])
+    protocol = create_extraction_output_protocol("python")
+    program = (
+        'sdk.set_profile(content="""Example:\n```python\nsdk.commit()\n```\n'
+        f'Keep this example.""")\n{ending}'
+    )
+
+    operations, error = protocol.parse(wrapper.format(program), context)
+
+    assert operations is None
+    assert error is not None
+
+
 def test_memory_schema_identity_fields_follow_scope_and_uri_template():
     entities = MemoryTypeSchema(
         memory_type="entities",
