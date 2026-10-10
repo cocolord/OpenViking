@@ -33,7 +33,7 @@ from openviking.session.memory.utils.line_numbers import (
     strip_line_numbers,
 )
 
-_PYTHON_FENCE_RE = re.compile(r"```python[ \t]*\r?\n(?P<code>[\s\S]*?)```", re.IGNORECASE)
+_PYTHON_FENCE_RE = re.compile(r"```python[ \t]*\r?\n(?P<code>[\s\S]*)```", re.IGNORECASE)
 _PYTHON_FENCE_START_RE = re.compile(r"```python[ \t]*\r?\n", re.IGNORECASE)
 _HIDDEN_MEMORY_FIELDS = {
     "source_extraction_id",
@@ -1453,20 +1453,35 @@ class _PythonProgramCompiler:
 
 def _extract_python_code(content: str) -> str:
     stripped = str(content or "").strip()
-    matches = list(_PYTHON_FENCE_RE.finditer(stripped))
-    if len(matches) == 1:
-        match = matches[0]
+    if "```" not in stripped:
+        return stripped
+    # A bare program may contain Markdown fences inside its string literals.
+    try:
+        ast.parse(stripped, mode="exec")
+    except SyntaxError:
+        pass
+    else:
+        return stripped
+    match = _PYTHON_FENCE_RE.search(stripped)
+    if match:
         surrounding_text = stripped[: match.start()] + stripped[match.end() :]
         if "```" not in surrounding_text:
-            return match.group("code").rstrip()
+            code = match.group("code").rstrip()
+            if "```" not in code:
+                return code
+            # Match through content fences, but reject separate output blocks.
+            try:
+                ast.parse(code, mode="exec")
+            except SyntaxError:
+                pass
+            else:
+                return code
     starts = list(_PYTHON_FENCE_START_RE.finditer(stripped))
     if len(starts) == 1 and stripped.count("```") == 1:
         return stripped[starts[0].end() :].strip()
-    if "```" in stripped:
-        raise ExtractionOutputProtocolError(
-            "Python output may contain only one complete ```python code fence"
-        )
-    return stripped
+    raise ExtractionOutputProtocolError(
+        "Python output may contain only one complete ```python code fence"
+    )
 
 
 def _is_string_literal_syntax_error(error: str) -> bool:
