@@ -10,7 +10,8 @@ import pytest
 from fastapi import HTTPException
 from vikingbot.bus.events import OutboundMessage
 from vikingbot.bus.queue import MessageBus
-from vikingbot.config.schema import FeishuChannelConfig, SessionKey
+from vikingbot.channels.manager import ChannelManager
+from vikingbot.config.schema import Config, FeishuChannelConfig, OpenVikingConfig, SessionKey
 from vikingbot.studio.providers.feishu.channel import StudioFeishuChannel
 from vikingbot.studio.providers.registry import get_provider
 from vikingbot.studio.service import StudioService
@@ -30,25 +31,6 @@ def record():
         "step": 2,
         "identity": {"user_id": "group-user", "api_key": "private", "role": "user"},
     }
-
-
-def managed_trusted_config(
-    *,
-    server_managed=True,
-    auth_mode="trusted",
-    api_key_type="root",
-    api_key_source="server.root_api_key",
-    api_key="runtime-root-key",
-):
-    return SimpleNamespace(
-        ov_server=SimpleNamespace(
-            effective_auth_mode=auth_mode,
-            api_key_type=api_key_type,
-            api_key=api_key,
-            is_server_managed=lambda: server_managed,
-            get_api_key_source=lambda: api_key_source,
-        )
-    )
 
 
 def test_store_survives_restart_deduplicates_and_paginates(tmp_path):
@@ -100,6 +82,7 @@ def channel(tmp_path):
         FeishuChannelConfig(app_id="cli_test", bot_name="Old name"),
         MessageBus(),
         record=record(),
+        openviking_connection=record()["identity"],
         store=StudioStore(tmp_path / "s.db"),
     )
     result._running = True
@@ -151,32 +134,42 @@ async def test_group_identity_and_peer_are_separate_from_installer(channel):
     assert channel.store.history("connection")[0]["sender"] == "Alice"
 
 
-async def test_trusted_identity_uses_server_root_key_only_at_runtime(tmp_path):
+@pytest.mark.parametrize(
+    "auth_mode,legacy_key", [("trusted", False), ("trusted", True), ("api_key", True)]
+)
+async def test_trusted_identity_uses_server_root_key_only_at_runtime(
+    tmp_path, auth_mode, legacy_key
+):
     item = record()
     item["identity"] = {
         "account_id": "a",
         "user_id": "group-user",
         "role": "user",
-        "api_key_type": "root",
     }
-    store = StudioStore(tmp_path / "s.db")
-    store.save(item)
-    runtime = StudioFeishuChannel(
-        FeishuChannelConfig(app_id="cli_test", bot_name="Bot"),
-        MessageBus(),
-        record=item,
-        store=store,
-        bot_config=managed_trusted_config(),
-    )
-    runtime._running = True
+    if legacy_key:
+        item["identity"].update(api_key_type="user", api_key="private")
+    config = Config(storage_workspace=str(tmp_path))
+    config.ov_server.set_effective_auth_mode(auth_mode)
+    config.ov_server.api_key = "runtime-root-key"
+    service = StudioService(config, ChannelManager(MessageBus()))
+    service.store.save(item)
 
+    # Restart through the production installation path, including old saved connections.
+    service = StudioService(config, ChannelManager(MessageBus()))
+    runtime = service.runtime(item)
+    runtime._running = True
     await runtime._handle_message("sender", "group", "hello", metadata={"message_id": "m1"})
     event = await runtime.bus.consume_inbound()
 
-    assert event.openviking_connection is not None
-    assert event.openviking_connection["api_key"] == "runtime-root-key"
-    assert "api_key" not in item["identity"]
-    assert "api_key" not in store.connections("a")[0]["identity"]
+    connection = event.openviking_connection
+    assert connection["account_id"] == "a"
+    assert connection["user_id"] == "group-user"
+    assert connection["role"] == "user"
+    assert connection["api_key_type"] == ("root" if auth_mode == "trusted" else "user")
+    assert connection["api_key"] == ("runtime-root-key" if auth_mode == "trusted" else "private")
+    assert runtime.record["identity"] == item["identity"]
+    assert service.store.connections("a")[0]["identity"] == item["identity"]
+    assert b"runtime-root-key" not in (config.bot_data_path / "studio.sqlite3").read_bytes()
 
 
 async def test_trusted_image_read_uses_runtime_root_key_and_chat_peer(tmp_path, monkeypatch):
@@ -189,13 +182,11 @@ async def test_trusted_image_read_uses_runtime_root_key_and_chat_peer(tmp_path, 
         "role": "user",
         "api_key_type": "root",
     }
-    runtime = StudioFeishuChannel(
-        FeishuChannelConfig(app_id="cli_test", bot_name="Bot"),
-        MessageBus(),
-        record=item,
-        store=StudioStore(tmp_path / "s.db"),
-        bot_config=managed_trusted_config(),
-    )
+    config = Config(storage_workspace=str(tmp_path))
+    config.ov_server.set_effective_auth_mode("trusted")
+    config.ov_server.api_key = "runtime-root-key"
+    service = StudioService(config, ChannelManager(MessageBus()))
+    runtime = service.install(item)
     image = b"\x89PNG\r\n\x1a\nfake-png"
     client = SimpleNamespace(
         stat=AsyncMock(return_value={"size": len(image)}),
@@ -223,56 +214,6 @@ async def test_trusted_image_read_uses_runtime_root_key_and_chat_peer(tmp_path, 
     )
     client.close.assert_awaited_once()
     assert "api_key" not in item["identity"]
-
-
-def test_trusted_runtime_replaces_legacy_persisted_user_key(tmp_path):
-    item = record()
-    item["identity"]["api_key_type"] = "user"
-    runtime = StudioFeishuChannel(
-        FeishuChannelConfig(app_id="cli_test", bot_name="Bot"),
-        MessageBus(),
-        record=item,
-        store=StudioStore(tmp_path / "s.db"),
-        bot_config=managed_trusted_config(),
-    )
-
-    connection = runtime._runtime_openviking_connection()
-
-    assert connection["api_key_type"] == "root"
-    assert connection["api_key"] == "runtime-root-key"
-    assert item["identity"]["api_key"] == "private"
-
-
-@pytest.mark.parametrize(
-    ("server_managed", "auth_mode", "api_key_type", "api_key_source", "api_key"),
-    [
-        (False, "trusted", "root", "server.root_api_key", "runtime-root-key"),
-        (True, "api_key", "root", "server.root_api_key", "runtime-root-key"),
-        (True, "trusted", "user", "server.root_api_key", "runtime-root-key"),
-        (True, "trusted", "root", "bot.ov_server.api_key", "runtime-root-key"),
-        (True, "trusted", "root", "server.root_api_key", "   "),
-    ],
-)
-def test_invalid_runtime_root_conditions_cannot_fill_identity(
-    tmp_path, server_managed, auth_mode, api_key_type, api_key_source, api_key
-):
-    item = record()
-    item["identity"] = {"account_id": "a", "user_id": "group-user", "api_key_type": "root"}
-    runtime = StudioFeishuChannel(
-        FeishuChannelConfig(app_id="cli_test", bot_name="Bot"),
-        MessageBus(),
-        record=item,
-        store=StudioStore(tmp_path / "s.db"),
-        bot_config=managed_trusted_config(
-            server_managed=server_managed,
-            auth_mode=auth_mode,
-            api_key_type=api_key_type,
-            api_key_source=api_key_source,
-            api_key=api_key,
-        ),
-    )
-
-    assert "api_key" not in runtime._runtime_openviking_connection()
 
 
 async def test_pause_drops_new_inbound_messages(channel):
@@ -427,7 +368,9 @@ async def test_reply_settings_persist_apply_immediately_and_keep_revision_guard(
     provider = get_provider({"type": "feishu"})
     service = StudioService(
         SimpleNamespace(
-            bot_data_path=tmp_path, channels=[{"type": "feishu", "app_id": "cli_test"}]
+            bot_data_path=tmp_path,
+            channels=[{"type": "feishu", "app_id": "cli_test"}],
+            ov_server=OpenVikingConfig(),
         ),
         SimpleNamespace(channels={provider.runtime_key(record()): channel}),
     )
@@ -465,7 +408,7 @@ async def test_reply_settings_persist_apply_immediately_and_keep_revision_guard(
     service.manager.bus = None
     service.manager.add_channel = lambda channel: None
     service.config.workspace_path = tmp_path
-    provider.install(service, persisted)
+    service.install(persisted)
     assert captured == [False]
 
 
@@ -486,7 +429,12 @@ async def test_recreated_connection_isolates_sessions_and_rejects_old_replies(
     monkeypatch.setattr(FeishuChannel, "send", delivery)
     bus = MessageBus()
     service = StudioService(
-        SimpleNamespace(bot_data_path=tmp_path, workspace_path=tmp_path, channels=[]),
+        SimpleNamespace(
+            bot_data_path=tmp_path,
+            workspace_path=tmp_path,
+            channels=[],
+            ov_server=OpenVikingConfig(),
+        ),
         ChannelManager(bus),
     )
 

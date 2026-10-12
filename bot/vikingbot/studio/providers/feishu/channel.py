@@ -17,9 +17,10 @@ def now():
 
 
 class StudioFeishuChannel(FeishuChannel):
-    def __init__(self, config, bus, *, record, store, **kwargs):
+    def __init__(self, config, bus, *, record, store, openviking_connection, **kwargs):
         super().__init__(config, bus, **kwargs)
         self.record = record
+        self.openviking_connection = openviking_connection
         self._session_prefix = f"studio:{record['id']}:"
         self.store = store
         self.verification = None
@@ -28,29 +29,6 @@ class StudioFeishuChannel(FeishuChannel):
         self.bot_open_id = record["bot_open_id"]
         self.last_error = None
         self.chat_names = {}
-
-    def _runtime_openviking_connection(self):
-        connection = dict(self.record["identity"])
-        ov_server = getattr(self._bot_config, "ov_server", None)
-        is_server_managed = getattr(ov_server, "is_server_managed", None)
-        get_api_key_source = getattr(ov_server, "get_api_key_source", None)
-        if (
-            ov_server is not None
-            and callable(is_server_managed)
-            and is_server_managed()
-            and str(getattr(ov_server, "effective_auth_mode", "") or "").strip().lower()
-            == "trusted"
-            and str(getattr(ov_server, "api_key_type", "") or "").strip().lower() == "root"
-            and callable(get_api_key_source)
-            and get_api_key_source() == "server.root_api_key"
-        ):
-            api_key = str(getattr(ov_server, "api_key", "") or "").strip()
-            if api_key:
-                # Keep the root credential in process memory. Studio persists only
-                # the selected account/user scope, never this server-owned key.
-                connection["api_key_type"] = "root"
-                connection["api_key"] = api_key
-        return connection
 
     async def start(self):
         from vikingbot.studio.providers.feishu.transport import run_connection
@@ -123,7 +101,6 @@ class StudioFeishuChannel(FeishuChannel):
         )
         if not inserted:
             return
-        connection = self._runtime_openviking_connection()
         # Partition peer memory by group/topic, never by the installing administrator.
         peer = "feishu-" + hashlib.sha256(chat_id.encode()).hexdigest()[:24]
         await self.bus.publish_inbound(
@@ -136,7 +113,7 @@ class StudioFeishuChannel(FeishuChannel):
                 need_reply=need_reply,
                 media=media or [],
                 metadata=metadata,
-                openviking_connection=connection,
+                openviking_connection=self.openviking_connection,
             )
         )
 
@@ -186,7 +163,7 @@ class StudioFeishuChannel(FeishuChannel):
             raise ValueError("Missing message scope")
         peer = "feishu-" + hashlib.sha256(msg.session_key.chat_id.encode()).hexdigest()[:24]
         client = await VikingClient.create(
-            connection=self._runtime_openviking_connection(),
+            connection=self.openviking_connection,
             actor_peer_id=peer,
             config=self._bot_config,
         )
