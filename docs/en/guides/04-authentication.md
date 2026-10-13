@@ -637,6 +637,8 @@ Once the auth plugin is initialized, dev-mode `/health` also returns the resolve
 curl http://localhost:1933/health
 ```
 
+Saving a Studio connection immediately invalidates pending discovery, role, and identity probes, including pending identity switches. Their results cannot overwrite the request client, stored connection, or UI even if they finish before React commits the new connection. Saving the same connection also starts a fresh probe cycle.
+
 ## Admin API Reference
 
 | Method | Endpoint | Role | Description |

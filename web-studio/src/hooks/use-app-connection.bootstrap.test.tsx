@@ -327,9 +327,14 @@ it.each(['trusted', 'api_key'] as const)(
   },
 )
 
-it.each(['discovery', 'data'] as const)(
-  'ignores an obsolete dev %s response after the target connection changes',
-  async (phase) => {
+it.each([
+  ['discovery', 'after target discovery'],
+  ['data', 'after target discovery'],
+  ['discovery', 'in the save batch'],
+  ['data', 'in the save batch'],
+] as const)(
+  'ignores an obsolete dev %s response completing %s',
+  async (phase, timing) => {
     let releaseDev: (() => void) | undefined
     const devUrl = await startHealthServer((req, res) => {
       if (phase === 'data' && req.headers['x-openviking-account']) {
@@ -374,14 +379,27 @@ it.each(['discovery', 'data'] as const)(
       accountId: 'tenant-b',
       userId: 'alice',
     }
-    act(() => current().saveConnection(target))
+    if (timing === 'in the save batch') {
+      await act(async () => {
+        current().saveConnection(target)
+        releaseDev!()
+        await obsoleteProbe
+        // Complete the old callback before this batch flushes effect cleanup.
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      })
+    } else {
+      act(() => current().saveConnection(target))
+      await waitFor(() => expect(current().serverMode).toBe('trusted'))
+      await act(async () => {
+        releaseDev!()
+        await obsoleteProbe
+      })
+    }
+    expect(current().connection).toEqual(target)
     await waitFor(() => expect(current().serverMode).toBe('trusted'))
-    await act(async () => {
-      releaseDev!()
-      await obsoleteProbe
-    })
     expect(current().serverMode).toBe('trusted')
     expect(current().connection).toEqual(target)
+    expect(ovClient.getOptions().baseUrl).toBe(target.baseUrl)
     expect(ovClient.getConnection()).toMatchObject({
       accountId: target.accountId,
       userId: target.userId,
@@ -389,5 +407,195 @@ it.each(['discovery', 'data'] as const)(
     expect(
       JSON.parse(localStorage.getItem('ov_console_connection') || '{}'),
     ).toEqual(target)
+  },
+)
+
+it('continues discovery when the same connection is saved in the response batch', async () => {
+  let releaseDev: (() => void) | undefined
+  const baseUrl = await startHealthServer((_req, res) => {
+    releaseDev = () =>
+      res.end(
+        JSON.stringify({
+          auth_mode: 'dev',
+          role: 'root',
+          account_id: 'default',
+          user_id: 'default',
+        }),
+      )
+  })
+  const { current } = renderConnection({
+    baseUrl,
+    accountId: 'legacy-account',
+    userId: 'claude',
+    apiKey: '',
+    adminApiKey: '',
+  })
+  await waitFor(() => expect(releaseDev).toBeDefined())
+  const obsoleteProbe = fetchServerHealth(baseUrl)
+  await act(async () => {
+    current().saveConnection({ ...current().connection })
+    releaseDev!()
+    await obsoleteProbe
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  })
+  await waitFor(() => {
+    expect(current().serverMode).toBe('dev')
+    expect(current().connection).toMatchObject({
+      baseUrl,
+      accountId: 'default',
+      userId: 'default',
+    })
+  })
+})
+
+it('ignores an old authenticated data identity completing in the save batch', async () => {
+  let releaseData: (() => void) | undefined
+  const oldUrl = await startHealthServer((req, res) => {
+    if (req.url === '/api/v1/admin/accounts') {
+      res.end(JSON.stringify({ status: 'ok', result: [] }))
+      return
+    }
+    if (req.headers['x-api-key'] === 'old-user-key') {
+      releaseData = () =>
+        res.end(
+          JSON.stringify({
+            auth_mode: 'api_key',
+            role: 'user',
+            account_id: 'old-team',
+            user_id: 'old-user',
+          }),
+        )
+      return
+    }
+    res.end(
+      JSON.stringify({
+        auth_mode: 'api_key',
+        role: 'root',
+        account_id: 'default',
+        user_id: 'default',
+      }),
+    )
+  })
+  const targetUrl = await startHealthServer((_req, res) => {
+    res.end(JSON.stringify({ auth_mode: 'trusted' }))
+  })
+  const { current } = renderConnection({
+    baseUrl: oldUrl,
+    accountId: 'legacy-account',
+    userId: 'claude',
+    apiKey: 'old-user-key',
+    adminApiKey: 'old-control-key',
+  })
+  await waitFor(() => expect(releaseData).toBeDefined())
+  const obsoleteProbe = fetchServerHealth(oldUrl, {
+    'X-API-Key': 'old-user-key',
+    'X-OpenViking-Account': 'legacy-account',
+    'X-OpenViking-User': 'claude',
+  })
+  const target = {
+    baseUrl: targetUrl,
+    accountId: 'tenant-b',
+    userId: 'alice',
+    apiKey: '',
+    adminApiKey: '',
+  }
+  await act(async () => {
+    current().saveConnection(target)
+    releaseData!()
+    await obsoleteProbe
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  })
+  expect(current().connection).toEqual(target)
+  expect(ovClient.getOptions().baseUrl).toBe(target.baseUrl)
+  expect(
+    JSON.parse(localStorage.getItem('ov_console_connection') || '{}'),
+  ).toEqual(target)
+})
+
+it.each([false, true])(
+  'completes an identity switch only if its connection is still current: save=%s',
+  async (saveNewConnection) => {
+    let releaseSwitch: (() => void) | undefined
+    let switchReleased = false
+    const oldUrl = await startHealthServer((req, res) => {
+      if (req.url === '/api/v1/admin/accounts') {
+        res.end(JSON.stringify({ status: 'ok', result: [] }))
+        return
+      }
+      if (req.headers['x-api-key'] === 'candidate-key') {
+        const completeSwitch = () =>
+          res.end(
+            JSON.stringify({
+              auth_mode: 'api_key',
+              role: 'user',
+              account_id: 'old-team',
+              user_id: 'selected-user',
+            }),
+          )
+        if (switchReleased) completeSwitch()
+        else {
+          releaseSwitch = () => {
+            switchReleased = true
+            completeSwitch()
+          }
+        }
+        return
+      }
+      res.end(
+        JSON.stringify({
+          auth_mode: 'api_key',
+          role: 'root',
+          account_id: 'default',
+          user_id: 'default',
+        }),
+      )
+    })
+    const targetUrl = await startHealthServer((_req, res) => {
+      res.end(JSON.stringify({ auth_mode: 'trusted' }))
+    })
+    const { current } = renderConnection({
+      baseUrl: oldUrl,
+      accountId: 'legacy-account',
+      userId: 'claude',
+      apiKey: '',
+      adminApiKey: 'old-control-key',
+    })
+    await waitFor(() => expect(current().connectionRole).toBe('root'))
+    const pendingSwitch = current().switchIdentity({
+      accountId: 'old-team',
+      userId: 'selected-user',
+      apiKey: 'candidate-key',
+    })
+    await waitFor(() => expect(releaseSwitch).toBeDefined())
+    const target = {
+      baseUrl: targetUrl,
+      accountId: 'tenant-b',
+      userId: 'alice',
+      apiKey: '',
+      adminApiKey: '',
+    }
+    const switched = {
+      ...current().connection,
+      accountId: 'old-team',
+      userId: 'selected-user',
+      apiKey: 'candidate-key',
+    }
+    await act(async () => {
+      if (saveNewConnection) current().saveConnection(target)
+      releaseSwitch!()
+      await pendingSwitch
+    })
+    const expected = saveNewConnection ? target : switched
+    expect(current().connection).toEqual(expected)
+    expect(ovClient.getOptions().baseUrl).toBe(expected.baseUrl)
+    expect(ovClient.getConnection()).toMatchObject({
+      accountId: expected.accountId,
+      userId: expected.userId,
+      apiKey: expected.apiKey,
+      adminApiKey: expected.adminApiKey,
+    })
+    expect(
+      JSON.parse(localStorage.getItem('ov_console_connection') || '{}'),
+    ).toEqual(expected)
   },
 )

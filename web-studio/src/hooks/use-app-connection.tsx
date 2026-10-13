@@ -508,6 +508,8 @@ export function AppConnectionProvider({
 }) {
   const queryClient = useQueryClient()
   const authPromptSuppressedUntilRef = React.useRef(0)
+  const connectionVersionRef = React.useRef(0)
+  const [connectionVersion, setConnectionVersion] = React.useState(0)
   const navigate = useNavigate()
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
@@ -546,9 +548,10 @@ export function AppConnectionProvider({
   }, [navigate, pathname])
 
   React.useEffect(() => {
+    if (connectionVersionRef.current !== connectionVersion) return
     applyConnection(connection, serverMode)
     persistConnection(connection)
-  }, [connection, serverMode])
+  }, [connection, connectionVersion, serverMode])
 
   React.useEffect(() => {
     let cancelled = false
@@ -558,7 +561,8 @@ export function AppConnectionProvider({
     const healthHeaders = createConnectionHealthHeaders(connection)
     void detectServerConnection(connection.baseUrl, healthHeaders).then(
       async (probe) => {
-        const isCancelled = () => cancelled
+        const isCancelled = () =>
+          cancelled || connectionVersionRef.current !== connectionVersion
         if (isCancelled()) return
         if (probe.mode === 'dev') {
           const dataHeaders = createConnectionHealthHeaders(connection, 'data')
@@ -600,12 +604,14 @@ export function AppConnectionProvider({
     connection.apiKey,
     connection.baseUrl,
     connection.userId,
+    connectionVersion,
     queryClient,
   ])
 
   React.useEffect(() => {
     let cancelled = false
-    const isCancelled = () => cancelled
+    const isCancelled = () =>
+      cancelled || connectionVersionRef.current !== connectionVersion
     const apiKey = connection.adminApiKey || connection.apiKey
     const roleProbe = resolveConnectionRoleProbeState({
       apiKey,
@@ -690,7 +696,7 @@ export function AppConnectionProvider({
         setConnectionRoleLoading(false)
       })
       .catch(() => {
-        if (!cancelled) {
+        if (!isCancelled()) {
           setConnectionRole('unknown')
           setConnectionRoleLoading(false)
         }
@@ -705,6 +711,7 @@ export function AppConnectionProvider({
     connection.apiKey,
     connection.baseUrl,
     connection.userId,
+    connectionVersion,
     queryClient,
     serverMode,
   ])
@@ -730,6 +737,9 @@ export function AppConnectionProvider({
 
   const value = React.useMemo<AppConnectionContextValue>(() => {
     const commitConnection = (next: ConnectionDraft) => {
+      // Retire old callbacks synchronously, before React flushes effect cleanup.
+      connectionVersionRef.current += 1
+      synchronizedRoleProbeRef.current = null
       authPromptSuppressedUntilRef.current =
         Date.now() + AUTH_PROMPT_SUPPRESSION_MS
       const nextMode =
@@ -740,6 +750,7 @@ export function AppConnectionProvider({
       queryClient.clear()
       setConnection(normalized)
       setServerMode(nextMode)
+      setConnectionVersion(connectionVersionRef.current)
     }
 
     return {
@@ -759,6 +770,8 @@ export function AppConnectionProvider({
         apiKey,
         userId,
       }) => {
+        const isCurrentConnection = () =>
+          connectionVersionRef.current === connectionVersion
         if (serverMode === 'dev' || serverMode === 'checking') {
           throw createConnectionError('identitySwitchUnsupported')
         }
@@ -770,6 +783,7 @@ export function AppConnectionProvider({
           userId,
         })
         const identity = await detectConnectionIdentity(requested, 'data')
+        if (!isCurrentConnection()) return
         const resolvedIdentity = resolveSwitchedIdentity(
           requested,
           identity,
@@ -786,6 +800,7 @@ export function AppConnectionProvider({
             to: '/filesystem',
           })
         }
+        if (!isCurrentConnection()) return
         commitConnection({
           ...requested,
           ...resolvedIdentity,
@@ -802,6 +817,7 @@ export function AppConnectionProvider({
     }
   }, [
     connection,
+    connectionVersion,
     connectionRole,
     generatedCredential,
     isConnectionRoleLoading,
