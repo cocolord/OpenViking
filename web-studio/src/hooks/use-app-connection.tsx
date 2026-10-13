@@ -4,6 +4,7 @@ import { useNavigate, useRouterState } from '@tanstack/react-router'
 
 import i18n from '#/i18n'
 import { fetchAdminAccounts } from '#/lib/admin'
+import { DEFAULT_ACCOUNT_ID, DEFAULT_USER_ID } from '#/lib/admin-options'
 import { isOvClientError, ovClient } from '#/lib/ov-client'
 
 import {
@@ -164,6 +165,25 @@ function normalizeConnectionDraft(
   }
 }
 
+function resolveConnectionForServerMode(
+  connection: ConnectionDraft,
+  serverMode: ServerMode,
+): ConnectionDraft {
+  if (
+    serverMode !== 'dev' ||
+    (connection.accountId === DEFAULT_ACCOUNT_ID &&
+      connection.userId === DEFAULT_USER_ID)
+  ) {
+    return connection
+  }
+
+  return {
+    ...connection,
+    accountId: DEFAULT_ACCOUNT_ID,
+    userId: DEFAULT_USER_ID,
+  }
+}
+
 function hashSecret(value: string): string {
   let hash = 0x811c9dc5
   for (let index = 0; index < value.length; index += 1) {
@@ -286,7 +306,10 @@ export function synchronizeConnectionRuntime(
   connection: ConnectionDraft,
   serverMode: ServerMode,
 ): ConnectionDraft {
-  const normalized = normalizeConnectionDraft(connection)
+  const normalized = resolveConnectionForServerMode(
+    normalizeConnectionDraft(connection),
+    serverMode,
+  )
   // Keep the imperative request client ahead of the React tree. Identity
   // changes remount route content, whose child effects may start requests
   // before this provider's passive effects run.
@@ -547,6 +570,16 @@ export function AppConnectionProvider({
       createConnectionHealthHeaders(connection),
     ).then((mode) => {
       if (!cancelled) {
+        if (mode === 'dev') {
+          const next = synchronizeConnectionRuntime(connection, mode)
+          if (
+            next.accountId !== connection.accountId ||
+            next.userId !== connection.userId
+          ) {
+            queryClient.clear()
+            setConnection(next)
+          }
+        }
         setServerMode(mode)
       }
     })
@@ -560,6 +593,7 @@ export function AppConnectionProvider({
     connection.apiKey,
     connection.baseUrl,
     connection.userId,
+    queryClient,
   ])
 
   React.useEffect(() => {

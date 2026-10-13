@@ -277,6 +277,29 @@ describe('synchronizeConnectionRuntime', () => {
       userId: 'bob',
     })
   })
+
+  it('uses the server default identity for dev mode consumers', () => {
+    const next = synchronizeConnectionRuntime(
+      {
+        accountId: 'legacy-account',
+        adminApiKey: '',
+        apiKey: '',
+        baseUrl: 'http://localhost:1933',
+        userId: 'claude',
+      },
+      'dev',
+    )
+
+    expect(next).toMatchObject({
+      accountId: 'default',
+      userId: 'default',
+    })
+    expect(ovClient.getConnection()).toMatchObject({
+      accountId: 'default',
+      identityHeaders: false,
+      userId: 'default',
+    })
+  })
 })
 
 describe('resolveConnectionRoleProbeState', () => {

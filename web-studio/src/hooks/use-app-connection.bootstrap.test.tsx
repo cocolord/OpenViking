@@ -5,7 +5,12 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, expect, it, vi } from 'vitest'
 
-import { AppConnectionProvider, useAppConnection } from './use-app-connection'
+import {
+  AppConnectionProvider,
+  createIdentityScopeKey,
+  useAppConnection,
+} from './use-app-connection'
+import { ovClient } from '#/lib/ov-client'
 
 vi.mock('@tanstack/react-router', () => ({
   useNavigate: () => vi.fn(),
@@ -103,3 +108,90 @@ it.each(['', 'root-key'])(
     }
   },
 )
+
+it('normalizes a persisted identity when a dev server is detected', async () => {
+  let current: ReturnType<typeof useAppConnection> | undefined
+
+  function ConnectionSnapshot() {
+    current = useAppConnection()
+    return null
+  }
+
+  const server = createServer((req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*')
+    res.setHeader(
+      'Access-Control-Allow-Headers',
+      'X-OpenViking-Account, X-OpenViking-User, X-API-Key',
+    )
+    if (req.method === 'OPTIONS') {
+      res.end()
+      return
+    }
+    res.setHeader('Content-Type', 'application/json')
+    res.end(
+      JSON.stringify({
+        status: 'ok',
+        auth_mode: 'dev',
+        role: 'root',
+        account_id: 'default',
+        user_id: 'default',
+      }),
+    )
+  })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const address = server.address() as { port: number }
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+  const clearSpy = vi.spyOn(queryClient, 'clear')
+  localStorage.setItem(
+    'ov_console_connection',
+    JSON.stringify({
+      baseUrl: `http://127.0.0.1:${address.port}`,
+      accountId: 'legacy-account',
+      userId: 'claude',
+      apiKey: '',
+      adminApiKey: '',
+    }),
+  )
+
+  try {
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AppConnectionProvider>
+          <ConnectionSnapshot />
+        </AppConnectionProvider>
+      </QueryClientProvider>,
+    )
+
+    await waitFor(() => expect(current?.serverMode).toBe('dev'))
+    await waitFor(() =>
+      expect(current?.connection).toMatchObject({
+        accountId: 'default',
+        userId: 'default',
+      }),
+    )
+
+    expect(ovClient.getConnection()).toMatchObject({
+      accountId: 'default',
+      identityHeaders: false,
+      userId: 'default',
+    })
+    expect(current?.identityScopeKey).toBe(
+      createIdentityScopeKey(current!.connection, 'dev'),
+    )
+    expect(
+      JSON.parse(localStorage.getItem('ov_console_connection') || '{}'),
+    ).toMatchObject({
+      accountId: 'default',
+      userId: 'default',
+    })
+    expect(clearSpy).toHaveBeenCalledTimes(1)
+  } finally {
+    cleanup()
+    queryClient.clear()
+    localStorage.removeItem('ov_console_connection')
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+})
