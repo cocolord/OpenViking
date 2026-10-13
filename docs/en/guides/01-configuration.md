@@ -1217,11 +1217,11 @@ Configuration for session intent analysis and context assembly timeouts.
 |-----------|------|-------------|---------|
 | `enable_intent` | bool | Run intent analysis and query planning when `search()` receives a `session_id`. | `true` |
 
-The `mode="context"` assembly face on `/search` uses two timeout fuses:
+Session intent analysis in ordinary `search()` and query expansion in `mode="context"` share `recall_intent_timeout_s`. Context digest rewriting uses a separate timeout:
 
 | Parameter | Type | Description | Default |
 |-----------|------|-------------|---------|
-| `recall_intent_timeout_s` | float | Timeout for session-aware query expansion; on timeout the original user query is used | `5.0` |
+| `recall_intent_timeout_s` | float | Timeout for session intent analysis and context query expansion; on timeout or failure the original user query is used | `5.0` |
 | `recall_rewrite_timeout_s` | float | Timeout for the digest rewrite; on timeout `digest` is empty and `rendered` is returned as usual | `30.0` |
 
 Query expansion requires a `session_id` with content and intent analysis enabled; rewriting requires `rewrite`. Each model call has its own timeout. On failure, retrieval falls back to the original query or the unrevised result.

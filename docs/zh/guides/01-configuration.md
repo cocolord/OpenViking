@@ -1208,11 +1208,11 @@ Jev 适配器将 query 和候选文档作为共享的 System One `state`，支�
 |------|------|------|--------|
 | `enable_intent` | bool | `search()` 收到 `session_id` 时是否执行意图分析和查询规划。 | `true` |
 
-`/search` 的 `mode="context"` 组装面用到两个超时熔断：
+普通 `search()` 的会话意图分析和 `mode="context"` 的查询扩展共用 `recall_intent_timeout_s`；上下文 digest 重写使用独立的超时配置：
 
 | 参数 | 类型 | 说明 | 默认值 |
 |------|------|------|--------|
-| `recall_intent_timeout_s` | float | 会话感知查询扩展的超时；超时后回退为用户原查询 | `5.0` |
+| `recall_intent_timeout_s` | float | 会话意图分析和上下文查询扩展的超时；超时或失败后回退为用户原查询 | `5.0` |
 | `recall_rewrite_timeout_s` | float | digest 重写的超时；超时后 `digest` 为空并照常返回 `rendered` | `30.0` |
 
 查询扩展需要传入有内容的 `session_id` 并启用意图分析，重写需要传入 `rewrite`。这些模型调用受各自超时限制；失败后回退到未扩展的查询或未重写的结果。
