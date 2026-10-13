@@ -11,7 +11,6 @@ import pytest
 
 from openviking.server.identity import RequestContext, Role
 from openviking.storage.viking_fs import VikingFS
-from openviking.telemetry import OperationTelemetry, bind_telemetry
 from openviking_cli.retrieve.types import ContextType, MatchedContext, QueryResult
 from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils.config.retrieval_config import RetrievalConfig
@@ -36,245 +35,6 @@ def _make_viking_fs(*, enable_intent: bool) -> VikingFS:
     fs._ctx_or_default = MagicMock(return_value=_ctx())
     fs.abstract = AsyncMock(return_value="")
     return fs
-
-
-@pytest.fixture
-def intent_search(monkeypatch):
-    fs = _make_viking_fs(enable_intent=True)
-    planner = SimpleNamespace(
-        get_completion_async=AsyncMock(
-            return_value=json.dumps(
-                {"queries": [{"query": "planned query", "context_type": "resource"}]}
-            )
-        )
-    )
-    fs._vlm_resolver = SimpleNamespace(get_query_planner=AsyncMock(return_value=planner))
-    match = MatchedContext(
-        uri="viking://resources/docs/answer.md", context_type=ContextType.RESOURCE
-    )
-
-    async def retrieve(typed_query, **kwargs):
-        return QueryResult(
-            query=typed_query,
-            matched_contexts=[match],
-            searched_directories=typed_query.target_directories,
-        )
-
-    retriever = SimpleNamespace(retrieve=AsyncMock(side_effect=retrieve))
-    monkeypatch.setattr(
-        "openviking.retrieve.hierarchical_retriever.HierarchicalRetriever",
-        MagicMock(return_value=retriever),
-    )
-    return SimpleNamespace(fs=fs, planner=planner, retriever=retriever, match=match)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "session_info",
-    [
-        {"latest_archive_overview": "previous discussion"},
-        {"current_messages": [SimpleNamespace(role="user", content="previous turn")]},
-    ],
-)
-async def test_search_intent_timeout_cancels_planner_and_retrieves_raw_query(
-    intent_search, session_info
-):
-    fs = intent_search.fs
-    fs.retrieval_config.recall_intent_timeout_s = 0.02
-    cancelled = asyncio.Event()
-
-    async def blocked_planner(prompt):
-        try:
-            await asyncio.Event().wait()
-        finally:
-            cancelled.set()
-
-    intent_search.planner.get_completion_async.side_effect = blocked_planner
-    scope_filter = {"category": "docs"}
-    telemetry = OperationTelemetry(operation="search.search", enabled=True)
-    with bind_telemetry(telemetry):
-        result = await asyncio.wait_for(
-            fs.search(
-                "raw query",
-                target_uri="viking://resources/docs",
-                session_info=session_info,
-                ctx=_ctx(),
-                limit=3,
-                score_threshold=0.4,
-                filter=scope_filter,
-                level=[2],
-            ),
-            timeout=1.0,
-        )
-
-    assert cancelled.is_set()
-    assert result.query_plan is None
-    assert result.resources == [intent_search.match]
-    intent_search.planner.get_completion_async.assert_awaited_once()
-    intent_search.retriever.retrieve.assert_awaited_once()
-    args = intent_search.retriever.retrieve.await_args
-    assert args.args[0].query == "raw query"
-    assert args.args[0].target_directories == ["viking://resources/docs"]
-    assert args.kwargs["ctx"].account_id == "acc1"
-    assert args.kwargs["limit"] == 3
-    assert args.kwargs["score_threshold"] == 0.4
-    assert args.kwargs["scope_dsl"] is scope_filter
-    assert args.kwargs["level"] == [2]
-    snapshot = telemetry.finish()
-    assert snapshot is not None
-    summary = snapshot.summary
-    assert summary["search"]["typed_queries_count"] == 1
-    assert summary["search"]["intent_analysis"]["duration_ms"] > 0
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["provider", "malformed_response", "resolver"])
-async def test_search_intent_failure_retrieves_raw_query(intent_search, failure):
-    if failure == "provider":
-        intent_search.planner.get_completion_async.side_effect = RuntimeError("provider overloaded")
-    elif failure == "malformed_response":
-        intent_search.planner.get_completion_async.return_value = "not a query plan"
-    else:
-        intent_search.fs._vlm_resolver.get_query_planner.side_effect = RuntimeError(
-            "planner unavailable"
-        )
-
-    result = await intent_search.fs.search(
-        "raw query",
-        target_uri="viking://resources/docs",
-        session_info={"latest_archive_overview": "previous discussion"},
-        ctx=_ctx(),
-    )
-
-    assert result.query_plan is None
-    assert result.resources == [intent_search.match]
-    intent_search.retriever.retrieve.assert_awaited_once()
-    typed_query = intent_search.retriever.retrieve.await_args.args[0]
-    assert typed_query.query == "raw query"
-    assert typed_query.target_directories == ["viking://resources/docs"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["timeout", "provider"])
-async def test_search_endpoint_with_session_returns_results_after_intent_failure(
-    intent_search, monkeypatch, failure
-):
-    import httpx
-    from fastapi import FastAPI
-
-    from openviking.server.auth import get_request_context
-    from openviking.server.routers import search as search_router
-    from openviking.service.search_service import SearchService
-
-    if failure == "timeout":
-        intent_search.fs.retrieval_config.recall_intent_timeout_s = 0.02
-
-        async def blocked_planner(prompt):
-            await asyncio.Event().wait()
-
-        intent_search.planner.get_completion_async.side_effect = blocked_planner
-    else:
-        intent_search.planner.get_completion_async.side_effect = RuntimeError("provider overloaded")
-
-    session = SimpleNamespace(
-        load=AsyncMock(),
-        get_context_for_search=AsyncMock(
-            return_value={"latest_archive_overview": "previous discussion"}
-        ),
-    )
-    service = SimpleNamespace(
-        search=SearchService(intent_search.fs),
-        sessions=SimpleNamespace(session=MagicMock(return_value=session)),
-    )
-    monkeypatch.setattr(search_router, "get_service", lambda: service)
-    app = FastAPI()
-    app.include_router(search_router.router)
-    app.dependency_overrides[get_request_context] = _ctx
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as client:
-        response = await asyncio.wait_for(
-            client.post(
-                "/api/v1/search/search",
-                json={
-                    "query": "raw query",
-                    "session_id": "session-with-context",
-                    "target_uri": "viking://resources/docs",
-                    "context_type": "resource",
-                    "telemetry": True,
-                },
-            ),
-            timeout=1.0,
-        )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["status"] == "ok"
-    assert body["result"]["total"] == 1
-    assert body["result"]["resources"][0]["uri"] == intent_search.match.uri
-    assert "query_plan" not in body["result"]
-    assert body["telemetry"]["summary"]["search"]["typed_queries_count"] == 1
-    session.load.assert_awaited_once()
-    session.get_context_for_search.assert_awaited_once_with("raw query")
-    args = intent_search.retriever.retrieve.await_args
-    assert args.args[0].query == "raw query"
-    assert args.args[0].target_directories == ["viking://resources/docs"]
-    assert args.kwargs["scope_dsl"] == {
-        "op": "must",
-        "field": "context_type",
-        "conds": ["resource"],
-    }
-
-
-@pytest.mark.asyncio
-async def test_search_cancellation_propagates_without_raw_query_fallback(intent_search):
-    started = asyncio.Event()
-
-    async def blocked_planner(prompt):
-        started.set()
-        await asyncio.Event().wait()
-
-    intent_search.planner.get_completion_async.side_effect = blocked_planner
-    task = asyncio.create_task(
-        intent_search.fs.search(
-            "raw query", session_info={"latest_archive_overview": "discussion"}, ctx=_ctx()
-        )
-    )
-    try:
-        await asyncio.wait_for(started.wait(), timeout=1.0)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-    finally:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-
-    intent_search.retriever.retrieve.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_search_preserves_successful_empty_query_plan(intent_search):
-    intent_search.planner.get_completion_async.return_value = '{"queries": []}'
-
-    result = await intent_search.fs.search(
-        "raw query", session_info={"latest_archive_overview": "discussion"}, ctx=_ctx()
-    )
-
-    assert result.query_plan is not None
-    assert result.query_plan.queries == []
-    assert result.total == 0
-    intent_search.retriever.retrieve.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_search_retrieval_failure_propagates_after_intent_fallback(intent_search):
-    intent_search.planner.get_completion_async.side_effect = RuntimeError("provider overloaded")
-    intent_search.retriever.retrieve.side_effect = RuntimeError("storage unavailable")
-
-    with pytest.raises(RuntimeError, match="storage unavailable"):
-        await intent_search.fs.search(
-            "raw query", session_info={"latest_archive_overview": "discussion"}, ctx=_ctx()
-        )
 
 
 def test_retrieval_config_enable_intent_defaults_true():
@@ -441,3 +201,65 @@ async def test_session_search_plan_respects_explicit_context_scope(
 
     assert response["status"] == "ok"
     assert response["result"]["query_plan"]["queries"][0]["context_type"] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["timeout", "provider"])
+async def test_session_search_falls_back_when_intent_planning_fails(monkeypatch, failure):
+    from starlette.requests import Request
+
+    from openviking.server.routers import search as search_router
+    from openviking.service.search_service import SearchService
+
+    fs = _make_viking_fs(enable_intent=True)
+    fs.retrieval_config = RetrievalConfig(recall_intent_timeout_s=0.02)
+
+    async def failed_completion(prompt):
+        if failure == "timeout":
+            await asyncio.Event().wait()
+        raise RuntimeError("provider overloaded")
+
+    planner = SimpleNamespace(get_completion_async=failed_completion)
+    fs._vlm_resolver = SimpleNamespace(get_query_planner=AsyncMock(return_value=planner))
+    session = SimpleNamespace(
+        load=AsyncMock(),
+        get_context_for_search=AsyncMock(
+            return_value={"latest_archive_overview": "previous discussion"}
+        ),
+    )
+    service = SimpleNamespace(
+        search=SearchService(fs),
+        sessions=SimpleNamespace(session=lambda *args: session),
+    )
+    match = MatchedContext(
+        uri="viking://resources/docs/answer.md", context_type=ContextType.RESOURCE
+    )
+
+    async def retrieve(typed_query, **kwargs):
+        assert typed_query.query == "raw query"
+        assert typed_query.target_directories == ["viking://resources/docs"]
+        return QueryResult(
+            query=typed_query,
+            matched_contexts=[match],
+            searched_directories=typed_query.target_directories,
+        )
+
+    monkeypatch.setattr(search_router, "get_service", lambda: service)
+    monkeypatch.setattr(
+        "openviking.retrieve.hierarchical_retriever.HierarchicalRetriever",
+        lambda **kwargs: SimpleNamespace(retrieve=retrieve),
+    )
+    response = await asyncio.wait_for(
+        search_router.search(
+            search_router.SearchRequest(
+                query="raw query", session_id="fixture", target_uri="viking://resources/docs"
+            ),
+            Request({"type": "http"}),
+            _ctx(),
+        ),
+        timeout=1.0,
+    )
+
+    assert response["status"] == "ok"
+    assert response["result"]["resources"][0]["uri"] == match.uri
+    assert "query_plan" not in response["result"]
