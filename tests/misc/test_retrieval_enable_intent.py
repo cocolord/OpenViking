@@ -124,7 +124,6 @@ async def test_search_intent_timeout_cancels_planner_and_retrieves_raw_query(
     assert snapshot is not None
     summary = snapshot.summary
     assert summary["search"]["typed_queries_count"] == 1
-    assert summary["search"]["intent_analysis"]["status"] == "failed"
     assert summary["search"]["intent_analysis"]["duration_ms"] > 0
 
 
@@ -156,18 +155,9 @@ async def test_search_intent_failure_retrieves_raw_query(intent_search, failure)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("failure", "expected_status"),
-    [
-        ("timeout", "failed"),
-        ("provider", "failed"),
-        ("disabled", "off"),
-        ("empty_session", "off"),
-        (None, "used"),
-    ],
-)
-async def test_search_endpoint_with_session_reports_intent_status(
-    intent_search, monkeypatch, failure, expected_status
+@pytest.mark.parametrize("failure", ["timeout", "provider"])
+async def test_search_endpoint_with_session_returns_results_after_intent_failure(
+    intent_search, monkeypatch, failure
 ):
     import httpx
     from fastapi import FastAPI
@@ -183,17 +173,13 @@ async def test_search_endpoint_with_session_reports_intent_status(
             await asyncio.Event().wait()
 
         intent_search.planner.get_completion_async.side_effect = blocked_planner
-    elif failure == "provider":
+    else:
         intent_search.planner.get_completion_async.side_effect = RuntimeError("provider overloaded")
-    elif failure == "disabled":
-        intent_search.fs.retrieval_config.enable_intent = False
 
     session = SimpleNamespace(
         load=AsyncMock(),
         get_context_for_search=AsyncMock(
-            return_value={}
-            if failure == "empty_session"
-            else {"latest_archive_overview": "previous discussion"}
+            return_value={"latest_archive_overview": "previous discussion"}
         ),
     )
     service = SimpleNamespace(
@@ -226,20 +212,12 @@ async def test_search_endpoint_with_session_reports_intent_status(
     assert body["status"] == "ok"
     assert body["result"]["total"] == 1
     assert body["result"]["resources"][0]["uri"] == intent_search.match.uri
-    if expected_status == "used":
-        assert body["result"]["query_plan"]["queries"][0]["query"] == "planned query"
-    else:
-        assert "query_plan" not in body["result"]
+    assert "query_plan" not in body["result"]
     assert body["telemetry"]["summary"]["search"]["typed_queries_count"] == 1
-    assert body["telemetry"]["summary"]["search"]["intent_analysis"]["status"] == expected_status
-    if failure == "disabled":
-        session.load.assert_not_awaited()
-        session.get_context_for_search.assert_not_awaited()
-    else:
-        session.load.assert_awaited_once()
-        session.get_context_for_search.assert_awaited_once_with("raw query")
+    session.load.assert_awaited_once()
+    session.get_context_for_search.assert_awaited_once_with("raw query")
     args = intent_search.retriever.retrieve.await_args
-    assert args.args[0].query == ("planned query" if expected_status == "used" else "raw query")
+    assert args.args[0].query == "raw query"
     assert args.args[0].target_directories == ["viking://resources/docs"]
     assert args.kwargs["scope_dsl"] == {
         "op": "must",

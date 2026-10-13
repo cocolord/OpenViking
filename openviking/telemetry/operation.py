@@ -481,15 +481,12 @@ class TelemetrySummaryBuilder:
             }
 
         if cls._has_metric_prefix("search", counters, gauges):
-            search_summary: Dict[str, Any] = {
+            search_summary = {
                 public_key: {
                     "duration_ms": cls._f(gauges.get(metric_key), 0.0),
                 }
                 for public_key, metric_key in cls._SEARCH_DURATION_KEYS.items()
             }
-            intent_status = gauges.get("search.intent_analysis.status")
-            if intent_status is not None:
-                search_summary["intent_analysis"]["status"] = str(intent_status)
             typed_queries_count = gauges.get("search.typed_queries_count")
             if typed_queries_count is not None:
                 search_summary["typed_queries_count"] = cls._i(typed_queries_count, 0)
