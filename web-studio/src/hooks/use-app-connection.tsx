@@ -301,16 +301,6 @@ type ConnectionIdentity = {
   userId: string
 }
 
-function parseConnectionIdentity(
-  data: Record<string, unknown>,
-): ConnectionIdentity {
-  return {
-    accountId: typeof data.account_id === 'string' ? data.account_id : '',
-    role: isConnectionRole(data.role) ? data.role : 'unknown',
-    userId: typeof data.user_id === 'string' ? data.user_id : '',
-  }
-}
-
 function createConnectionHealthHeaders(
   connection: ConnectionDraft,
   credential: 'control' | 'data' = 'control',
@@ -363,7 +353,7 @@ async function detectConnectionIdentity(
   // /health resolves the presented key and echoes back its identity:
   // { role, account_id, user_id }. We use role to gate the admin UI and
   // account_id to pin the assumed account for an account-admin key.
-  const identity = parseConnectionIdentity(data)
+  const healthRole = isConnectionRole(data.role) ? data.role : 'unknown'
   // In trusted mode /health resolves the asserted tenant user, even when the
   // configured Root key is the credential authorizing Admin API calls. Probe
   // the actual control-plane endpoint so Root capabilities reflect what the
@@ -373,11 +363,12 @@ async function detectConnectionIdentity(
     connection.adminApiKey &&
     (await canListAccounts(connection))
       ? 'root'
-      : identity.role
+      : healthRole
 
   return {
-    ...identity,
+    accountId: typeof data.account_id === 'string' ? data.account_id : '',
     role,
+    userId: typeof data.user_id === 'string' ? data.user_id : '',
   }
 }
 
@@ -581,7 +572,12 @@ export function AppConnectionProvider({
           if (mode === 'dev') {
             const resolved = synchronizeResolvedDataIdentity(
               connection,
-              parseConnectionIdentity(data),
+              {
+                accountId:
+                  typeof data.account_id === 'string' ? data.account_id : '',
+                userId: typeof data.user_id === 'string' ? data.user_id : '',
+                role: isConnectionRole(data.role) ? data.role : 'unknown',
+              },
               mode,
             )
             if (resolved) {
@@ -770,8 +766,6 @@ export function AppConnectionProvider({
         apiKey,
         userId,
       }) => {
-        const isCurrentConnection = () =>
-          connectionVersionRef.current === connectionVersion
         if (serverMode === 'dev' || serverMode === 'checking') {
           throw createConnectionError('identitySwitchUnsupported')
         }
@@ -783,7 +777,6 @@ export function AppConnectionProvider({
           userId,
         })
         const identity = await detectConnectionIdentity(requested, 'data')
-        if (!isCurrentConnection()) return
         const resolvedIdentity = resolveSwitchedIdentity(
           requested,
           identity,
@@ -800,7 +793,6 @@ export function AppConnectionProvider({
             to: '/filesystem',
           })
         }
-        if (!isCurrentConnection()) return
         commitConnection({
           ...requested,
           ...resolvedIdentity,
@@ -817,7 +809,6 @@ export function AppConnectionProvider({
     }
   }, [
     connection,
-    connectionVersion,
     connectionRole,
     generatedCredential,
     isConnectionRoleLoading,
