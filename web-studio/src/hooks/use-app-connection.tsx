@@ -554,25 +554,42 @@ export function AppConnectionProvider({
     let cancelled = false
 
     setServerMode('checking')
-    // Anonymous discovery matches dev data requests, which omit identity
-    // headers. Credential-based role probes run separately after discovery.
-    void detectServerConnection(connection.baseUrl).then(({ mode, data }) => {
-      if (!cancelled) {
-        if (mode === 'dev') {
-          const resolved = synchronizeResolvedDataIdentity(
-            connection,
-            parseConnectionIdentity(data),
-            mode,
-          )
-          if (resolved) {
-            const next = synchronizeConnectionRuntime(resolved, mode)
-            queryClient.clear()
-            setConnection(next)
+    // Keep configured credentials for gateways that also protect /health.
+    const healthHeaders = createConnectionHealthHeaders(connection)
+    void detectServerConnection(connection.baseUrl, healthHeaders).then(
+      async (probe) => {
+        const isCancelled = () => cancelled
+        if (isCancelled()) return
+        if (probe.mode === 'dev') {
+          const dataHeaders = createConnectionHealthHeaders(connection, 'data')
+          // Match dev data requests: retain their credential, omit asserted IDs.
+          delete dataHeaders['X-OpenViking-Account']
+          delete dataHeaders['X-OpenViking-User']
+          if (JSON.stringify(dataHeaders) !== JSON.stringify(healthHeaders)) {
+            probe = await detectServerConnection(
+              connection.baseUrl,
+              dataHeaders,
+            )
           }
         }
-        setServerMode(mode)
-      }
-    })
+        const { mode, data } = probe
+        if (!isCancelled()) {
+          if (mode === 'dev') {
+            const resolved = synchronizeResolvedDataIdentity(
+              connection,
+              parseConnectionIdentity(data),
+              mode,
+            )
+            if (resolved) {
+              const next = synchronizeConnectionRuntime(resolved, mode)
+              queryClient.clear()
+              setConnection(next)
+            }
+          }
+          setServerMode(mode)
+        }
+      },
+    )
 
     return () => {
       cancelled = true

@@ -199,10 +199,66 @@ it.each([
       JSON.parse(localStorage.getItem('ov_console_connection') || '{}'),
     ).toMatchObject(identity)
     expect(clearSpy).toHaveBeenCalledTimes(missingIdentity ? 0 : 1)
-    expect(observed).toHaveLength(1)
-    expect(observed[0]).not.toHaveProperty('x-api-key')
-    expect(observed[0]).not.toHaveProperty('x-openviking-account')
-    expect(observed[0]).not.toHaveProperty('x-openviking-user')
+    if (!apiKey) expect(observed).toHaveLength(1)
+    expect(
+      observed.some(
+        (headers) =>
+          headers['x-api-key'] === (apiKey || undefined) &&
+          !headers['x-openviking-account'] &&
+          !headers['x-openviking-user'],
+      ),
+    ).toBe(true)
+  },
+)
+
+it.each(['api_key', 'trusted', 'dev'] as const)(
+  'keeps configured credentials when a gateway protects health in %s mode',
+  async (mode) => {
+    const keys: Array<string | undefined> = []
+    const apiKey = 'gateway-user-key'
+    const adminApiKey = mode === 'dev' ? 'gateway-control-key' : ''
+    const baseUrl = await startHealthServer((req, res) => {
+      const key = req.headers['x-api-key'] as string | undefined
+      keys.push(key)
+      if (key !== apiKey && (!adminApiKey || key !== adminApiKey)) {
+        res.statusCode = 401
+        res.end(JSON.stringify({ error: { code: 'UNAUTHENTICATED' } }))
+        return
+      }
+      res.end(
+        JSON.stringify({
+          auth_mode: mode,
+          role: mode === 'dev' ? 'root' : 'user',
+          account_id:
+            mode === 'dev'
+              ? req.headers['x-openviking-account'] || 'default'
+              : 'tenant-a',
+          user_id:
+            mode === 'dev'
+              ? req.headers['x-openviking-user'] || 'default'
+              : 'alice',
+        }),
+      )
+    })
+    const { current } = renderConnection({
+      baseUrl,
+      accountId: 'tenant-a',
+      userId: 'alice',
+      apiKey,
+      adminApiKey,
+    })
+    await waitFor(() => {
+      expect(current().serverMode).toBe(mode)
+      expect(current().connectionRole).toBe(mode === 'dev' ? 'root' : 'user')
+      expect(current().connection).toMatchObject(
+        mode === 'dev'
+          ? { accountId: 'default', userId: 'default' }
+          : { accountId: 'tenant-a', userId: 'alice' },
+      )
+    })
+    expect(keys).not.toContain(undefined)
+    expect(keys).toContain(apiKey)
+    if (adminApiKey) expect(keys[0]).toBe(adminApiKey)
   },
 )
 
@@ -271,50 +327,67 @@ it.each(['trusted', 'api_key'] as const)(
   },
 )
 
-it('ignores an obsolete dev identity response after the target connection changes', async () => {
-  let releaseDev: (() => void) | undefined
-  const devUrl = await startHealthServer((_req, res) => {
-    releaseDev = () =>
-      res.end(
-        JSON.stringify({
-          auth_mode: 'dev',
-          role: 'root',
-          account_id: 'old-team',
-          user_id: 'old-user',
-        }),
-      )
-  })
-  const targetUrl = await startHealthServer((_req, res) => {
-    res.end(JSON.stringify({ auth_mode: 'trusted' }))
-  })
-  const { current } = renderConnection({
-    baseUrl: devUrl,
-    accountId: 'legacy-account',
-    userId: 'claude',
-    apiKey: '',
-    adminApiKey: '',
-  })
-  await waitFor(() => expect(releaseDev).toBeDefined())
-  const obsoleteProbe = fetchServerHealth(devUrl)
-  const target = {
-    ...current().connection,
-    baseUrl: targetUrl,
-    accountId: 'tenant-b',
-    userId: 'alice',
-  }
-  act(() => current().saveConnection(target))
-  await waitFor(() => expect(current().serverMode).toBe('trusted'))
-  await act(async () => {
-    releaseDev!()
-    await obsoleteProbe
-  })
-  expect(current().serverMode).toBe('trusted')
-  expect(current().connection).toEqual(target)
-  expect(ovClient.getConnection()).toMatchObject({
-    accountId: target.accountId,
-    userId: target.userId,
-  })
-  expect(
-    JSON.parse(localStorage.getItem('ov_console_connection') || '{}'),
-  ).toEqual(target)
-})
+it.each(['discovery', 'data'] as const)(
+  'ignores an obsolete dev %s response after the target connection changes',
+  async (phase) => {
+    let releaseDev: (() => void) | undefined
+    const devUrl = await startHealthServer((req, res) => {
+      if (phase === 'data' && req.headers['x-openviking-account']) {
+        res.end(
+          JSON.stringify({
+            auth_mode: 'dev',
+            role: 'root',
+            account_id: req.headers['x-openviking-account'],
+            user_id: req.headers['x-openviking-user'],
+          }),
+        )
+        return
+      }
+      releaseDev = () =>
+        res.end(
+          JSON.stringify({
+            auth_mode: 'dev',
+            role: 'root',
+            account_id: 'old-team',
+            user_id: 'old-user',
+          }),
+        )
+    })
+    const targetUrl = await startHealthServer((_req, res) => {
+      res.end(JSON.stringify({ auth_mode: 'trusted' }))
+    })
+    const { current } = renderConnection({
+      baseUrl: devUrl,
+      accountId: 'legacy-account',
+      userId: 'claude',
+      apiKey: phase === 'data' ? 'old-key' : '',
+      adminApiKey: '',
+    })
+    await waitFor(() => expect(releaseDev).toBeDefined())
+    const obsoleteProbe = fetchServerHealth(
+      devUrl,
+      phase === 'data' ? { 'X-API-Key': 'old-key' } : {},
+    )
+    const target = {
+      ...current().connection,
+      baseUrl: targetUrl,
+      accountId: 'tenant-b',
+      userId: 'alice',
+    }
+    act(() => current().saveConnection(target))
+    await waitFor(() => expect(current().serverMode).toBe('trusted'))
+    await act(async () => {
+      releaseDev!()
+      await obsoleteProbe
+    })
+    expect(current().serverMode).toBe('trusted')
+    expect(current().connection).toEqual(target)
+    expect(ovClient.getConnection()).toMatchObject({
+      accountId: target.accountId,
+      userId: target.userId,
+    })
+    expect(
+      JSON.parse(localStorage.getItem('ov_console_connection') || '{}'),
+    ).toEqual(target)
+  },
+)
