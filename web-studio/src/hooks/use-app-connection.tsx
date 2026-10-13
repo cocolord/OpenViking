@@ -4,11 +4,10 @@ import { useNavigate, useRouterState } from '@tanstack/react-router'
 
 import i18n from '#/i18n'
 import { fetchAdminAccounts } from '#/lib/admin'
-import { DEFAULT_ACCOUNT_ID, DEFAULT_USER_ID } from '#/lib/admin-options'
 import { isOvClientError, ovClient } from '#/lib/ov-client'
 
 import {
-  detectServerMode,
+  detectServerConnection,
   fetchServerHealth,
   normalizeBaseUrl,
 } from './use-server-mode'
@@ -159,28 +158,9 @@ function normalizeConnectionDraft(
     // slash here ran on every keystroke and fought the input: typing the "//"
     // of "http://" kept collapsing back to "http:". Trailing slashes are
     // stripped where the URL is actually used instead (ovClient.setOptions,
-    // detectServerMode, detectConnectionRole, and the admin client).
+    // detectServerConnection, detectConnectionRole, and the admin client).
     baseUrl: connection.baseUrl.trim(),
     userId: connection.userId.trim(),
-  }
-}
-
-function resolveConnectionForServerMode(
-  connection: ConnectionDraft,
-  serverMode: ServerMode,
-): ConnectionDraft {
-  if (
-    serverMode !== 'dev' ||
-    (connection.accountId === DEFAULT_ACCOUNT_ID &&
-      connection.userId === DEFAULT_USER_ID)
-  ) {
-    return connection
-  }
-
-  return {
-    ...connection,
-    accountId: DEFAULT_ACCOUNT_ID,
-    userId: DEFAULT_USER_ID,
   }
 }
 
@@ -306,10 +286,7 @@ export function synchronizeConnectionRuntime(
   connection: ConnectionDraft,
   serverMode: ServerMode,
 ): ConnectionDraft {
-  const normalized = resolveConnectionForServerMode(
-    normalizeConnectionDraft(connection),
-    serverMode,
-  )
+  const normalized = normalizeConnectionDraft(connection)
   // Keep the imperative request client ahead of the React tree. Identity
   // changes remount route content, whose child effects may start requests
   // before this provider's passive effects run.
@@ -322,6 +299,16 @@ type ConnectionIdentity = {
   accountId: string
   role: ConnectionRole
   userId: string
+}
+
+function parseConnectionIdentity(
+  data: Record<string, unknown>,
+): ConnectionIdentity {
+  return {
+    accountId: typeof data.account_id === 'string' ? data.account_id : '',
+    role: isConnectionRole(data.role) ? data.role : 'unknown',
+    userId: typeof data.user_id === 'string' ? data.user_id : '',
+  }
 }
 
 function createConnectionHealthHeaders(
@@ -376,7 +363,7 @@ async function detectConnectionIdentity(
   // /health resolves the presented key and echoes back its identity:
   // { role, account_id, user_id }. We use role to gate the admin UI and
   // account_id to pin the assumed account for an account-admin key.
-  const healthRole = isConnectionRole(data.role) ? data.role : 'unknown'
+  const identity = parseConnectionIdentity(data)
   // In trusted mode /health resolves the asserted tenant user, even when the
   // configured Root key is the credential authorizing Admin API calls. Probe
   // the actual control-plane endpoint so Root capabilities reflect what the
@@ -386,21 +373,23 @@ async function detectConnectionIdentity(
     connection.adminApiKey &&
     (await canListAccounts(connection))
       ? 'root'
-      : healthRole
+      : identity.role
 
   return {
-    accountId: typeof data.account_id === 'string' ? data.account_id : '',
+    ...identity,
     role,
-    userId: typeof data.user_id === 'string' ? data.user_id : '',
   }
 }
 
 export function synchronizeResolvedDataIdentity(
   connection: ConnectionDraft,
   identity: ConnectionIdentity,
+  serverMode?: ServerMode,
 ): ConnectionDraft | null {
   if (
-    (identity.role !== 'admin' && identity.role !== 'user') ||
+    (identity.role !== 'admin' &&
+      identity.role !== 'user' &&
+      !(serverMode === 'dev' && identity.role === 'root')) ||
     !identity.accountId ||
     !identity.userId ||
     (connection.accountId === identity.accountId &&
@@ -565,17 +554,18 @@ export function AppConnectionProvider({
     let cancelled = false
 
     setServerMode('checking')
-    void detectServerMode(
-      connection.baseUrl,
-      createConnectionHealthHeaders(connection),
-    ).then((mode) => {
+    // Anonymous discovery matches dev data requests, which omit identity
+    // headers. Credential-based role probes run separately after discovery.
+    void detectServerConnection(connection.baseUrl).then(({ mode, data }) => {
       if (!cancelled) {
         if (mode === 'dev') {
-          const next = synchronizeConnectionRuntime(connection, mode)
-          if (
-            next.accountId !== connection.accountId ||
-            next.userId !== connection.userId
-          ) {
+          const resolved = synchronizeResolvedDataIdentity(
+            connection,
+            parseConnectionIdentity(data),
+            mode,
+          )
+          if (resolved) {
+            const next = synchronizeConnectionRuntime(resolved, mode)
             queryClient.clear()
             setConnection(next)
           }
@@ -725,9 +715,14 @@ export function AppConnectionProvider({
     const commitConnection = (next: ConnectionDraft) => {
       authPromptSuppressedUntilRef.current =
         Date.now() + AUTH_PROMPT_SUPPRESSION_MS
-      const normalized = synchronizeConnectionRuntime(next, serverMode)
+      const nextMode =
+        normalizeBaseUrl(next.baseUrl) === normalizeBaseUrl(connection.baseUrl)
+          ? serverMode
+          : 'checking'
+      const normalized = synchronizeConnectionRuntime(next, nextMode)
       queryClient.clear()
       setConnection(normalized)
+      setServerMode(nextMode)
     }
 
     return {

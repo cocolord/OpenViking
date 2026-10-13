@@ -603,6 +603,8 @@ Trusted 模式使用 root API key 验证上游，再从每个请求显式携带�
 
 当 `auth_mode = "dev"`（或未配置 `root_api_key` 时自动推导）时，认证禁用，请求使用 ROOT 身份；未提供身份请求头时，account 和 user 均为 `default`。Dev 模式只允许监听 `127.0.0.1`、`localhost` 或 `::1`，监听其他地址会拒绝启动。
 
+认证插件初始化后，Dev 模式的 `/health` 无需凭证也会返回解析后的 `account_id`、`user_id` 和 `role`。显式身份请求头仍然生效，缺省身份由认证插件提供；客户端应同步返回的身份，而不是根据 `auth_mode` 推定身份。Web Studio 使用匿名探测，与不携带身份请求头的 dev 数据请求保持一致，并在目标连接探测完成后同步结果。认证插件初始化前或其他认证模式的匿名探测不返回身份字段。
+
 ```json
 {
   "server": {

@@ -278,7 +278,7 @@ describe('synchronizeConnectionRuntime', () => {
     })
   })
 
-  it('uses the server default identity for dev mode consumers', () => {
+  it('preserves the supplied identity when synchronizing a connection in dev mode', () => {
     const next = synchronizeConnectionRuntime(
       {
         accountId: 'legacy-account',
@@ -291,13 +291,13 @@ describe('synchronizeConnectionRuntime', () => {
     )
 
     expect(next).toMatchObject({
-      accountId: 'default',
-      userId: 'default',
+      accountId: 'legacy-account',
+      userId: 'claude',
     })
     expect(ovClient.getConnection()).toMatchObject({
-      accountId: 'default',
+      accountId: 'legacy-account',
       identityHeaders: false,
-      userId: 'default',
+      userId: 'claude',
     })
   })
 })
