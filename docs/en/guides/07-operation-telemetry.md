@@ -308,6 +308,7 @@ This group describes collected memory-extraction metrics. The current commit res
 | --- | --- |
 | `summary.search.target_abstract.duration_ms` | Time spent prefetching abstracts for target URIs |
 | `summary.search.intent_analysis.duration_ms` | Time spent analyzing query intent |
+| `summary.search.intent_analysis.status` | Ordinary search intent analysis: `off` when skipped, `used` on success, `failed` when planning times out or fails and retrieval uses the original query |
 | `summary.search.embed_query.duration_ms` | Time spent embedding the query |
 | `summary.search.vector_retrieval.duration_ms` | Time spent in vector retrieval |
 | `summary.search.typed_queries_count` | Number of typed queries produced during planning |

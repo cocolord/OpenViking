@@ -471,6 +471,7 @@ class _SemanticMixin:
 
         # With session context: optional intent analysis
         if image_url:
+            telemetry.set("search.intent_analysis.status", "off")
             typed_queries = [
                 TypedQuery(
                     query=query,
@@ -506,12 +507,14 @@ class _SemanticMixin:
                         timeout=retrieval_config.recall_intent_timeout_s,
                     )
             except Exception as exc:
+                telemetry.set("search.intent_analysis.status", "failed")
                 logger.warning(
                     "Intent analysis failed (%s); using original query: %s",
                     type(exc).__name__,
                     exc,
                 )
             else:
+                telemetry.set("search.intent_analysis.status", "used")
                 typed_queries = query_plan.queries
                 for tq in typed_queries:
                     tq.target_directories = retrieval_targets.target_directories
@@ -521,6 +524,8 @@ class _SemanticMixin:
                     elif context_types and tq.context_type not in context_types:
                         # The existing scope filter searches only the caller's allowed types.
                         tq.context_type = None
+        else:
+            telemetry.set("search.intent_analysis.status", "off")
         telemetry.set("search.typed_queries_count", len(typed_queries))
 
         # Concurrent execution

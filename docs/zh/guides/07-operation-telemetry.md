@@ -302,6 +302,7 @@ admission，所以其 `gpu_gate_queue` 为零；worker 侧等待仍计入 `batch
 | --- | --- |
 | `summary.search.target_abstract.duration_ms` | 为目标 URI 预取摘要的耗时 |
 | `summary.search.intent_analysis.duration_ms` | 查询意图分析耗时 |
+| `summary.search.intent_analysis.status` | 普通搜索的意图分析状态：未运行为 `off`，成功为 `used`，超时或失败并回退原查询时为 `failed` |
 | `summary.search.embed_query.duration_ms` | 查询向量化耗时 |
 | `summary.search.vector_retrieval.duration_ms` | 向量召回阶段耗时 |
 | `summary.search.typed_queries_count` | 解析出的 typed query 数量 |
