@@ -32,7 +32,6 @@ from openviking.storage.acl import (
     acl_principals,
     is_acl_uri,
 )
-from openviking.storage.errors import StorageException
 from openviking.storage.expr import And, Eq, FilterExpr, In, Or, PathScope, RawDSL
 from openviking.storage.vector_migration import (
     rewrite_transfer_uri,
@@ -2561,31 +2560,6 @@ class VikingVectorIndexBackend:
 
             backend = await self._get_backend_for_context(ctx)
             await backend.delete_by_filter(And(conds))
-
-    async def delete_uri_scope(
-        self, ctx: RequestContext, uri: str, *, recursive: bool = True
-    ) -> None:
-        """Internal cleanup: delete a tenant URI scope and require zero residue."""
-        self._check_root_role(ctx)
-        backend = await self._get_backend_for_context(ctx)
-        scope = self._uri_transfer_filter(ctx, uri, recursive=recursive)
-        await backend.delete_by_filter(scope)
-        await self.confirm_uri_scope_cleared(ctx, uri, recursive=recursive)
-
-    async def confirm_uri_scope_cleared(
-        self, ctx: RequestContext, uri: str, *, recursive: bool = True
-    ) -> None:
-        """Require zero residue for the exact account and deletion scope."""
-        self._check_root_role(ctx)
-        backend = await self._get_backend_for_context(ctx)
-        scope = self._uri_transfer_filter(ctx, uri, recursive=recursive)
-        residue = await backend.strict_count(filter=scope)
-        if residue:
-            raise StorageException(
-                f"Vector records still present after delete: {uri} (residue={residue})",
-                action="confirm_delete",
-                retryable=True,
-            )
 
     def _uri_transfer_filter(self, ctx: RequestContext, uri: str, *, recursive: bool) -> FilterExpr:
         scopes: List[FilterExpr] = [Eq("uri", uri)]

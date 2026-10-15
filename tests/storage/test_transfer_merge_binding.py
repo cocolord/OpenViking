@@ -14,7 +14,6 @@ from openviking.resource.watch_manager import WatchManager
 from openviking.server.identity import RequestContext, Role
 from openviking.storage.acl import AclAction, AclManager
 from openviking.storage.collection_schemas import CollectionSchemas
-from openviking.storage.errors import StorageException
 from openviking.storage.vector_ids import vector_record_id
 from openviking.storage.vectordb import engine as vectordb_engine
 from openviking.storage.viking_fs import VikingFS
@@ -77,122 +76,6 @@ async def seed_vector(backend, uri, content):
         },
         ctx=root_ctx(),
     )
-
-
-@pytest.mark.asyncio
-async def test_strict_delete_confirms_directory_scope_and_can_repeat(indexed_fs):
-    fs, backend = indexed_fs
-    ctx = root_ctx()
-    owner = "viking://user/default/sessions/expired"
-    body = owner + "/messages.jsonl"
-    sibling = owner + "-keep/messages.jsonl"
-    orphan = owner + "/missing/nested.md"
-    other_ctx = RequestContext(user=UserIdentifier("other", "default"), role=Role(Role.ROOT))
-    await fs.write_file_bytes(body, b"expired", ctx=ctx)
-    await fs.write_file_bytes(sibling, b"keep", ctx=ctx)
-    for uri in {owner, body, sibling, orphan}:
-        await seed_vector(backend, uri, "indexed")
-    await backend.upsert(
-        {"id": body, "uri": body, "level": 2, "vector": [0.1, 0.2, 0.3, 0.4]},
-        ctx=other_ctx,
-    )
-    await fs.rm(owner + "/", recursive=True, ctx=ctx, strict=True)
-    await fs.rm(owner, recursive=True, ctx=ctx, strict=True)
-
-    assert not await fs.exists(owner, ctx=ctx)
-    assert not await backend.get_context_by_uri(owner, ctx=ctx)
-    assert not await backend.get_context_by_uri(body, ctx=ctx)
-    assert not await backend.get_context_by_uri(orphan, ctx=ctx)
-    assert await fs.read_file_bytes(sibling, ctx=ctx) == b"keep"
-    assert await backend.get_context_by_uri(sibling, ctx=ctx)
-    assert await backend.get_context_by_uri(body, ctx=other_ctx)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "failure",
-    ["delete", "vector_residue", "file_residue", "late_write", "missing_late_write", "recreated"],
-)
-async def test_strict_delete_reports_failures_and_can_retry(indexed_fs, monkeypatch, failure):
-    fs, backend = indexed_fs
-    ctx = root_ctx()
-    owner = "viking://user/default/sessions/expired"
-    body = owner + "/messages.jsonl"
-    if failure not in {"missing_late_write", "recreated"}:
-        await fs.write_file_bytes(body, b"retry me", ctx=ctx)
-    await seed_vector(backend, body, "retry me")
-    adapter = (await backend._get_backend_for_context(ctx))._adapter
-    error = StorageException(failure, status_code=429, retryable=True)
-    stat = fs._async_agfs.stat
-
-    async def stat_then_write_vector(*args, **kwargs):
-        try:
-            return await stat(*args, **kwargs)
-        finally:
-            if failure == "recreated":
-                patch.setattr(fs._async_agfs, "stat", stat)
-                await fs.write_file_bytes(body, b"new generation", ctx=ctx)
-            await seed_vector(backend, body, "delayed write")
-
-    with monkeypatch.context() as patch:
-        if failure == "delete":
-
-            def fail(**_kwargs):
-                raise error
-
-            patch.setattr(adapter, "delete", fail)
-        elif failure == "vector_residue":
-            patch.setattr(adapter, "delete", lambda **_kwargs: 0)
-        elif failure == "file_residue":
-            patch.setattr(fs._async_agfs, "rm", AsyncMock(return_value={}))
-        else:
-            patch.setattr(fs._async_agfs, "stat", stat_then_write_vector)
-
-        with pytest.raises(StorageException) as caught:
-            await fs.rm(owner, recursive=True, ctx=ctx, strict=True)
-        if failure == "delete":
-            assert caught.value is error
-        else:
-            assert caught.value.action == "confirm_delete"
-            assert caught.value.retryable
-
-    assert await fs.exists(body, ctx=ctx) == (failure not in {"late_write", "missing_late_write"})
-    if failure == "recreated":
-        assert await fs.read_file_bytes(body, ctx=ctx) == b"new generation"
-        assert await backend.get_context_by_uri(body, ctx=ctx)
-        return
-    await fs.rm(owner, recursive=True, ctx=ctx, strict=True)
-    assert not await fs.exists(owner, ctx=ctx)
-    assert not await backend.get_context_by_uri(body, ctx=ctx)
-
-
-@pytest.mark.asyncio
-async def test_strict_delete_rejects_failed_local_aggregation(indexed_fs, monkeypatch):
-    fs, backend = indexed_fs
-    ctx = root_ctx()
-    body = "viking://user/default/sessions/expired/messages.jsonl"
-    await fs.write_file_bytes(body, b"keep until confirmed", ctx=ctx)
-    await seed_vector(backend, body, "indexed")
-    adapter = (await backend._get_backend_for_context(ctx))._adapter
-    index = adapter.get_collection().get_index(adapter._index_name)
-    aggregate = index.aggregate
-
-    def search(_request):
-        raise RuntimeError("native count failed")
-
-    def aggregate_with_failure(filters):
-        with monkeypatch.context() as patch:
-            patch.setattr(index.engine_proxy, "index_engine", SimpleNamespace(search=search))
-            return aggregate(filters)
-
-    with monkeypatch.context() as patch:
-        patch.setattr(index, "aggregate", aggregate_with_failure)
-        assert adapter.get_collection().aggregate_data(adapter._index_name).agg == {"_total": 0}
-        assert adapter.count() == 0
-        with pytest.raises(RuntimeError, match="invalid count response"):
-            await fs.rm(body, ctx=ctx, strict=True)
-
-    assert await fs.read_file_bytes(body, ctx=ctx) == b"keep until confirmed"
 
 
 @pytest.mark.asyncio
@@ -742,7 +625,6 @@ async def test_acl_failure_restores_only_moved_vectors_after_directory_merge(
     await seed_vector(backend, f"{source}/file.txt", "new")
     await seed_vector(backend, f"{target}/only.txt", "keep")
     monkeypatch.setattr(fs, "_ensure_access", AsyncMock())
-
     async def acl_enabled(_account_id):
         return True
 
