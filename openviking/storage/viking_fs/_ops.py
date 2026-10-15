@@ -242,6 +242,8 @@ class _OpsMixin:
         Internal TTL callers can set ``strict=True`` to confirm vector deletion
         before removing files, then confirm filesystem absence without caches.
         Errors propagate to the caller for failure recording and retry.
+        TTL callers should check expiry under the same path lease and pass it
+        as ``lease_ref`` so a replacement cannot appear between the two steps.
 
         Returns:
             Dict with 'estimated_deleted_count' indicating the estimated number
@@ -275,6 +277,7 @@ class _OpsMixin:
                 return 0
 
         # Check existence and determine lock strategy
+        missing = False
         try:
             stat = await self._async_agfs.stat(path, **({"bypass_cache": True} if strict else {}))
             is_dir = stat.get("isDir", False) if isinstance(stat, dict) else False
@@ -284,22 +287,17 @@ class _OpsMixin:
                 if mapped is not None:
                     raise mapped from exc
                 raise
-            if recursive:
-                await self._ensure_access(target_uri, ctx, action=AclAction.MANAGE)
-            # Path does not exist: clean up any orphan index records and return
-            uris_to_delete = [] if strict else await self._collect_uris(path, recursive, ctx=ctx)
-            uris_to_delete.append(target_uri)
-            estimated_count = await _estimate_deleted_count(path, real_ctx)
-            if vector_store is not None:
-                await vector_store.delete_uri_scope(real_ctx, target_uri, recursive=recursive)
-                await self._confirm_fs_scope_cleared(path, target_uri)
-                await vector_store.confirm_uri_scope_cleared(
-                    real_ctx, target_uri, recursive=recursive
-                )
-            else:
+            if not strict:
+                if recursive:
+                    await self._ensure_access(target_uri, ctx, action=AclAction.MANAGE)
+                uris_to_delete = await self._collect_uris(path, recursive, ctx=ctx)
+                uris_to_delete.append(target_uri)
+                estimated_count = await _estimate_deleted_count(path, real_ctx)
                 await self._delete_from_vector_store(uris_to_delete, ctx=ctx)
-            logger.info(f"[VikingFS] rm target not found, cleaned orphan index: {uri}")
-            return {"estimated_deleted_count": estimated_count}
+                logger.info(f"[VikingFS] rm target not found, cleaned orphan index: {uri}")
+                return {"estimated_deleted_count": estimated_count}
+            missing = True
+            is_dir = recursive
 
         if is_dir:
             await self._ensure_access(target_uri, ctx, action=AclAction.MANAGE)
@@ -319,12 +317,16 @@ class _OpsMixin:
         skip_lock = lease_ref is None and not auto_pathlock
         lease = lease_ref
         if lease is None and not skip_lock:
+            # A tree lease creates its directory; keep an absent target absent.
+            lock_path = path.rsplit("/", 1)[0] if missing and recursive else path
             try:
-                lease = await lock_method(path)
+                lease = await lock_method(lock_path)
             except LockAcquisitionError:
                 raise ResourceBusyError(f"Resource is being processed: {uri}", uri=uri)
 
         try:
+            if missing:
+                await self._confirm_fs_scope_cleared(path, target_uri)
             uris_to_delete = (
                 await self._collect_uris(
                     path,
@@ -344,11 +346,15 @@ class _OpsMixin:
             else:
                 await self._delete_from_vector_store(uris_to_delete, ctx=ctx)
             try:
-                result = await self._async_agfs.rm(
-                    path,
-                    recursive=recursive,
-                    fs_ctx=self._pathlock_fs_ctx(ctx, lease),
-                    auto_pathlock=auto_pathlock,
+                result = (
+                    {}
+                    if missing
+                    else await self._async_agfs.rm(
+                        path,
+                        recursive=recursive,
+                        fs_ctx=self._pathlock_fs_ctx(ctx, lease),
+                        auto_pathlock=auto_pathlock,
+                    )
                 )
             except AGFSDirectoryNotEmptyError:
                 raise InvalidArgumentError(
@@ -383,7 +389,7 @@ class _OpsMixin:
         except AGFSNotFoundError:
             return
         raise StorageException(
-            f"Filesystem data still present after delete: {uri}",
+            f"Filesystem data still present during strict delete: {uri}",
             action="confirm_delete",
             retryable=True,
         )

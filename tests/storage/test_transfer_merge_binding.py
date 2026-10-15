@@ -111,14 +111,14 @@ async def test_strict_delete_confirms_directory_scope_and_can_repeat(indexed_fs)
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure",
-    ["delete", "vector_residue", "file_residue", "late_write", "missing_late_write"],
+    ["delete", "vector_residue", "file_residue", "late_write", "missing_late_write", "recreated"],
 )
 async def test_strict_delete_reports_failures_and_can_retry(indexed_fs, monkeypatch, failure):
     fs, backend = indexed_fs
     ctx = root_ctx()
     owner = "viking://user/default/sessions/expired"
     body = owner + "/messages.jsonl"
-    if failure != "missing_late_write":
+    if failure not in {"missing_late_write", "recreated"}:
         await fs.write_file_bytes(body, b"retry me", ctx=ctx)
     await seed_vector(backend, body, "retry me")
     adapter = (await backend._get_backend_for_context(ctx))._adapter
@@ -129,6 +129,9 @@ async def test_strict_delete_reports_failures_and_can_retry(indexed_fs, monkeypa
         try:
             return await stat(*args, **kwargs)
         finally:
+            if failure == "recreated":
+                patch.setattr(fs._async_agfs, "stat", stat)
+                await fs.write_file_bytes(body, b"new generation", ctx=ctx)
             await seed_vector(backend, body, "delayed write")
 
     with monkeypatch.context() as patch:
@@ -154,6 +157,10 @@ async def test_strict_delete_reports_failures_and_can_retry(indexed_fs, monkeypa
             assert caught.value.retryable
 
     assert await fs.exists(body, ctx=ctx) == (failure not in {"late_write", "missing_late_write"})
+    if failure == "recreated":
+        assert await fs.read_file_bytes(body, ctx=ctx) == b"new generation"
+        assert await backend.get_context_by_uri(body, ctx=ctx)
+        return
     await fs.rm(owner, recursive=True, ctx=ctx, strict=True)
     assert not await fs.exists(owner, ctx=ctx)
     assert not await backend.get_context_by_uri(body, ctx=ctx)
