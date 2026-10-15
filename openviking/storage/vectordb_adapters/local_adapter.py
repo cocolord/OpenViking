@@ -9,6 +9,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from openviking.storage.expr import FilterExpr
 from openviking.storage.vectordb.collection.collection import Collection
 from openviking.storage.vectordb.collection.local_collection import get_or_create_local_collection
 
@@ -86,6 +87,19 @@ class LocalCollectionAdapter(CollectionAdapter):
         collection = self.get_collection()
         result = collection.update_data(data_list)
         return list(result.ids or [])
+
+    def strict_count(self, filter: Optional[Dict[str, Any] | FilterExpr] = None) -> int:
+        """Require a native total before legacy aggregation can default to zero."""
+        index = self.get_collection().get_index(self._index_name)
+        if index is None:
+            raise RuntimeError("Vector index is unavailable")
+        dsl: Dict[str, Any] = {"sorter": {"op": "count"}}
+        if compiled_filter := self._compile_filter(filter):
+            dsl["filter"] = compiled_filter
+        total = self._extract_count_total(index.aggregate(dsl))
+        if total is None:
+            raise RuntimeError("Vector backend returned an invalid count response")
+        return total
 
     def begin_bulk_ingest(self) -> None:
         self.get_collection().begin_bulk_ingest()

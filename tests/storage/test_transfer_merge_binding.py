@@ -180,6 +180,8 @@ async def test_strict_delete_rejects_failed_local_aggregation(indexed_fs, monkey
 
     with monkeypatch.context() as patch:
         patch.setattr(index, "aggregate", aggregate_with_failure)
+        assert adapter.get_collection().aggregate_data(adapter._index_name).agg == {"_total": 0}
+        assert adapter.count() == 0
         with pytest.raises(RuntimeError, match="invalid count response"):
             await fs.rm(body, ctx=ctx, strict=True)
 

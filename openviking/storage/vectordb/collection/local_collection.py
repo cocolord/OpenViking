@@ -1251,8 +1251,7 @@ class LocalCollection(ICollection):
                     ]
                 }
             else:
-                # Missing aggregation evidence is not a confirmed zero count.
-                agg_result = {}
+                agg_result = {AggregateKeys.TOTAL_COUNT_EXTERNAL.value: 0}
         else:
             # Group count scenario: use directly
             agg_result = agg_data
