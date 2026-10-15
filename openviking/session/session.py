@@ -6,12 +6,13 @@ Session as Context: Sessions integrated into L0/L1/L2 system.
 """
 
 import asyncio
+import copy
 import inspect
 import json
 import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Protocol
 from uuid import uuid4
 
 from openviking.core.context import ContextLevel
@@ -320,6 +321,9 @@ class SessionMeta:
     # Timestamp of the most recent successful auto-commit, surfaced via session
     # GET and used to throttle auto-commit frequency.
     last_auto_commit_at: str = ""
+    # Timeout commits stamp their accepted time after the Phase 1 ready marker;
+    # this remains separate from the legacy auto-commit statistic.
+    last_idle_commit_accepted_at: str = ""
     # Default custom scalar tags applied to event memories extracted from this
     # session. Maps to config.memory_extraction_config.events.tags in the API.
     # None means no session default; a commit may still override per-call.
@@ -350,6 +354,7 @@ class SessionMeta:
             ),
             "last_message_at": self.last_message_at,
             "last_auto_commit_at": self.last_auto_commit_at,
+            "last_idle_commit_accepted_at": self.last_idle_commit_accepted_at,
         }
         if self.total_message_count is not None:
             data["total_message_count"] = self.total_message_count
@@ -404,8 +409,24 @@ class SessionMeta:
             auto_commit_policy=data.get("auto_commit_policy"),
             last_message_at=data.get("last_message_at", ""),
             last_auto_commit_at=data.get("last_auto_commit_at", ""),
+            last_idle_commit_accepted_at=data.get("last_idle_commit_accepted_at", ""),
             event_search_tags=data.get("event_search_tags"),
         )
+
+
+@dataclass(frozen=True)
+class SessionExpirySnapshot:
+    account_id: str
+    user_id: str
+    session_id: str
+    last_message_at: str
+    auto_commit_policy: Optional[Dict[str, Any]]
+
+
+class SessionExpiryReporter(Protocol):
+    async def report_after_append(self, snapshot: SessionExpirySnapshot) -> None: ...
+
+    def record_report_failure(self, reason: str, exc: Optional[Exception] = None) -> None: ...
 
 
 class Session:
@@ -427,6 +448,7 @@ class Session:
         agent_evolution_enabled_provider: Optional[Callable[[], bool | Awaitable[bool]]] = None,
         memory_policy_provider: Optional[MemoryPolicyProvider] = None,
         vlm_resolver: Optional["VLMResolver"] = None,
+        expiry_reporter: Optional[SessionExpiryReporter] = None,
     ):
         self._viking_fs = viking_fs
         self._vikingdb_manager = vikingdb_manager
@@ -466,6 +488,7 @@ class Session:
         self._memory_policy_provider = memory_policy_provider
         self._usage_reporter = usage_reporter
         self._vlm_resolver = vlm_resolver
+        self._expiry_reporter = expiry_reporter
 
     async def _get_vlm_config(self):
         if self._vlm_resolver is None:
@@ -719,6 +742,9 @@ class Session:
         lease = await self._viking_fs._async_agfs.pathlock_acquire_exact(
             session_path, timeout_secs=_SESSION_PHASE1_LOCK_TIMEOUT_SECONDS
         )
+        snapshot: Optional[SessionExpirySnapshot] = None
+        snapshot_error: Optional[Exception] = None
+        metadata_reload_error: Optional[Exception] = None
         try:
             live_messages_missing = False
             try:
@@ -735,10 +761,11 @@ class Session:
                     ctx=self.ctx,
                 )
                 self._meta = SessionMeta.from_dict(json.loads(meta_content))
-            except Exception:
+            except Exception as exc:
                 # Legacy/malformed metadata must not prevent an otherwise safe
                 # append. Message correctness remains rooted in messages.jsonl.
                 self._meta = in_memory_meta
+                metadata_reload_error = exc
 
             await self._apply_appended_messages_to_state(messages)
             batch_content = "".join(message.to_jsonl() + "\n" for message in messages)
@@ -755,8 +782,42 @@ class Session:
                     ctx=self.ctx,
                 )
             await self._save_meta()
+            if self._expiry_reporter is not None:
+                try:
+                    # _save_meta() made this exact in-memory state authoritative
+                    # under the Session path lock, even when the preceding reload
+                    # failed. Reporting it prevents the previous due time from
+                    # firing early and repairs a missing expiry registration.
+                    snapshot = self._build_expiry_snapshot_locked()
+                except Exception as exc:
+                    snapshot_error = exc
         finally:
             await self._viking_fs._async_agfs.pathlock_release(lease)
+        if self._expiry_reporter is not None:
+            if metadata_reload_error is not None:
+                logger.warning(
+                    "Session metadata reload failed before append; reporting repaired state",
+                    exc_info=metadata_reload_error,
+                )
+            if snapshot is not None:
+                await self._expiry_reporter.report_after_append(snapshot)
+            else:
+                self._expiry_reporter.record_report_failure("snapshot_build_failed", snapshot_error)
+
+    def _build_expiry_snapshot_locked(self) -> SessionExpirySnapshot:
+        if not self._meta.last_message_at:
+            raise ValueError("Session last_message_at is missing")
+        account_id = self._meta.created_by_account_id or self.ctx.account_id
+        user_id = self._meta.created_by_user_id or self.ctx.user.user_id
+        if not account_id or not user_id:
+            raise ValueError("Session owner identity is incomplete")
+        return SessionExpirySnapshot(
+            account_id=account_id,
+            user_id=user_id,
+            session_id=self.session_id,
+            last_message_at=self._meta.last_message_at,
+            auto_commit_policy=copy.deepcopy(self._meta.auto_commit_policy),
+        )
 
     async def _apply_appended_messages_to_state(self, messages: List[Message]) -> None:
         """Update in-memory counters after an authoritative root reload."""
@@ -1255,6 +1316,7 @@ class Session:
         min_raw_tail_steps: Optional[int] = None,
         persist_keep_recent_count: bool = True,
         record_auto_commit_success: bool = False,
+        record_idle_commit_success: bool = False,
         event_tags: Optional[List[str]] = None,
         reset_context: bool = False,
     ) -> Dict[str, Any]:
@@ -1283,6 +1345,9 @@ class Session:
             record_auto_commit_success: When ``True``, clear the auto-commit
                 error fields and stamp ``last_auto_commit_at`` in the same
                 lock-protected meta update as the commit boundary.
+            record_idle_commit_success: When ``True``, best-effort stamp
+                ``last_idle_commit_accepted_at`` after the Phase 1 ready marker
+                is durable and before releasing the Session lock.
             event_tags: Per-commit override for the custom scalar tags applied
                 to event memories. ``None`` uses the session default
                 (``meta.event_search_tags``); an empty list disables default-tag
@@ -1621,6 +1686,20 @@ class Session:
                     self._meta.last_auto_commit_at = get_current_timestamp()
                 await self._save_meta()
                 await self._write_phase1_ready_marker(archive_uri)
+                if record_idle_commit_success:
+                    previous_accepted_at = self._meta.last_idle_commit_accepted_at
+                    previous_updated_at = self._meta.updated_at
+                    try:
+                        self._meta.last_idle_commit_accepted_at = get_current_timestamp()
+                        await self._save_meta()
+                    except Exception:
+                        self._meta.last_idle_commit_accepted_at = previous_accepted_at
+                        self._meta.updated_at = previous_updated_at
+                        logger.warning(
+                            "Failed to record idle commit time for %s",
+                            self.session_id,
+                            exc_info=True,
+                        )
             except Exception as e:
                 logger.error(f"[commit] Failed during {phase1_stage}: {e}")
                 # Whether the queue write failed or a queued Phase 1 stopped
