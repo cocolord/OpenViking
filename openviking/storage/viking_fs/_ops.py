@@ -19,9 +19,10 @@ from openviking.pyagfs.exceptions import (
     AGFSClientError,
     AGFSDirectoryNotEmptyError,
     AGFSHTTPError,
+    AGFSNotFoundError,
 )
 from openviking.resource.watch_storage import is_watch_task_control_uri
-from openviking.server.error_mapping import is_not_found_error, is_storage_not_found, map_exception
+from openviking.server.error_mapping import is_not_found_error, map_exception
 from openviking.server.identity import RequestContext, Role
 from openviking.storage.abstract_overview import (
     ABSTRACT_OVERVIEW_FILENAMES,
@@ -278,7 +279,7 @@ class _OpsMixin:
             stat = await self._async_agfs.stat(path, **({"bypass_cache": True} if strict else {}))
             is_dir = stat.get("isDir", False) if isinstance(stat, dict) else False
         except Exception as exc:
-            if not (is_storage_not_found(exc) if strict else is_not_found_error(exc)):
+            if not (isinstance(exc, AGFSNotFoundError) if strict else is_not_found_error(exc)):
                 mapped = map_exception(exc, resource=uri)
                 if mapped is not None:
                     raise mapped from exc
@@ -379,10 +380,8 @@ class _OpsMixin:
         """Require fresh, typed evidence that the target no longer exists."""
         try:
             await self._async_agfs.stat(path, bypass_cache=True)
-        except Exception as exc:
-            if is_storage_not_found(exc):
-                return
-            raise
+        except AGFSNotFoundError:
+            return
         raise StorageException(
             f"Filesystem data still present after delete: {uri}",
             action="confirm_delete",
