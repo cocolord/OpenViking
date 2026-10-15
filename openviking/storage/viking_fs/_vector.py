@@ -6,6 +6,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, List, Optional
 
 from openviking.server.identity import RequestContext
+from openviking.storage.errors import StorageException
 from openviking.storage.viking_fs._base import logger
 
 if TYPE_CHECKING:
@@ -14,6 +15,25 @@ if TYPE_CHECKING:
 
 class _VectorMixin:
     """Vector store integration: delete/update URIs, get store/embedder."""
+
+    async def _delete_vector_scope(
+        self,
+        uri: str,
+        *,
+        recursive: bool,
+        ctx: Optional[RequestContext] = None,
+        confirm_only: bool = False,
+    ) -> None:
+        """Delete and confirm an internal cleanup scope without swallowing errors."""
+        vector_store = self._get_vector_store()
+        if vector_store is None:
+            raise StorageException("Vector store is unavailable", action="delete_vectors")
+        operation = (
+            vector_store.confirm_uri_scope_cleared
+            if confirm_only
+            else vector_store.delete_uri_scope
+        )
+        await operation(self._ctx_or_default(ctx), uri, recursive=recursive)
 
     async def _delete_from_vector_store(
         self, uris: List[str], ctx: Optional[RequestContext] = None

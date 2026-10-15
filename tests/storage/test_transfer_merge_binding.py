@@ -10,15 +10,17 @@ import pytest
 import pytest_asyncio
 
 from openviking.pyagfs import get_binding_client
+from openviking.pyagfs.exceptions import AGFSHTTPError, AGFSNetworkError
 from openviking.resource.watch_manager import WatchManager
 from openviking.server.identity import RequestContext, Role
 from openviking.storage.acl import AclAction, AclManager
 from openviking.storage.collection_schemas import CollectionSchemas
+from openviking.storage.errors import StorageException
 from openviking.storage.vector_ids import vector_record_id
 from openviking.storage.vectordb import engine as vectordb_engine
 from openviking.storage.viking_fs import VikingFS
 from openviking.utils.agfs_utils import RagfsBindingConfig, mount_agfs_backend
-from openviking_cli.exceptions import InvalidArgumentError, PermissionDeniedError
+from openviking_cli.exceptions import InvalidArgumentError, PermissionDeniedError, UnavailableError
 from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils.config.agfs_config import AGFSConfig
 from openviking_cli.utils.config.vectordb_config import VectorDBBackendConfig
@@ -76,6 +78,180 @@ async def seed_vector(backend, uri, content):
         },
         ctx=root_ctx(),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", [False, True])
+@pytest.mark.parametrize("directory", [False, True])
+async def test_strict_delete_confirms_scope_and_preserves_other_accounts(
+    indexed_fs, missing, directory
+):
+    fs, backend = indexed_fs
+    ctx = root_ctx()
+    owner = "viking://user/default/sessions/expired"
+    body = owner + "/messages.jsonl" if directory else owner
+    sibling = owner + "-keep/messages.jsonl"
+    orphan = owner + "/missing/nested.md"
+    other_ctx = RequestContext(user=UserIdentifier("other", "default"), role=Role.ROOT)
+    await fs.write_file_bytes(body, b"expired", ctx=ctx)
+    await fs.write_file_bytes(sibling, b"keep", ctx=ctx)
+    await fs.write_file_bytes(body, b"other account", ctx=other_ctx)
+    for uri in {owner, body, sibling, orphan}:
+        await seed_vector(backend, uri, "indexed")
+    await backend.upsert(
+        {
+            "id": body,
+            "uri": body,
+            "level": 2,
+            "vector": [0.1, 0.2, 0.3, 0.4],
+            "abstract": "other account",
+            "account_id": other_ctx.account_id,
+        },
+        ctx=other_ctx,
+    )
+    if missing:
+        await fs.remove_files(owner, recursive=directory, ctx=ctx)
+
+    await fs.rm(owner + "/" if directory else owner, recursive=directory, ctx=ctx, strict=True)
+    await fs.rm(owner, recursive=directory, ctx=ctx, strict=True)
+
+    assert not await fs.exists(owner, ctx=ctx)
+    assert not await backend.get_context_by_uri(owner, ctx=ctx)
+    assert not await backend.get_context_by_uri(body, ctx=ctx)
+    assert bool(await backend.get_context_by_uri(orphan, ctx=ctx)) == (not directory)
+    assert await fs.read_file_bytes(sibling, ctx=ctx) == b"keep"
+    assert await backend.get_context_by_uri(sibling, ctx=ctx)
+    assert await fs.read_file_bytes(body, ctx=other_ctx) == b"other account"
+    assert await backend.get_context_by_uri(body, ctx=other_ctx)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    ["throttled", "vdb_outage", "count", "vector_residue", "file_residue", "fs_error", "no_vdb"],
+)
+async def test_strict_delete_reports_failures_and_can_retry(indexed_fs, monkeypatch, failure):
+    fs, backend = indexed_fs
+    ctx = root_ctx()
+    owner = "viking://user/default/sessions/expired"
+    body = owner + "/messages.jsonl"
+    await fs.write_file_bytes(body, b"retry me", ctx=ctx)
+    await seed_vector(backend, body, "retry me")
+    adapter = (await backend._get_backend_for_context(ctx))._adapter
+    error = StorageException(
+        failure,
+        status_code=429 if failure == "throttled" else 503,
+        retryable=True,
+    )
+    with monkeypatch.context() as patch:
+        if failure in {"throttled", "vdb_outage", "count"}:
+
+            def fail(**_kwargs):
+                raise error
+
+            patch.setattr(adapter, "strict_count" if failure == "count" else "delete", fail)
+        elif failure == "vector_residue":
+            patch.setattr(adapter, "delete", lambda **_kwargs: 0)
+        elif failure == "file_residue":
+            patch.setattr(fs._async_agfs, "rm", AsyncMock(return_value={}))
+        elif failure == "fs_error":
+            error = AGFSHTTPError("delete rate limited", status_code=429)
+            patch.setattr(fs._async_agfs, "rm", AsyncMock(side_effect=error))
+        else:
+            patch.setattr(fs, "vector_store", None)
+
+        with pytest.raises((StorageException, AGFSHTTPError)) as caught:
+            await fs.rm(owner, recursive=True, ctx=ctx, strict=True)
+        if failure in {"throttled", "vdb_outage", "count", "fs_error"}:
+            assert caught.value is error
+        elif failure.endswith("residue"):
+            assert caught.value.action == "confirm_delete"
+            assert caught.value.retryable
+        assert await fs.read_file_bytes(body, ctx=ctx) == b"retry me"
+
+    await fs.rm(owner, recursive=True, ctx=ctx, strict=True)
+    assert not await fs.exists(owner, ctx=ctx)
+    assert not await backend.get_context_by_uri(body, ctx=ctx)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["initial", "confirmation"])
+async def test_strict_delete_never_treats_storage_outage_as_absence(indexed_fs, monkeypatch, phase):
+    fs, backend = indexed_fs
+    ctx = root_ctx()
+    uri = "viking://user/default/sessions/expired/messages.jsonl"
+    await fs.write_file_bytes(uri, b"content", ctx=ctx)
+    await seed_vector(backend, uri, "content")
+    path = fs._uri_to_path(uri, ctx=ctx)
+    stat, rm = fs._async_agfs.stat, fs._async_agfs.rm
+    removed = False
+
+    async def remove(*args, **kwargs):
+        nonlocal removed
+        result = await rm(*args, **kwargs)
+        removed = True
+        return result
+
+    async def unavailable(target, **kwargs):
+        if target == path and (phase == "initial" or removed):
+            raise AGFSNetworkError("endpoint not found")
+        return await stat(target, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(fs._async_agfs, "stat", unavailable)
+        patch.setattr(fs._async_agfs, "rm", remove)
+        with pytest.raises((UnavailableError, AGFSNetworkError), match="endpoint not found"):
+            await fs.rm(uri, ctx=ctx, strict=True)
+
+    if phase == "initial":
+        assert await fs.read_file_bytes(uri, ctx=ctx) == b"content"
+        assert await backend.get_context_by_uri(uri, ctx=ctx)
+    await fs.rm(uri, ctx=ctx, strict=True)
+    assert not await fs.exists(uri, ctx=ctx)
+    assert not await backend.get_context_by_uri(uri, ctx=ctx)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", [Role.USER, Role.ADMIN])
+async def test_strict_delete_is_reserved_for_internal_root_cleanup(indexed_fs, role):
+    fs, backend = indexed_fs
+    uri = "viking://user/default/sessions/expired/messages.jsonl"
+    await fs.write_file_bytes(uri, b"keep", ctx=root_ctx())
+    await seed_vector(backend, uri, "keep")
+    ctx = RequestContext(user=root_ctx().user, role=role)
+
+    with pytest.raises(PermissionDeniedError):
+        await fs.rm(uri, ctx=ctx, strict=True)
+
+    assert await fs.read_file_bytes(uri, ctx=root_ctx()) == b"keep"
+    assert await backend.get_context_by_uri(uri, ctx=root_ctx())
+
+
+@pytest.mark.asyncio
+async def test_strict_delete_reports_vector_written_during_file_removal(indexed_fs, monkeypatch):
+    fs, backend = indexed_fs
+    ctx = root_ctx()
+    owner = "viking://user/default/sessions/expired"
+    uri = owner + "/messages.jsonl"
+    await fs.write_file_bytes(uri, b"content", ctx=ctx)
+    await seed_vector(backend, uri, "content")
+    rm = fs._async_agfs.rm
+
+    async def remove_then_write_vector(*args, **kwargs):
+        result = await rm(*args, **kwargs)
+        await seed_vector(backend, uri, "delayed write")
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(fs._async_agfs, "rm", remove_then_write_vector)
+        with pytest.raises(StorageException, match="Vector records still present") as caught:
+            await fs.rm(owner, recursive=True, ctx=ctx, strict=True)
+        assert caught.value.action == "confirm_delete"
+
+    assert not await fs.exists(owner, ctx=ctx)
+    assert await backend.get_context_by_uri(uri, ctx=ctx)
+    await fs.rm(owner, recursive=True, ctx=ctx, strict=True)
+    assert not await backend.get_context_by_uri(uri, ctx=ctx)
 
 
 @pytest.mark.asyncio
@@ -625,6 +801,7 @@ async def test_acl_failure_restores_only_moved_vectors_after_directory_merge(
     await seed_vector(backend, f"{source}/file.txt", "new")
     await seed_vector(backend, f"{target}/only.txt", "keep")
     monkeypatch.setattr(fs, "_ensure_access", AsyncMock())
+
     async def acl_enabled(_account_id):
         return True
 

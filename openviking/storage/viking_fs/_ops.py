@@ -21,13 +21,14 @@ from openviking.pyagfs.exceptions import (
     AGFSHTTPError,
 )
 from openviking.resource.watch_storage import is_watch_task_control_uri
-from openviking.server.error_mapping import is_not_found_error, map_exception
+from openviking.server.error_mapping import is_not_found_error, is_storage_not_found, map_exception
 from openviking.server.identity import RequestContext, Role
 from openviking.storage.abstract_overview import (
     ABSTRACT_OVERVIEW_FILENAMES,
     rewrite_abstract_overview_for_transfer,
 )
 from openviking.storage.acl import AclAction, is_acl_uri
+from openviking.storage.errors import StorageException
 from openviking.storage.expr import And, PathScope, RawDSL
 from openviking.storage.internal_names import is_storage_internal_name
 from openviking.storage.vector_ids import is_vector_record_id, vector_record_id
@@ -219,6 +220,8 @@ class _OpsMixin:
         ctx: Optional[RequestContext] = None,
         lease_ref: Dict[str, Any] | None = None,
         auto_pathlock: bool = True,
+        *,
+        strict: bool = False,
     ) -> Dict[str, Any]:
         """Delete file/directory + recursively update vector index.
 
@@ -235,13 +238,20 @@ class _OpsMixin:
         target is not concurrently mutated (e.g. best-effort shared upload
         cleanup that only deletes already-expired directories).
 
+        Internal TTL callers can set ``strict=True`` to confirm vector deletion
+        before removing files, then confirm filesystem absence without caches.
+        Errors propagate to the caller for failure recording and retry.
+
         Returns:
             Dict with 'estimated_deleted_count' indicating the estimated number
             of nodes deleted from vector index.
         """
         from openviking.storage.errors import LockAcquisitionError, ResourceBusyError
 
-        guard_ctx = replace(self._ctx_or_default(ctx), bypass_acl=True)
+        real_ctx = self._ctx_or_default(ctx)
+        if strict and real_ctx.role != Role.ROOT:
+            raise PermissionDeniedError("Strict deletion requires ROOT", resource=uri)
+        guard_ctx = replace(real_ctx, bypass_acl=True)
         await self._ensure_access(uri, guard_ctx, action=AclAction.MANAGE)
         await self._ensure_access(uri, ctx, action=AclAction.WRITE)
         path = self._uri_to_path(uri, ctx=ctx)
@@ -262,10 +272,10 @@ class _OpsMixin:
 
         # Check existence and determine lock strategy
         try:
-            stat = await self._async_agfs.stat(path)
+            stat = await self._async_agfs.stat(path, **({"bypass_cache": True} if strict else {}))
             is_dir = stat.get("isDir", False) if isinstance(stat, dict) else False
         except Exception as exc:
-            if not is_not_found_error(exc):
+            if not (is_storage_not_found(exc) if strict else is_not_found_error(exc)):
                 mapped = map_exception(exc, resource=uri)
                 if mapped is not None:
                     raise mapped from exc
@@ -273,11 +283,14 @@ class _OpsMixin:
             if recursive:
                 await self._ensure_access(target_uri, ctx, action=AclAction.MANAGE)
             # Path does not exist: clean up any orphan index records and return
-            uris_to_delete = await self._collect_uris(path, recursive, ctx=ctx)
+            uris_to_delete = [] if strict else await self._collect_uris(path, recursive, ctx=ctx)
             uris_to_delete.append(target_uri)
-            real_ctx = self._ctx_or_default(ctx)
             estimated_count = await _estimate_deleted_count(path, real_ctx)
-            await self._delete_from_vector_store(uris_to_delete, ctx=ctx)
+            if strict:
+                await self._delete_vector_scope(target_uri, recursive=recursive, ctx=ctx)
+                await self._confirm_fs_scope_cleared(path, target_uri)
+            else:
+                await self._delete_from_vector_store(uris_to_delete, ctx=ctx)
             logger.info(f"[VikingFS] rm target not found, cleaned orphan index: {uri}")
             return {"estimated_deleted_count": estimated_count}
 
@@ -312,15 +325,17 @@ class _OpsMixin:
                     ctx=ctx,
                     strict=is_dir and await self._acl_enabled(ctx),
                 )
-                if is_dir
+                if is_dir and not strict
                 else []
             )
             uris_to_delete.append(target_uri)
             if is_dir:
                 await self._ensure_access_many(uris_to_delete, ctx, action=AclAction.MANAGE)
-            real_ctx = self._ctx_or_default(ctx)
             estimated_count = await _estimate_deleted_count(path, real_ctx)
-            await self._delete_from_vector_store(uris_to_delete, ctx=ctx)
+            if strict:
+                await self._delete_vector_scope(target_uri, recursive=recursive, ctx=ctx)
+            else:
+                await self._delete_from_vector_store(uris_to_delete, ctx=ctx)
             try:
                 result = await self._async_agfs.rm(
                     path,
@@ -339,6 +354,11 @@ class _OpsMixin:
                         f"Directory not empty: {uri}. Use recursive=True to delete non-empty directories."
                     )
                 raise
+            if strict:
+                await self._confirm_fs_scope_cleared(path, target_uri)
+                await self._delete_vector_scope(
+                    target_uri, recursive=recursive, ctx=ctx, confirm_only=True
+                )
             # Add estimated_deleted_count to the result
             if isinstance(result, dict):
                 result["estimated_deleted_count"] = estimated_count
@@ -348,6 +368,20 @@ class _OpsMixin:
         finally:
             if lease_ref is None and lease is not None:
                 await self._async_agfs.pathlock_release(lease)
+
+    async def _confirm_fs_scope_cleared(self, path: str, uri: str) -> None:
+        """Require fresh, typed evidence that the target no longer exists."""
+        try:
+            await self._async_agfs.stat(path, bypass_cache=True)
+        except Exception as exc:
+            if is_storage_not_found(exc):
+                return
+            raise
+        raise StorageException(
+            f"Filesystem data still present after delete: {uri}",
+            action="confirm_delete",
+            retryable=True,
+        )
 
     async def remove_files(
         self,
