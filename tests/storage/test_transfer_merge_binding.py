@@ -121,23 +121,39 @@ async def test_strict_delete_confirms_directory_scope_and_can_repeat(indexed_fs)
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure",
-    ["delete", "count", "vector_residue", "file_residue", "late_write", "stat"],
+    [
+        "delete",
+        "count",
+        "vector_residue",
+        "file_residue",
+        "late_write",
+        "missing_late_write",
+        "stat",
+    ],
 )
 async def test_strict_delete_reports_failures_and_can_retry(indexed_fs, monkeypatch, failure):
     fs, backend = indexed_fs
     ctx = root_ctx()
     owner = "viking://user/default/sessions/expired"
     body = owner + "/messages.jsonl"
-    await fs.write_file_bytes(body, b"retry me", ctx=ctx)
+    if failure != "missing_late_write":
+        await fs.write_file_bytes(body, b"retry me", ctx=ctx)
     await seed_vector(backend, body, "retry me")
     adapter = (await backend._get_backend_for_context(ctx))._adapter
     error = StorageException(failure, status_code=429, retryable=True)
     rm = fs._async_agfs.rm
+    stat = fs._async_agfs.stat
 
     async def remove_then_write_vector(*args, **kwargs):
         result = await rm(*args, **kwargs)
         await seed_vector(backend, body, "delayed write")
         return result
+
+    async def stat_then_write_vector(*args, **kwargs):
+        try:
+            return await stat(*args, **kwargs)
+        finally:
+            await seed_vector(backend, body, "delayed write")
 
     with monkeypatch.context() as patch:
         if failure in {"delete", "count"}:
@@ -152,6 +168,8 @@ async def test_strict_delete_reports_failures_and_can_retry(indexed_fs, monkeypa
             patch.setattr(fs._async_agfs, "rm", AsyncMock(return_value={}))
         elif failure == "late_write":
             patch.setattr(fs._async_agfs, "rm", remove_then_write_vector)
+        elif failure == "missing_late_write":
+            patch.setattr(fs._async_agfs, "stat", stat_then_write_vector)
         else:
             patch.setattr(
                 fs._async_agfs,
@@ -167,10 +185,42 @@ async def test_strict_delete_reports_failures_and_can_retry(indexed_fs, monkeypa
             assert caught.value.action == "confirm_delete"
             assert caught.value.retryable
 
-    assert await fs.exists(body, ctx=ctx) == (failure != "late_write")
+    assert await fs.exists(body, ctx=ctx) == (failure not in {"late_write", "missing_late_write"})
     await fs.rm(owner, recursive=True, ctx=ctx, strict=True)
     assert not await fs.exists(owner, ctx=ctx)
     assert not await backend.get_context_by_uri(body, ctx=ctx)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["error", "empty"])
+async def test_strict_delete_rejects_failed_local_aggregation(indexed_fs, monkeypatch, failure):
+    fs, backend = indexed_fs
+    ctx = root_ctx()
+    body = "viking://user/default/sessions/expired/messages.jsonl"
+    await fs.write_file_bytes(body, b"keep until confirmed", ctx=ctx)
+    await seed_vector(backend, body, "indexed")
+    adapter = (await backend._get_backend_for_context(ctx))._adapter
+    index = adapter.get_collection().get_index(adapter._index_name)
+    aggregate = index.aggregate
+
+    def search(_request):
+        if failure == "error":
+            raise RuntimeError("native count failed")
+        return SimpleNamespace(extra_json="")
+
+    def aggregate_with_failure(filters):
+        with monkeypatch.context() as patch:
+            patch.setattr(index.engine_proxy, "index_engine", SimpleNamespace(search=search))
+            return aggregate(filters)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(index, "aggregate", aggregate_with_failure)
+        with pytest.raises(RuntimeError, match="invalid count response"):
+            await fs.rm(body, ctx=ctx, strict=True)
+
+    assert await fs.read_file_bytes(body, ctx=ctx) == b"keep until confirmed"
+    await fs.rm(body, ctx=ctx, strict=True)
+    assert not await fs.exists(body, ctx=ctx)
 
 
 @pytest.mark.asyncio

@@ -292,6 +292,9 @@ class _OpsMixin:
             if vector_store is not None:
                 await vector_store.delete_uri_scope(real_ctx, target_uri, recursive=recursive)
                 await self._confirm_fs_scope_cleared(path, target_uri)
+                await vector_store.confirm_uri_scope_cleared(
+                    real_ctx, target_uri, recursive=recursive
+                )
             else:
                 await self._delete_from_vector_store(uris_to_delete, ctx=ctx)
             logger.info(f"[VikingFS] rm target not found, cleaned orphan index: {uri}")
