@@ -256,6 +256,9 @@ class _OpsMixin:
         await self._ensure_access(uri, ctx, action=AclAction.WRITE)
         path = self._uri_to_path(uri, ctx=ctx)
         target_uri = self._path_to_uri(path, ctx=ctx)
+        vector_store = self._get_vector_store() if strict else None
+        if strict and vector_store is None:
+            raise StorageException("Vector store is unavailable", action="delete_vectors")
 
         async def _estimate_deleted_count(target_path: str, real_ctx: RequestContext) -> int:
             """Estimate number of nodes to be deleted using vector index."""
@@ -286,8 +289,8 @@ class _OpsMixin:
             uris_to_delete = [] if strict else await self._collect_uris(path, recursive, ctx=ctx)
             uris_to_delete.append(target_uri)
             estimated_count = await _estimate_deleted_count(path, real_ctx)
-            if strict:
-                await self._delete_vector_scope(target_uri, recursive=recursive, ctx=ctx)
+            if vector_store is not None:
+                await vector_store.delete_uri_scope(real_ctx, target_uri, recursive=recursive)
                 await self._confirm_fs_scope_cleared(path, target_uri)
             else:
                 await self._delete_from_vector_store(uris_to_delete, ctx=ctx)
@@ -332,8 +335,8 @@ class _OpsMixin:
             if is_dir:
                 await self._ensure_access_many(uris_to_delete, ctx, action=AclAction.MANAGE)
             estimated_count = await _estimate_deleted_count(path, real_ctx)
-            if strict:
-                await self._delete_vector_scope(target_uri, recursive=recursive, ctx=ctx)
+            if vector_store is not None:
+                await vector_store.delete_uri_scope(real_ctx, target_uri, recursive=recursive)
             else:
                 await self._delete_from_vector_store(uris_to_delete, ctx=ctx)
             try:
@@ -354,10 +357,10 @@ class _OpsMixin:
                         f"Directory not empty: {uri}. Use recursive=True to delete non-empty directories."
                     )
                 raise
-            if strict:
+            if vector_store is not None:
                 await self._confirm_fs_scope_cleared(path, target_uri)
-                await self._delete_vector_scope(
-                    target_uri, recursive=recursive, ctx=ctx, confirm_only=True
+                await vector_store.confirm_uri_scope_cleared(
+                    real_ctx, target_uri, recursive=recursive
                 )
             # Add estimated_deleted_count to the result
             if isinstance(result, dict):
