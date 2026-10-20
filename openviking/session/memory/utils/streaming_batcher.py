@@ -143,7 +143,10 @@ class StreamingBatcher(Generic[T, R]):
                     tracer.set("flush_reason", reason)
                     tracer.set("request_count", len(items))
                     tracer.set("input_size", sum(self._item_size(item.payload) for item in items))
-                    result = await self.process_batch([item.payload for item in items], reason)
+                    # A shared batch has no single caller-owned Task, including
+                    # when flush() or close() is awaited directly.
+                    with detach_task_context():
+                        result = await self.process_batch([item.payload for item in items], reason)
                     metadata = self._get_result_metadata(result)
                     if metadata is not None:
                         metadata.setdefault("batch_id", batch_id)
