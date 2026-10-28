@@ -928,17 +928,8 @@ async def test_cluster_registration_reset_and_scope_isolation():
         assert await client.get(e.prefix(account) + "backfill:initial:done") == "1"
     assert e.prefix("a_one") != e.prefix("b_two")
     for account in ("a_one", "b_two"):
-        await client.delete(
-            *(
-                e.prefix(account) + s
-                for s in (
-                    "sessions",
-                    "backfill:initial",
-                    "backfill:initial:done",
-                    "backfill:pending",
-                )
-            )
-        )
+        await e.delete_account(account)
+        assert not [key async for key in client.scan_iter(match=e.prefix(account) + "*")]
     await e.aclose()
 
 

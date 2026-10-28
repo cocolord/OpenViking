@@ -104,6 +104,9 @@ class TTLAdapter(Protocol):
     async def read_initial(self, account_id: str) -> dict:
         """Read the fixed initial state for internal diagnostics."""
 
+    async def delete_account(self, account_id: str) -> None:
+        """Remove Account indexes, backfill state and maintenance registration."""
+
     async def on_post_write(
         self,
         uri: str,

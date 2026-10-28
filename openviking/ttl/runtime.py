@@ -191,6 +191,7 @@ class DirectoryTTL:
         self._retry = {}
         self.registration_dropped_total = 0
         self._recycle_lock = asyncio.Lock()
+        self._registration_lock = asyncio.Lock()
         self._scheduler: ExpiryScheduler | None = None
         self._scheduled: set[str] = set()
         self._recycle: set[str] = set()
@@ -223,17 +224,57 @@ class DirectoryTTL:
     def _identity(account: str) -> ItemIdentity:
         return ItemIdentity(TTL_ITEM_TYPE, account, "_system", "maintenance")
 
-    async def _schedule(self, account: str, *, force: bool = False) -> None:
+    async def _schedule(self, account: str, *, force: bool = False) -> bool:
         if self._scheduler is None or (account in self._scheduled and not force):
-            return
-        await self._scheduler.report(
-            ExpiryRegistration(
-                self._identity(account),
-                due_at_ms=next_check_ms(self.resource_id, time.time_ns() // 1_000_000),
-                timeout_seconds=3600,
-            )
-        )
-        self._scheduled.add(account)
+            return True
+        async with self._registration_lock:
+            manager = getattr(self, "account_manager", None)
+            info = await manager.get_account(account) if manager is not None else {}
+            if info is not None and info.get("status") != "deleting":
+                await self._scheduler.report(
+                    ExpiryRegistration(
+                        self._identity(account),
+                        due_at_ms=next_check_ms(self.resource_id, time.time_ns() // 1_000_000),
+                        timeout_seconds=3600,
+                    )
+                )
+                self._scheduled.add(account)
+                return True
+        await self.delete_account(account)
+        return False
+
+    async def delete_account(self, account: str) -> None:
+        """Retire TTL state through the existing durable Account deletion task."""
+        self._stop_scan.add(account)
+        try:
+            async with (
+                self._locks.setdefault(account, asyncio.Lock()),
+                self._recycle_lock,
+                self._registration_lock,
+            ):
+                self._scheduled.discard(account)
+                self._pending.discard(account)
+                self._recycle.discard(account)
+                for key in list(self._retry):
+                    if key[0] == account:
+                        self._retry.pop(key, None)
+                for key in list(self._user_policies):
+                    if key[0] == account:
+                        self._user_policies.pop(key, None)
+                if self._scheduler is not None:
+                    await self._scheduler.unregister(self._identity(account))
+                redis = await self.client()
+                prefix = self.prefix(account)
+                await redis.delete(
+                    *(prefix + kind for kind in TTLIndexType),
+                    *(
+                        prefix + "backfill:" + name
+                        for name in ("initial", "initial:done", "pending", "reset_required")
+                    ),
+                )
+        finally:
+            self._stop_scan.discard(account)
+        logger.info("TTL account state removed resource=%s account=%s", self.resource_id, account)
 
     async def handle(self, request: CallbackRequest) -> CallbackResult:
         if self._closed:
@@ -241,7 +282,8 @@ class DirectoryTTL:
         account = request.identity.account_id
         # Confirm the next durable wake-up before acknowledging this one.
         # Long-running filesystem work stays outside the short expiry callback.
-        await self._schedule(account, force=True)
+        if not await self._schedule(account, force=True):
+            return CallbackResult(CallbackStatus.COMPLETED, "account_deleted")
         if time.time_ns() // 1_000_000 >= self._recycle_after_ms:
             self._recycle.add(account)
             self._wake_worker()
@@ -318,7 +360,8 @@ class DirectoryTTL:
                 for scope in scopes:
                     pipe.hsetnx(self.prefix(account) + "backfill:reset_required", scope, token)
                 await pipe.execute()
-            await self._schedule(account)
+            if not await self._schedule(account):
+                raise NotFoundError(account, "account")
         except Exception as exc:
             raise UnavailableError("TTL reset intent registration unavailable") from exc
 
@@ -581,19 +624,22 @@ class DirectoryTTL:
             if self._closed and not closing:
                 return
             try:
-                pair = await self.policies(account)
-                active = {
-                    uri: base
-                    for uri, base in entries.items()
-                    if (await self.policy(account, uri, pair)).enabled
-                }
+                async with self._registration_lock:
+                    pair = await self.policies(account)
+                    active = {
+                        uri: base
+                        for uri, base in entries.items()
+                        if self._retry.get((account, kind, uri)) == base
+                        and (await self.policy(account, uri, pair)).enabled
+                    }
+                    if active:
+                        redis = await self.client()
+                        await redis.zadd(
+                            self.prefix(account) + kind,
+                            active,
+                            **({"gt": True} if kind == "sessions" else {"nx": True}),
+                        )
                 if active:
-                    redis = await self.client()
-                    await redis.zadd(
-                        self.prefix(account) + kind,
-                        active,
-                        **({"gt": True} if kind == "sessions" else {"nx": True}),
-                    )
                     await self._schedule(account)
                 # Also discard disabled entries; do not remove a concurrent update.
                 for uri, base in entries.items():
@@ -626,7 +672,8 @@ class DirectoryTTL:
         self, request: TTLBackfillRequest, pair, state, *, discover=True
     ) -> None:
         account = request.account_id
-        await self._schedule(account)
+        if not await self._schedule(account):
+            raise FailedPreconditionError("TTL Account is unavailable")
         intents = request.reset_intents or {
             root: token
             for root, token in state["reset_required"].items()
@@ -1060,16 +1107,16 @@ class DirectoryTTL:
         item = directory(source_uri) if source_uri else None
         if ctx is None or item is None or not await self.requires_existing_session(item[1], ctx):
             return
-        await self.fs.stat(source_uri, ctx=ctx, skip_count=True)
-        if item[0] != "sessions" or not source_uri.startswith(item[2] + "/history/"):
-            return
-        if task_id is None:
-            from openviking.service.task_work_index import get_task_context
+        if item[0] == "sessions" and source_uri.startswith(item[2] + "/history/"):
+            if task_id is None:
+                from openviking.service.task_work_index import get_task_context
 
-            task = get_task_context()
-            task_id = task.task_id if task else None
-        if task_id:
-            meta = json.loads(await self.fs.read_file(source_uri + "/.meta.json", ctx=ctx))
-            owner = meta.get("phase1", {}).get("queue_message", {}).get("task_id")
-            if owner != task_id:
-                raise NotFoundError(source_uri, "stale Session commit task")
+                task = get_task_context()
+                task_id = task.task_id if task else None
+            if task_id:
+                meta = json.loads(await self.fs.read_file(source_uri + "/.meta.json", ctx=ctx))
+                owner = meta.get("phase1", {}).get("queue_message", {}).get("task_id")
+                if owner != task_id:
+                    raise NotFoundError(source_uri, "stale Session commit task")
+                return
+        await self.fs.stat(source_uri, ctx=ctx, skip_count=True)

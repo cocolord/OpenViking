@@ -39,6 +39,7 @@ def engine(monkeypatch, caplog):
         ),
     )
     e.account_manager = SimpleNamespace(
+        get_account=AsyncMock(return_value={"status": "active"}),
         list_accounts=AsyncMock(return_value=[]),
         list_users_page=AsyncMock(return_value={"users": []}),
     )
@@ -118,7 +119,10 @@ async def test_libraries_defer_discovery_after_enable_reset_and_restart(monkeypa
             stat=AsyncMock(return_value={"modTime": "2099-01-01T00:00:00Z"}),
             read_file=AsyncMock(return_value="{}"),
         )
-        e.account_manager = SimpleNamespace(list_users_page=AsyncMock(return_value={"users": []}))
+        e.account_manager = SimpleNamespace(
+            get_account=AsyncMock(return_value={"status": "active"}),
+            list_users_page=AsyncMock(return_value={"users": []}),
+        )
         e.install_expiry(SimpleNamespace(register_handler=Mock(), report=AsyncMock()))
         return e
 
@@ -1117,3 +1121,61 @@ async def test_maintenance_failure_isolated_to_one_account(engine, scheduler):
         assert [c.args[0] for c in e.read_initial.await_args_list].count(good) == 1
     finally:
         await e.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("archive,task_id", [(True, "task"), (True, None), (False, "task")])
+async def test_source_check_avoids_redundant_archive_stat(engine, archive, task_id):
+    e = engine
+    e._cache_user_policy(("a", "u"), None)
+    source = (
+        "viking://user/u/sessions/s/history/archive_001"
+        if archive
+        else "viking://user/u/memories/events/2026/10/28/event.md"
+    )
+    e.fs.read_file = AsyncMock(
+        return_value=json.dumps({"phase1": {"queue_message": {"task_id": "task"}}})
+    )
+    await e.check_source(source, e.context("a"), task_id=task_id)
+    assert e.fs.stat.await_count == int(not (archive and task_id))
+    assert e.fs.read_file.await_count == int(bool(archive and task_id))
+
+
+@pytest.mark.asyncio
+async def test_account_retirement_waits_for_registration_and_allows_recreation(engine, scheduler):
+    from openviking.scheduling.expiry.api import CallbackRequest
+
+    e = engine
+    uri = "viking://user/u/sessions/s"
+    entered, release = asyncio.Event(), asyncio.Event()
+    zadd = e.redis.zadd
+
+    async def register(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await zadd(*args, **kwargs)
+
+    scheduler.unregister = AsyncMock()
+    await e.on_post_write(uri + "/messages.jsonl", e.context("a"), 1)
+    e.redis.zadd = register
+    flushing = asyncio.create_task(e._retry_writes())
+    await entered.wait()
+    e.account_manager.get_account.return_value = None
+    retiring = asyncio.create_task(e.delete_account("a"))
+    await asyncio.sleep(0)
+    assert not retiring.done()
+    release.set()
+    await asyncio.gather(flushing, retiring)
+    assert not [key async for key in e.redis.scan_iter(match=e.prefix("a") + "*")]
+    assert not e._retry and "a" not in e._scheduled
+
+    e.account_manager.get_account.return_value = {"status": "active"}
+    await e.on_post_write(uri + "/messages.jsonl", e.context("a"), 2)
+    await e._retry_writes()
+    assert await e.redis.zscore(e.prefix("a") + "sessions", uri) == 2
+    unregisters = scheduler.unregister.await_count
+    e.account_manager.get_account.side_effect = ConnectionError("identity store unavailable")
+    with pytest.raises(ConnectionError):
+        await e.handle(CallbackRequest(e._identity("a")))
+    assert await e.redis.zscore(e.prefix("a") + "sessions", uri) == 2
+    assert scheduler.unregister.await_count == unregisters

@@ -120,6 +120,16 @@ next maintenance trigger can recover an interrupted handoff. Commercial Server
 configures the writer and forwards internal repair requests; it does not run the
 hourly scheduler. TTL adds no separate timer or callback queue.
 
+Account deletion uses the existing durable cleanup task to stop its TTL work,
+unregister maintenance, and remove the three directory indexes and backfill
+state. Redis failure keeps the deletion fence for the normal cleanup retry.
+Late callbacks for a deleted Account only repeat cleanup; they do not reschedule
+maintenance or scan the filesystem.
+
+For a Session archive with a task ID, source checks read its `.meta.json` directly
+to verify existence and task ownership. They do not also stat the archive
+directory. Other sources and archives without a task ID retain an existence check.
+
 Tests live in `tests/ttl/`. `TTL_TEST_REDIS` and `TTL_TEST_CLUSTER` opt into isolated
 real Redis tests; ordinary tests use fakeredis with Lua support. Integration tests
 cover writer scheduling, restart recovery and real queue-thread registration.

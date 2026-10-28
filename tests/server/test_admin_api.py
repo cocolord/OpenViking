@@ -2765,6 +2765,88 @@ async def test_delete_account_retries_when_runtime_config_cleanup_fails(
     assert delete_config.await_count == 2
 
 
+@pytest.mark.parametrize("fail_cleanup", [False, True])
+async def test_account_deletion_cleans_ttl_state_and_late_callbacks(
+    admin_client, admin_service, admin_app, monkeypatch, fail_cleanup
+):
+    import fakeredis.aioredis
+
+    from openviking.scheduling.expiry.api import CallbackRequest
+    from openviking.ttl import wiring
+    from openviking.ttl.adapter import TTLBackfillRequest
+    from openviking.ttl.runtime import DirectoryTTL
+    from openviking_cli.utils.config.ttl_config import TTLConfig
+
+    account = _uid()
+    created = await admin_client.post(
+        "/api/v1/admin/accounts",
+        json={"account_id": account, "admin_user_id": "alice"},
+        headers=root_headers(),
+    )
+    assert created.status_code == 200, created.text
+    engine = DirectoryTTL(resource_id="ttl-delete-account", batch_interval=0)
+    engine.bind_runtime(admin_service, admin_app.state.api_key_manager)
+    engine.redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    engine.policies = AsyncMock(return_value=(TTLConfig(sessions=7, user_events=7), None))
+    scheduler = Mock(report=AsyncMock(), unregister=AsyncMock())
+    engine.install_expiry(scheduler)
+    monkeypatch.setattr(wiring, "_adapter", engine)
+    root = "viking://user/alice/sessions"
+    other_key = engine.prefix("other") + "sessions"
+    try:
+        await engine.register_initial_backfill(
+            TTLBackfillRequest(engine.resource_id, account, (root,))
+        )
+        await engine._scan(account)
+        await engine.redis.hset(engine.prefix(account) + "backfill:reset_required", root, "token")
+        for kind in ("sessions", "user_events", "peer_events"):
+            await engine.redis.zadd(engine.prefix(account) + kind, {root + "/s": 1})
+        await engine.redis.zadd(other_key, {root + "/kept": 1})
+        await engine.on_post_write(root + "/s/messages.jsonl", engine.context(account), 2)
+        engine._pending.add(account)
+        engine._recycle.add(account)
+        scheduler.unregister.side_effect = (
+            OSError("TTL Redis unavailable") if fail_cleanup else None
+        )
+
+        response = await admin_client.delete(
+            f"/api/v1/admin/accounts/{account}", headers=root_headers()
+        )
+        assert response.status_code == 202, response.text
+        task = await _wait_for_task(admin_client, response.json()["result"]["task_id"])
+        if fail_cleanup:
+            assert task["status"] == "failed" and "TTL Redis unavailable" in task["error"]
+            assert await admin_app.state.api_key_manager.get_deletion(account) is not None
+            scheduler.unregister.side_effect = None
+            response = await admin_client.delete(
+                f"/api/v1/admin/accounts/{account}", headers=root_headers()
+            )
+            task = await _wait_for_task(admin_client, response.json()["result"]["task_id"])
+        assert task["status"] == "completed", task
+        assert not [key async for key in engine.redis.scan_iter(match=engine.prefix(account) + "*")]
+        assert await engine.redis.zcard(other_key) == 1
+        assert not engine._retry
+        assert account not in engine._pending | engine._recycle | engine._scheduled
+        scheduler.unregister.assert_awaited_with(engine._identity(account))
+
+        # Simulate a late bucket delivery, including after local runtime state is lost.
+        engine._scheduled.clear()
+        reports = scheduler.report.await_count
+        for _ in range(2):
+            result = await engine.handle(CallbackRequest(engine._identity(account)))
+            assert result.reason == "account_deleted"
+        assert scheduler.report.await_count == reports
+        assert not engine._recycle
+        from openviking_cli.exceptions import FailedPreconditionError
+
+        with pytest.raises(FailedPreconditionError, match="Account is unavailable"):
+            await engine.register_initial_backfill(
+                TTLBackfillRequest(engine.resource_id, account, (root,))
+            )
+        assert not [key async for key in engine.redis.scan_iter(match=engine.prefix(account) + "*")]
+    finally:
+        await engine.aclose()
+
 async def test_create_duplicate_account_fails(admin_client: httpx.AsyncClient):
     """Creating duplicate account should fail."""
     acct = _uid()
