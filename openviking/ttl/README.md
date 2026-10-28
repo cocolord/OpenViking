@@ -85,12 +85,15 @@ Concurrent misses share one load. This cache adds no periodic filesystem scan.
 
 The hidden ROOT-authenticated `/api/v1/admin/ttl/initial` endpoint registers or
 resets a fixed `initial` scan. Redis keeps its pending marker, checkpoint and done
-marker across OV restarts; startup does not discover objects by scanning AGFS.
+marker across OV restarts. Registration never lists business directories;
+`initial.discover=1` defers missing or reset scope discovery to maintenance.
+Reset retains the old roots for policy checks until discovery replaces them.
 The OV writer registers hourly maintenance with the existing expiry scheduler,
 using a stable ResourceID offset. Its TTL consumer starts on first registration;
 Redis retains that activation across restarts. An overdue callback after restart
-schedules the next window instead of immediately recycling. OV discovers initial
-roots when needed, reuses saved checkpoints and checks due candidates itself.
+schedules the next window instead of starting a scan or recycling. Configuration
+saves, first access and startup cannot bypass this window. OV discovers initial
+roots there, resumes saved checkpoints and recycles in later hourly rounds.
 The callback only schedules the next window and wakes maintenance; it never
 loads UserConfig. Maintenance isolates failures per Account. Completed initial
 scans are not replayed unless reset intent exists. A disabled scope retains the
@@ -102,6 +105,12 @@ find later users. Policy changes during a round may wait until the next round;
 deletion still rechecks current policy. No business directories are listed.
 Existing deletion throttling applies to eligible attempts, including failed or
 renewed Sessions.
+Background directory listings, policy batches and index pages wait
+`batch_interval` (50 ms by default), including Events and already-indexed entries.
+Incremental registration sends its first batch promptly and paces further batches
+independently. Failure backoff includes jitter and is capped at 60 seconds.
+These limits do not bound a single large `ls` or recursive `rm`, or total load
+across libraries sharing Redis. No new global coordinator is introduced.
 Local dev mode has no user registry, so it uses the minimum legal TTL as a
 conservative query bound and checks each candidate's policy before deletion.
 `/api/v1/admin/ttl/recycle` also supports explicit internal requests. The hidden

@@ -24,8 +24,9 @@ if TYPE_CHECKING:
 class TTLBackfillRequest:
     """Fixed initial scan: reset=False resumes the saved scope/checkpoint.
 
-    reset=True stops the scan, clears done, replaces roots/checkpoint and
-    registers pending; indexes survive. Untagged resets require state/log
+    reset=True stops the scan, clears done, resets the checkpoint and registers
+    pending; indexes survive. Omitted roots are discovered at the next hourly
+    window, including after restart. Untagged resets require state/log
     confirmation after a lost response. Tagged resets are adapter-deduplicated.
     """
 

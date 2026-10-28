@@ -18,7 +18,9 @@ def engine(monkeypatch, caplog):
     from openviking.ttl.runtime import logger
 
     monkeypatch.setattr(logger, "handlers", [caplog.handler])
-    e = DirectoryTTL(resource_id="r", timezone_name="UTC", stat_rate=100000, delete_interval=0)
+    e = DirectoryTTL(
+        resource_id="r", timezone_name="UTC", stat_rate=100000, delete_interval=0, batch_interval=0
+    )
     e.redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
     e.pair = (TTLConfig(sessions=7, user_events=7, peer_events=7), None)
 
@@ -93,6 +95,83 @@ def test_hourly_window_is_stable_and_skips_missed_rounds():
 
 
 @pytest.mark.asyncio
+async def test_libraries_defer_discovery_after_enable_reset_and_restart(monkeypatch):
+    from openviking.scheduling.expiry.api import CallbackRequest
+
+    clock = int(datetime(2026, 10, 28, tzinfo=timezone.utc).timestamp() * 1000)
+    monkeypatch.setattr("openviking.ttl.runtime.time.time_ns", lambda: clock * 1_000_000)
+    server = fakeredis.FakeServer()
+    root = "viking://user/u/sessions"
+    pair = (TTLConfig(sessions=7), None)
+
+    def replacement(resource):
+        e = DirectoryTTL(resource_id=resource, batch_interval=0, stat_rate=100000)
+        e.redis = fakeredis.aioredis.FakeRedis(server=server, decode_responses=True)
+        e.manager = SimpleNamespace(resolve_account=AsyncMock(return_value=pair))
+        tree = {"viking://user": ["viking://user/u"], root: [root + "/old"]}
+        e.fs = SimpleNamespace(
+            ls=AsyncMock(
+                side_effect=lambda uri, **kw: [
+                    {"uri": child, "isDir": True} for child in tree.get(uri, [])
+                ]
+            ),
+            stat=AsyncMock(return_value={"modTime": "2099-01-01T00:00:00Z"}),
+            read_file=AsyncMock(return_value="{}"),
+        )
+        e.account_manager = SimpleNamespace(list_users_page=AsyncMock(return_value={"users": []}))
+        e.install_expiry(SimpleNamespace(register_handler=Mock(), report=AsyncMock()))
+        return e
+
+    engines = []
+    try:
+        for resource in ("ov-one", "ov-two"):
+            old = replacement(resource)
+            try:
+                if resource == "ov-one":
+                    old.manager.resolve_account.return_value = (None, None)
+                    old.manager.patch_account = AsyncMock()
+                    await old.patch_configuration({"ttl": {"sessions": 7}}, "a")
+                else:
+                    prefix = old.prefix("a") + "backfill:"
+                    await old.redis.hset(prefix + "initial", "roots", json.dumps([root]))
+                    await old.redis.set(prefix + "initial:done", "1")
+                    await old.register_initial_backfill(
+                        TTLBackfillRequest(resource, "a", reset=True)
+                    )
+                old.fs.ls.assert_not_called()
+            finally:
+                await old.aclose()
+            e = replacement(resource)
+            engines.append(e)
+            await e.start()
+            await e.policy("a", root)  # First business access after a simultaneous release.
+            await e.register_initial_backfill(TTLBackfillRequest(resource, "a"))
+            await e.on_post_write(root + "/active/messages.jsonl", e.context("a"), clock)
+            await e._registration_task
+            assert await e.redis.zscore(e.prefix("a") + "sessions", root + "/active") == clock
+            await e.handle(CallbackRequest(e._identity("a")))  # Overdue callback from the old Pod.
+            assert e._task is None
+            e.fs.ls.assert_not_called()
+            e.fs.stat.assert_not_called()
+
+        assert len({e._recycle_after_ms for e in engines}) == 2
+        for e in sorted(engines, key=lambda e: e._recycle_after_ms):
+            clock = e._recycle_after_ms
+            await e.handle(CallbackRequest(e._identity("a")))
+            async with asyncio.timeout(2):
+                await e._task
+            state = await e.read_initial("a")
+            assert state["done"] and not state["discover"]
+            e.fs.stat.assert_awaited_once_with(root + "/old/messages.jsonl", ctx=e.context("a"))
+            for later in engines:
+                if later._recycle_after_ms > clock:
+                    later.fs.ls.assert_not_called()
+    finally:
+        for e in engines:
+            await e.aclose()
+
+
+@pytest.mark.asyncio
 async def test_incremental_keeps_buffer_until_schedule_is_durable(engine, scheduler):
     e = engine
     uri = "viking://user/u/sessions/s"
@@ -136,6 +215,13 @@ async def test_expiry_restart_resumes_checkpoint_without_full_scan(
     await e.start()
     request = CallbackRequest(e._identity("a"))
     try:
+        e.manager = SimpleNamespace(resolve_account=AsyncMock(return_value=e.pair))
+        await DirectoryTTL.policies(e, "a")
+        await e.policy("a", root)
+        await e.publish_user_configuration(e.context("a"), None)
+        await e.register_initial_backfill(TTLBackfillRequest("r", "a"))
+        assert e._task is None
+        e.fs.ls.assert_not_called()
         scheduler.report.side_effect = ConnectionError("Redis down")
         with pytest.raises(ConnectionError):
             await e.handle(request)
@@ -187,7 +273,11 @@ async def test_initial_discovers_roots_then_resumes_without_listing(engine, peer
     }
     e.fs.ls.side_effect = lambda uri, **kw: [{"uri": u, "isDir": True} for u in tree.get(uri, [])]
     await e.register_initial_backfill(TTLBackfillRequest("r", "a"))
+    assert (await e.read_initial("a"))["discover"]
+    e.fs.ls.assert_not_called()
+    await e._resume_initial("a")
     state = await e.read_initial("a")
+    assert not state["discover"]
     roots = json.loads(state["roots"])
     assert "viking://user/u/sessions" in roots
     assert all(root + "/memories/events" in roots for root in tree["viking://user/other/peers"])
@@ -213,7 +303,11 @@ async def test_hourly_trigger_recovers_intent_with_old_done(engine):
     await e.redis.hset(prefix + "reset_required", root, "saved-token")
     await e.recycle_due(TTLRecycleRequest("r", "a"))
     state = await e.read_initial("a")
-    assert not state["done"] and state["pending"] and not state["reset_required"]
+    assert not state["done"] and state["pending"] and state["discover"]
+    assert state["reset_required"]
+    e.fs.ls.assert_not_called()
+    await e._resume_initial("a")
+    assert not (await e.read_initial("a"))["reset_required"]
     e.fs.ls.reset_mock()
     await e.register_initial_backfill(TTLBackfillRequest("r", "a"))
     e.fs.ls.assert_not_called()
@@ -515,10 +609,19 @@ async def reset_case(engine):
 
 
 @pytest.mark.asyncio
-async def test_reset_intent_replay_keeps_new_checkpoint_and_newer_intent(reset_case):
+@pytest.mark.parametrize("discover", [False, True])
+async def test_reset_intent_replay_keeps_new_checkpoint_and_newer_intent(reset_case, discover):
     e, root, prefix, request = reset_case
+    if discover:
+        request = TTLBackfillRequest("r", "a", reset=True, reset_intents=request.reset_intents)
     await e.redis.zadd(e.prefix("a") + "sessions", {root + "/kept": 123})
     await e.register_initial_backfill(request)
+    if discover:
+        assert (await e.read_initial("a"))["discover"]
+        assert await e.redis.hget(prefix + "reset_required", root) == "token"
+        e.fs.ls.assert_not_called()
+        e._initial_roots = AsyncMock(return_value=[root])
+        await e._resume_initial("a")
     assert await e.redis.get(prefix + "initial:done") is None
     assert await e.redis.hget(prefix + "reset_required", root) is None
     assert await e.redis.sismember(prefix + "pending", "initial")
@@ -640,14 +743,21 @@ async def test_async_buffer_full_merges_existing_and_reports_drop(engine, caplog
 
 
 @pytest.mark.asyncio
-async def test_async_worker_drains_bounded_batches(engine):
+async def test_async_worker_drains_bounded_batches(engine, monkeypatch):
     e = engine
     e.batch_size = 512  # Incremental flush still caps the whole round at 256.
     for i in range(257):
         await e.on_post_write(f"viking://user/u/sessions/{i}/messages.jsonl", e.context("a"), i)
     original = e.redis.zadd
+    jitter = Mock(return_value=0)
+    monkeypatch.setattr("openviking.ttl.runtime.uniform", jitter)
+    attempts = 0
 
     async def register(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ConnectionError("registration temporarily unavailable")
         return await original(*args, **kwargs)
 
     e.redis.zadd = AsyncMock(side_effect=register)
@@ -656,7 +766,8 @@ async def test_async_worker_drains_bounded_batches(engine):
         async with asyncio.timeout(2):
             while e._retry:
                 await asyncio.sleep(0.01)
-        assert [len(call.args[1]) for call in e.redis.zadd.call_args_list] == [256, 1]
+        assert [len(call.args[1]) for call in e.redis.zadd.call_args_list] == [256, 256, 1]
+        jitter.assert_called_once_with(0.5, 1)
         assert all(call.kwargs == {"gt": True} for call in e.redis.zadd.call_args_list)
     finally:
         await e.aclose()
@@ -711,6 +822,9 @@ async def test_backfill_does_not_block_incremental_registration(engine):
     e.fs.stat.side_effect = stat
     await e.register_initial_backfill(TTLBackfillRequest("r", "a", (root,)))
     await e.start()
+    assert e._task is None  # Pending backfill alone cannot bypass the hourly callback.
+    e._recycle.add("a")
+    e._wake_worker()
     try:
         async with asyncio.timeout(2):
             await e._task
@@ -787,10 +901,20 @@ async def test_initial_sorted_batches_resume_after_missing_cursor(engine):
         "viking://user/other/peers/special/memories/events",
     ],
 )
-async def test_initial_event_parent_listed_once(engine, root):
+async def test_initial_event_parent_listed_once(engine, root, monkeypatch):
     from collections import Counter
 
     e = engine
+    e.batch_interval = 0.01
+    sleeps = []
+    sleep = asyncio.sleep
+
+    async def paced(delay):
+        if delay:
+            sleeps.append(delay)
+        await sleep(0)
+
+    monkeypatch.setattr("openviking.ttl.runtime.asyncio.sleep", paced)
     e.pair = (TTLConfig(user_events=7, peer_events=7), None)
     tree = {root: [root + "/2020"]}
     year = root + "/2020"
@@ -804,6 +928,13 @@ async def test_initial_event_parent_listed_once(engine, root):
     kind = "peer_events" if "/peers/" in root else "user_events"
     assert await e.redis.zcard(e.prefix("a") + kind) == 12
     assert await e.redis.get(e.prefix("a") + "backfill:initial:done") == "1"
+    assert sleeps == [e.batch_interval] * (len(tree) + 12)
+    # An explicit repair still paces Events that are already in the index.
+    sleeps.clear()
+    await e.register_initial_backfill(TTLBackfillRequest("r", "a", (root,), reset=True))
+    await e._scan("a")
+    assert sleeps == [e.batch_interval] * (len(tree) + 12)
+    e.fs.stat.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -861,6 +992,14 @@ async def test_user_only_ttl_reset_and_restart_reuse_saved_roots(engine, schedul
     e.fs.ls.side_effect = lambda uri, **kw: [{"uri": u, "isDir": True} for u in tree[uri]]
     await e.register_initial_backfill(TTLBackfillRequest("r", "a"))
     state = await e.read_initial("a")
+    assert state["discover"] and state["reset_required"]
+    e.fs.ls.assert_not_called()
+    e._user_policies.clear()  # Restart before scope discovery must retain the User-only intent.
+    e.fs.read_file = AsyncMock(
+        return_value=json.dumps({"ttl": config.model_dump(exclude_none=True)})
+    )
+    await e._resume_initial("a")
+    state = await e.read_initial("a")
     assert json.loads(state["roots"]) == [
         "viking://user/u/peers/one/memories/events",
         "viking://user/u/peers/two/memories/events",
@@ -868,7 +1007,6 @@ async def test_user_only_ttl_reset_and_restart_reuse_saved_roots(engine, schedul
     ]
     await e.redis.set(e.prefix("a") + "backfill:initial:done", "1")
     e._user_policies.clear()
-    e._recovered.clear()
     e.fs.ls.reset_mock()
     e.fs.read_file = AsyncMock(
         return_value=json.dumps({"ttl": config.model_dump(exclude_none=True)})
@@ -952,7 +1090,7 @@ async def test_hourly_callback_skips_config_and_maintenance_loads_users_once(eng
 async def test_maintenance_failure_isolated_to_one_account(engine, scheduler):
     e = engine
     e._recycle.update(("bad", "good"))
-    bad, good = list(e._initial_requests | e._pending | e._recycle)
+    bad, good = list(e._recycle)
     for account in e._recycle:
         await e.redis.set(e.prefix(account) + "backfill:initial:done", "1")
     read = e.read_initial

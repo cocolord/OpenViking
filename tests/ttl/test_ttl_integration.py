@@ -120,8 +120,16 @@ async def test_real_queue_writes_keep_ttl_on_service_loop(tmp_path, enabled):
         await asyncio.to_thread(queues.stop)
         if enabled:
             async with asyncio.timeout(5):
-                while engine._retry or (await engine.read_initial("a"))["done"] is not True:
+                while engine._retry:
                     await asyncio.sleep(0.01)
+            assert engine._task is None  # Queue writes do not start a recovery scan.
+            from openviking.scheduling.expiry.api import CallbackRequest
+
+            engine._recycle_after_ms = 0
+            await engine.handle(CallbackRequest(engine._identity("a")))
+            async with asyncio.timeout(5):
+                await engine._task
+            assert (await engine.read_initial("a"))["done"]
             assert engine._task.get_loop() is owner
             assert engine._registration_task.get_loop() is owner
             assert await raw.zscore(engine.prefix("a") + "sessions", session) is not None
@@ -130,7 +138,7 @@ async def test_real_queue_writes_keep_ttl_on_service_loop(tmp_path, enabled):
             assert echo[session] and echo[event]
         else:
             assert engine.redis is engine._task is engine._registration_task is None
-            assert not engine._retry and not engine._initial_requests
+            assert not engine._retry and not engine._pending
     finally:
         await asyncio.to_thread(queues.stop)
         if raw is not None:
@@ -666,6 +674,12 @@ async def test_http_configuration_initial_and_lifecycle(tmp_path, monkeypatch):
         response = await client.post("/api/v1/admin/ttl/initial", json=body)
         assert response.status_code == 200, response.text
         redis = await e.client()
+        assert e._task is None
+        assert await redis.get(e.prefix("space") + "backfill:initial:done") is None
+        from openviking.scheduling.expiry.api import CallbackRequest
+
+        e._recycle_after_ms = 0  # Advance to the scheduled window, not an HTTP-triggered scan.
+        await e.handle(CallbackRequest(e._identity("space")))
         async with asyncio.timeout(5):
             while await redis.get(e.prefix("space") + "backfill:initial:done") != "1":
                 await asyncio.sleep(0.01)
@@ -857,6 +871,13 @@ async def test_real_expiry_resumes_initial_and_recycles_without_server(tmp_path,
                 await asyncio.sleep(0.01)
             while not resumed._task.done():
                 await asyncio.sleep(0.01)
+        assert await fs.stat(unit, ctx=resumed.context("a"))
+        # Backfill completion does not immediately pile deletion onto the same round.
+        from openviking.scheduling.expiry.api import CallbackRequest
+
+        await resumed.handle(CallbackRequest(resumed._identity("a")))
+        async with asyncio.timeout(10):
+            await resumed._task
         with pytest.raises(NotFoundError):
             await fs.stat(unit, ctx=resumed.context("a"))
         assert await raw.zcard(resumed.prefix("a") + "user_events") == 0

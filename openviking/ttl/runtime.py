@@ -14,6 +14,7 @@ from collections import OrderedDict
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from itertools import islice
+from random import uniform
 from typing import TYPE_CHECKING, Any, Sequence
 from urllib.parse import quote
 from uuid import uuid4
@@ -75,16 +76,20 @@ end
 -- An acknowledged or superseded automatic reset must not erase new progress.
 if next(intents) and #matched == 0 then return 2 end
 redis.call('DEL', KEYS[2])
-redis.call('HSET', KEYS[1], 'roots', ARGV[1], 'checkpoint', ARGV[2])
+redis.call('HSET', KEYS[1], 'roots', ARGV[1], 'checkpoint', ARGV[2], 'discover', ARGV[4])
 redis.call('SADD', KEYS[3], 'initial')
-for _, scope in ipairs(matched) do redis.call('HDEL', KEYS[4], scope) end
+if ARGV[4] == '0' then
+  for _, scope in ipairs(matched) do redis.call('HDEL', KEYS[4], scope) end
+end
 return 1
 """
 INITIAL = """
 local roots = redis.call('HGET', KEYS[1], 'roots')
-if roots and roots ~= ARGV[1] then return 0 end
-redis.call('HSETNX', KEYS[1], 'roots', ARGV[1])
+local discover = redis.call('HGET', KEYS[1], 'discover') == '1'
+if roots and roots ~= ARGV[1] and not discover then return 0 end
+if not roots or discover then redis.call('HSET', KEYS[1], 'roots', ARGV[1]) end
 redis.call('HSETNX', KEYS[1], 'checkpoint', ARGV[2])
+redis.call('HSET', KEYS[1], 'discover', ARGV[4])
 if not redis.call('GET', KEYS[2]) then redis.call('SADD', KEYS[3], 'initial') end
 return 1
 """
@@ -104,7 +109,8 @@ if #fields > 0 then encoded = cjson.encode(intents) end
 return {redis.call('HGET', KEYS[1], 'roots') or '',
         redis.call('HGET', KEYS[1], 'checkpoint') or '',
         redis.call('GET', KEYS[2]) or '',
-        tostring(redis.call('SISMEMBER', KEYS[3], 'initial')), encoded}
+        tostring(redis.call('SISMEMBER', KEYS[3], 'initial')), encoded,
+        redis.call('HGET', KEYS[1], 'discover') or '0'}
 """
 
 
@@ -154,12 +160,13 @@ class DirectoryTTL:
         writer: bool = True,
         timezone_name: str | None = None,
         batch_size: int = 256,
+        batch_interval: float = 0.05,
         stat_rate: int = 200,
         delete_interval: float = 0.05,
         read_timeout: float = 0.2,
         retry_limit: int = 10000,
     ) -> None:
-        if not resource_id or not 1 <= batch_size <= 512 or stat_rate <= 0:
+        if not resource_id or not 1 <= batch_size <= 512 or stat_rate <= 0 or batch_interval < 0:
             raise ValueError("invalid TTL resource or rate limits")
         self.resource_id = resource_id
         self.redis_config = ExpiryRedisConfig.model_validate(redis or {})
@@ -168,6 +175,7 @@ class DirectoryTTL:
         # local timezone, just like its date-directory generation fallback.
         self.zone = ZoneInfo(timezone_name) if timezone_name else None
         self.batch_size, self.stat_rate = batch_size, stat_rate
+        self.batch_interval = batch_interval
         self.delete_interval, self.read_timeout = delete_interval, read_timeout
         self.retry_limit = retry_limit
         self.redis = None
@@ -178,7 +186,6 @@ class DirectoryTTL:
         self._wake = asyncio.Event()
         self._registration_wake = asyncio.Event()
         self._pending = set()
-        self._recovered = set()
         self._locks = {}
         self._stop_scan = set()
         self._retry = {}
@@ -186,7 +193,6 @@ class DirectoryTTL:
         self._recycle_lock = asyncio.Lock()
         self._scheduler: ExpiryScheduler | None = None
         self._scheduled: set[str] = set()
-        self._initial_requests: set[str] = set()
         self._recycle: set[str] = set()
         self._recycle_after_ms = 0
         self._dispatcher = OwnerLoopDispatcher()
@@ -243,7 +249,7 @@ class DirectoryTTL:
 
     def _wake_worker(self) -> None:
         self._wake.set()
-        if self.writer and self._started and not self._closed:
+        if self.writer and self._started and not self._closed and self._recycle:
             if self._task is None or self._task.done():
                 self._task = asyncio.create_task(self._run(), name="ttl-maintenance")
 
@@ -264,13 +270,16 @@ class DirectoryTTL:
             except Exception:
                 logger.exception("TTL registration retry delay=%s", delay)
                 try:
-                    await asyncio.wait_for(self._registration_wake.wait(), delay)
+                    await asyncio.wait_for(
+                        self._registration_wake.wait(), uniform(delay / 2, delay)
+                    )
                 except TimeoutError:
                     pass
                 delay = min(delay * 2, 60)
             else:
                 delay = 1
-                await asyncio.sleep(0)
+                if self._retry:
+                    await asyncio.sleep(self.batch_interval)
 
     async def patch_configuration(self, settings: dict, account_id: str | None = None) -> None:
         patch = settings["ttl"]
@@ -299,9 +308,6 @@ class DirectoryTTL:
             await self.manager.patch_cluster(settings)
         else:
             await self.manager.patch_account(account_id, settings)
-        self._initial_requests.update(account["account_id"] for account in accounts)
-        if accounts:
-            self._wake_worker()
 
     async def _register_reset_intent(self, account: str, scopes: Sequence[str]) -> None:
         try:
@@ -334,6 +340,7 @@ class DirectoryTTL:
                 "done": values[2] == "1",
                 "pending": values[3] == "1",
                 "reset_required": json.loads(values[4]),
+                "discover": values[5] == "1",
             }
         except Exception as exc:
             raise UnavailableError("TTL initial state query unavailable") from exc
@@ -341,7 +348,9 @@ class DirectoryTTL:
     async def _initial_roots(self, account: str, pair) -> list[str]:
         ctx = self.context(account)
         roots = set()
-        for user in await self._children("viking://user", ctx):
+        for i, user in enumerate(await self._children("viking://user", ctx)):
+            if i % self.batch_size == 0:
+                await asyncio.sleep(self.batch_interval)
             config = await self.user_policy(account, uri_parts(user)[1])
             for root in (user + "/memories/events", user + "/sessions"):
                 if resolve_effective_ttl(*pair, root, config).enabled:
@@ -415,10 +424,7 @@ class DirectoryTTL:
         user = (
             await self.user_policy(account, parts[1]) if classify_ttl_uri(uri) is not None else None
         )
-        policy = resolve_effective_ttl(*pair, uri, user)
-        if policy.enabled and self.writer and account not in self._recovered:
-            await self._dispatcher.run(lambda: self._recover(account))
-        return policy
+        return resolve_effective_ttl(*pair, uri, user)
 
     async def _initial_enabled(self, account: str, pair, state) -> bool:
         if self.enabled(pair):
@@ -450,31 +456,13 @@ class DirectoryTTL:
             key = (ctx.account_id, ctx.user.user_id)
             self._user_loads.pop(key, None)
             self._cache_user_policy(key, config)
-            if self.writer:
-                pair = await self.policies(ctx.account_id)
-                if any(
-                    resolve_effective_ttl(*pair, root, config).enabled
-                    for root in self.user_roots(ctx.user.user_id)
-                ):
-                    self._initial_requests.add(ctx.account_id)
-                    self._wake_worker()
 
         await self._dispatcher.run(publish)
 
     async def policies(self, account_id: str) -> tuple[TTLConfig | None, TTLConfig | None]:
-        pair = await self.manager.resolve_account(
+        return await self.manager.resolve_account(
             account_id, lambda v: (v.cluster.ttl, v.account.ttl)
         )
-        if self.writer and account_id not in self._recovered and self.enabled(pair):
-            await self._dispatcher.run(lambda: self._recover(account_id))
-        return pair
-
-    async def _recover(self, account_id: str) -> None:
-        # Queue threads may discover the same scope before the owner runs this.
-        if account_id not in self._recovered:
-            self._recovered.add(account_id)
-            self._initial_requests.add(account_id)
-            self._wake_worker()
 
     @classmethod
     def policy_roots(cls) -> list[str]:
@@ -511,8 +499,6 @@ class DirectoryTTL:
         self._recycle_after_ms = next_check_ms(self.resource_id, time.time_ns() // 1_000_000)
         if self._retry:
             self._wake_registrations()
-        if self._initial_requests or self._pending:
-            self._wake_worker()
 
     async def aclose(self) -> None:
         self._closed = True
@@ -634,9 +620,11 @@ class DirectoryTTL:
         state = await self.read_initial(account)
         if not await self._initial_enabled(account, pair, state):
             raise FailedPreconditionError("TTL is disabled")
-        await self._register_initial(request, pair, state)
+        await self._register_initial(request, pair, state, discover=False)
 
-    async def _register_initial(self, request: TTLBackfillRequest, pair, state) -> None:
+    async def _register_initial(
+        self, request: TTLBackfillRequest, pair, state, *, discover=True
+    ) -> None:
         account = request.account_id
         await self._schedule(account)
         intents = request.reset_intents or {
@@ -646,18 +634,22 @@ class DirectoryTTL:
         }
         reset = request.reset or bool(intents)
         roots = request.roots
+        if not reset and not state["roots"] and (state["pending"] or state["done"]):
+            raise FailedPreconditionError("initial state is missing roots")
+        needs_discovery = roots is None and (reset or state["discover"] or not state["roots"])
         if roots is None:
-            if not reset and state["roots"]:
+            if needs_discovery and discover:
+                roots = await self._initial_roots(account, pair)
+                needs_discovery = False
+            elif state["roots"]:
                 try:
                     roots = json.loads(state["roots"])
                 except ValueError as exc:
                     raise FailedPreconditionError("invalid saved initial roots") from exc
                 if not isinstance(roots, list):
                     raise FailedPreconditionError("invalid saved initial roots")
-            elif not reset and (state["pending"] or state["done"]):
-                raise FailedPreconditionError("initial state is missing roots")
             else:
-                roots = await self._initial_roots(account, pair)
+                roots = []
         roots = sorted(set(roots))
         try:
             for root in roots:
@@ -698,6 +690,7 @@ class DirectoryTTL:
                             json.dumps(roots, separators=(",", ":")),
                             checkpoint,
                             json.dumps(active_intents, separators=(",", ":")),
+                            "1" if needs_discovery else "0",
                         )
                     except Exception as exc:
                         raise UnavailableError(
@@ -716,34 +709,34 @@ class DirectoryTTL:
             account,
             "reset" if reset else "resume",
         )
-        self._wake_worker()
 
-    async def _resume_initial(self, account: str) -> None:
+    async def _resume_initial(self, account: str, *, discover=True) -> None:
         state = await self.read_initial(account)
         if state["done"] and not state["reset_required"]:
             return
         pair = await self.policies(account)
         if not await self._initial_enabled(account, pair, state):
-            self._recovered.discard(account)
             self._pending.discard(account)
             return
-        await self._register_initial(TTLBackfillRequest(self.resource_id, account), pair, state)
+        await self._register_initial(
+            TTLBackfillRequest(self.resource_id, account), pair, state, discover=discover
+        )
 
     async def _run(self):
         delay = 1
         while not self._closed:
             self._wake.clear()
             failed = False
-            for account in self._initial_requests | self._pending | self._recycle:
+            # Only expiry callbacks admit Accounts to a maintenance round.
+            for account in self._recycle.copy():
                 if self._closed:
                     break
                 try:
                     await self._resume_initial(account)
-                    self._initial_requests.discard(account)
                     if account in self._pending and not self._closed:
                         async with self._locks.setdefault(account, asyncio.Lock()):
                             await self._scan(account)
-                    if account in self._recycle and not self._closed:
+                    elif not self._closed:
                         result = await self._recycle_registered(
                             TTLRecycleRequest(self.resource_id, account)
                         )
@@ -753,23 +746,20 @@ class DirectoryTTL:
                             account,
                             result,
                         )
-                        self._recycle.discard(account)
+                    self._recycle.discard(account)
                 except Exception:
                     failed = True
                     logger.exception("TTL worker retry scope=%s delay=%s", account, delay)
             delay = min(delay * 2, 60) if failed else 1
-            if not failed:
-                if not (self._initial_requests or self._pending or self._recycle):
-                    return
-                if self._initial_requests:
-                    await asyncio.sleep(0)
-                    continue
+            if not self._recycle:
+                return
             try:
-                await asyncio.wait_for(self._wake.wait(), delay)
+                await asyncio.wait_for(self._wake.wait(), uniform(delay / 2, delay))
             except TimeoutError:
                 pass
 
     async def _children(self, uri, ctx):
+        await asyncio.sleep(self.batch_interval)
         try:
             entries = await self.fs.ls(
                 uri,
@@ -795,6 +785,8 @@ class DirectoryTTL:
             self._pending.discard(account)
             return
         state = await redis.hgetall(prefix + "initial")
+        if state.get("discover") == "1":
+            return  # Scope discovery belongs to the scheduled maintenance round.
         if not state.get("roots") or not state.get("checkpoint"):
             raise FailedPreconditionError("pending initial has incomplete state")
         roots = json.loads(state["roots"])
@@ -848,6 +840,7 @@ class DirectoryTTL:
             items = [(u, directory(u)) for u in batch]
             items = [(u, item) for u, item in items if item is not None]
             if items:
+                await asyncio.sleep(self.batch_interval)
                 index = self.prefix(account) + items[0][1][0]
                 scores = await redis.zmscore(index, [u for u, _ in items])
                 additions = {}
@@ -935,7 +928,7 @@ class DirectoryTTL:
         if not self.writer or request.resource_id != self.resource_id:
             raise FailedPreconditionError("TTL request must target this writer")
         if request.max_base_time_ms is None:
-            await self._resume_initial(request.account_id)
+            await self._resume_initial(request.account_id, discover=False)
         return await self._recycle_registered(request)
 
     async def _recycle_registered(self, request: TTLRecycleRequest) -> TTLRecycleResult:
@@ -959,6 +952,7 @@ class DirectoryTTL:
             for kind in ("user_events", "peer_events", "sessions"):
                 offset = 0
                 while not self._closed:
+                    await asyncio.sleep(self.batch_interval)
                     candidates = await redis.zrangebyscore(
                         prefix + kind,
                         "-inf",
@@ -1006,7 +1000,9 @@ class DirectoryTTL:
                 # Local dev mode has no user registry; use the safe lower bound.
                 return time.time_ns() // 1_000_000
             users = await manager.list_users_page(account, limit=None, expose_key=False)
-            for user in users["users"]:
+            for i, user in enumerate(users["users"]):
+                if i % self.batch_size == 0:
+                    await asyncio.sleep(self.batch_interval)
                 days = minimum(await self.user_policy(account, user["user_id"]), days)
                 if days == 1:
                     break
