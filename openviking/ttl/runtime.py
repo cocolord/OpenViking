@@ -192,7 +192,6 @@ class DirectoryTTL:
         self._dispatcher = OwnerLoopDispatcher()
         self._user_policies = OrderedDict()
         self._user_loads = {}
-        self.account_manager = None
 
     def bind_runtime(self, service: OpenVikingService, account_manager: APIKeyManager) -> None:
         # Bind before queue workers can invoke the write hooks.
@@ -1002,12 +1001,11 @@ class DirectoryTTL:
 
         days = minimum(None)
         if days != 1:
-            if self.account_manager is None:
+            manager = getattr(self, "account_manager", None)
+            if manager is None:
                 # Local dev mode has no user registry; use the safe lower bound.
                 return time.time_ns() // 1_000_000
-            users = await self.account_manager.list_users_page(
-                account, limit=None, expose_key=False
-            )
+            users = await manager.list_users_page(account, limit=None, expose_key=False)
             for user in users["users"]:
                 days = minimum(await self.user_policy(account, user["user_id"]), days)
                 if days == 1:

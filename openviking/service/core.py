@@ -28,6 +28,8 @@ from openviking.service.mineru_preflight import wait_for_mineru_ready
 from openviking.service.pack_service import PackService
 from openviking.service.resource_memory_link_service import ResourceMemoryLinkService
 from openviking.service.resource_service import ResourceService
+from openviking.service.rule_cleanup import RuleCleanupScheduler
+from openviking.service.rule_service import RuleService
 from openviking.service.search_service import SearchService
 from openviking.service.session_auto_commit import SessionAutoCommitScheduler
 from openviking.service.session_service import SessionService
@@ -57,6 +59,7 @@ from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils import get_logger
 from openviking_cli.utils.config import OPENVIKING_ENABLE_RECORDER_ENV, get_openviking_config
 from openviking_cli.utils.config.agent_evolution_config import AgentEvolutionConfig
+from openviking_cli.utils.config.config_utils import DEFAULT_SERVICE_NAME
 from openviking_cli.utils.config.git_config import GitConfig
 from openviking_cli.utils.config.memory_config import SessionAutoCommitConfig
 from openviking_cli.utils.config.open_viking_config import initialize_openviking_config
@@ -112,6 +115,7 @@ class OpenVikingService:
         self._uri_mutation_coordinator = UriMutationCoordinator()
         self._watch_scheduler: Optional[WatchScheduler] = None
         self._session_auto_commit_scheduler: Optional[SessionAutoCommitScheduler] = None
+        self._rule_cleanup_scheduler: Optional[RuleCleanupScheduler] = None
         self._expiry_runtime: Optional["ExpiryRuntime"] = None
         self._ttl_adapter: Optional["TTLAdapter"] = None
         self._compile_scheduler: Optional[CompileScheduler] = None
@@ -133,6 +137,7 @@ class OpenVikingService:
         self._search_service = SearchService()
         self._resource_memory_link_service = ResourceMemoryLinkService()
         self._resource_service = ResourceService()
+        self._rule_service = RuleService()
         self._session_service = SessionService()
         self._debug_service = DebugService()
         self._agent_evolution_service = AgentEvolutionService()
@@ -170,6 +175,7 @@ class OpenVikingService:
             max_concurrent_external_task=config.queue_workers.external_task.max_concurrent,
             binding_config=binding_config,
             git_config=config.git,
+            service_name=config.service_name,
         )
 
     def _init_storage(
@@ -185,6 +191,7 @@ class OpenVikingService:
         binding_config: Any = None,
         *,
         git_config: Optional[GitConfig] = None,
+        service_name: str = DEFAULT_SERVICE_NAME,
     ) -> None:
         """Initialize storage resources."""
         from openviking.utils.agfs_utils import RagfsBindingConfig, create_agfs_client
@@ -218,7 +225,7 @@ class OpenVikingService:
         self._vikingdb_manager.acl_manager = AclManager(self._vikingdb_manager)
 
         # PathLock has been moved to Rust ragfs; Python-layer LockManager is no longer needed.
-        set_task_tracker(config.build_task_tracker(self._agfs_client))
+        set_task_tracker(config.build_task_tracker(self._agfs_client, service_name=service_name))
 
     def _build_ragfs_binding_config(self) -> Any:
         """Build the single runtime binding config from OpenViking storage + encryption settings."""
@@ -422,6 +429,11 @@ class OpenVikingService:
         return self._resource_service
 
     @property
+    def rules(self) -> RuleService:
+        """Get the rule compilation and retrieval service."""
+        return self._rule_service
+
+    @property
     def sessions(self) -> SessionService:
         """Get SessionService instance."""
         return self._session_service
@@ -603,6 +615,8 @@ class OpenVikingService:
             viking_fs=self._viking_fs,
             session_compressor=self._session_compressor,
             vlm_resolver=self._vlm_resolver,
+            privacy_config_service=self._privacy_config_service,
+            privacy_sanitizer=self._privacy_sanitizer,
         )
         self._resource_memory_link_service.set_dependencies(
             vikingdb=self._vikingdb_manager,
@@ -646,6 +660,23 @@ class OpenVikingService:
             viking_fs=self._viking_fs,
         )
         self._compile_service.configure_memory_runner(vikingdb=self._vikingdb_manager)
+        self._rule_service.set_dependencies(
+            fs=self._fs_service,
+            resources=self._resource_service,
+            search=self._search_service,
+            vlm_resolver=self._vlm_resolver,
+            rules_config=config.rules,
+            config=config,
+        )
+        if config.rules.archived_cleanup_enabled:
+            self._rule_cleanup_scheduler = RuleCleanupScheduler(
+                self._rule_service,
+                self._viking_fs,
+                config.rules,
+            )
+            await self._rule_cleanup_scheduler.start()
+        else:
+            self._rule_cleanup_scheduler = None
         compile_config = self._config.compile_api
         compile_store = CompileStateStore(self._agfs_client)
         self._compile_service.configure_lifecycle(CompileLifecycle(compile_store, self._viking_fs))
@@ -796,11 +827,14 @@ class OpenVikingService:
 
     async def _stop_expiry(self) -> None:
         """Stop expiry work before releasing dependencies used by callbacks."""
-        if self._ttl_adapter is not None:
-            await self._ttl_adapter.aclose()
-        runtime = self._expiry_runtime
+        ttl_adapter = getattr(self, "_ttl_adapter", None)
+        if ttl_adapter is not None:
+            await ttl_adapter.aclose()
+        runtime = getattr(self, "_expiry_runtime", None)
         if runtime is None:
-            self._session_service.set_session_expiry_adapter(None)
+            session_service = getattr(self, "_session_service", None)
+            if session_service is not None:
+                session_service.set_session_expiry_adapter(None)
             return
         try:
             await runtime.close()
@@ -845,6 +879,12 @@ class OpenVikingService:
             await self._session_auto_commit_scheduler.stop()
             self._session_auto_commit_scheduler = None
             logger.info("SessionAutoCommitScheduler stopped")
+
+        rule_cleanup_scheduler = getattr(self, "_rule_cleanup_scheduler", None)
+        if rule_cleanup_scheduler:
+            await rule_cleanup_scheduler.stop()
+            self._rule_cleanup_scheduler = None
+            logger.info("RuleCleanupScheduler stopped")
 
         if self._queue_manager:
             await asyncio.to_thread(self._queue_manager.stop)

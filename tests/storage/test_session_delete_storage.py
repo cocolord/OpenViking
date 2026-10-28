@@ -48,7 +48,6 @@ def storage():
     "request_uri",
     [
         SESSION_URI,
-        "viking://session/session-1",
         "viking://~/sessions/session-1",
         "viking://temp/alice/raw-upload-1",
     ],
@@ -137,6 +136,20 @@ async def test_session_rm_releases_its_tree_lease_when_backend_delete_fails(stor
 
     storage.agfs.pathlock_release.assert_awaited_once_with(storage.lease)
     assert storage.agfs.rm.await_args.kwargs["fs_ctx"]["lease_ref"] == "delete-lease"
+
+
+async def test_session_rm_rechecks_existence_after_waiting_for_tree_lock(storage):
+    storage.agfs.stat.side_effect = [
+        {"isDir": True},
+        FileNotFoundError(SESSION_PATH),
+    ]
+
+    result = await storage.fs.rm(SESSION_URI, recursive=True, ctx=storage.ctx, no_vector=True)
+
+    assert result == {"estimated_deleted_count": 0}
+    storage.agfs.pathlock_acquire_tree.assert_awaited_once_with(SESSION_PATH)
+    storage.agfs.rm.assert_not_awaited()
+    storage.agfs.pathlock_release.assert_awaited_once_with(storage.lease)
 
 
 async def test_session_rm_reuses_outer_lease_without_releasing_it(storage):
