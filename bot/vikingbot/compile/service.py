@@ -71,7 +71,11 @@ from vikingbot.compile.renderer import (
     validate_declared_okf_markdown,
 )
 from vikingbot.compile.sandbox import CompileSandboxManager
-from vikingbot.compile.sources import CompileSourceRange, pack_source_batches
+from vikingbot.compile.sources import (
+    CompileSourceRange,
+    ensure_compile_source_supported,
+    pack_source_batches,
+)
 from vikingbot.compile.store import CompileTaskStore
 from vikingbot.config.schema import SandboxBackend, SandboxMode, SessionKey
 from vikingbot.openviking_mount.ov_server import VikingClient
@@ -1143,6 +1147,8 @@ class BotCompileService:
             """Retain at most one read batch of source bodies while seeding task shards."""
             for start in range(0, len(ordered), 8):
                 uris = ordered[start : start + 8]
+                for uri in uris:
+                    ensure_compile_source_supported(uri)
                 contents = await asyncio.gather(
                     *(client.read_raw(uri) for uri in uris), return_exceptions=True
                 )
@@ -1580,6 +1586,8 @@ class BotCompileService:
         ordered = files if files is not None else await self._list_source_files(client, roots)
         for start in range(0, len(ordered), 8):
             uris = ordered[start : start + 8]
+            for uri in uris:
+                ensure_compile_source_supported(uri)
             contents = await asyncio.gather(*(client.read_raw(uri) for uri in uris))
             sources.extend(zip(uris, contents, strict=True))
         return pack_source_batches(sources, self.limits)

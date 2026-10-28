@@ -6,13 +6,27 @@ import re
 from bisect import bisect_right
 from dataclasses import dataclass
 from typing import Iterable
+from urllib.parse import urlsplit
 
-from vikingbot.compile.models import CompileLimits
+from openviking.parse.base import MediaType
+from openviking.parse.parsers.media.utils import get_media_type
+from vikingbot.compile.models import CompileFailure, CompileLimits
 
 _HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+\S")
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _FRONTMATTER = re.compile(r"\A---\r?\n.*?\r?\n(?:---|\.\.\.)(?:\r?\n|$)", re.DOTALL)
 _TABLE_SEPARATOR = re.compile(r"\s*\|(?:\s*:?-{3,}:?\s*\|)+\s*")
+
+
+def ensure_compile_source_supported(uri: str) -> None:
+    """Reject images until Compile can preserve native multimodal evidence."""
+    if get_media_type(urlsplit(uri).path, None) == MediaType.IMAGE.value:
+        raise CompileFailure(
+            "INVALID_ARGUMENT",
+            f"Compile does not support image evidence sources yet: {uri}. "
+            "Use text sources until native multimodal Compile evidence is supported.",
+            stage="pipeline",
+        )
 
 
 @dataclass(frozen=True)
@@ -51,6 +65,7 @@ def split_source(uri: str, content: str, max_chars: int) -> list[CompileSourceRa
     frontmatter/headings/table headers use at most one quarter of the budget; their
     original text remains in the source ranges. Empty files retain one empty range.
     """
+    ensure_compile_source_supported(uri)
     if max_chars < 1:
         raise ValueError("Source character budget must be positive")
     lines = content.splitlines(keepends=True)

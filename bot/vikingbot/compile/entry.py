@@ -15,7 +15,7 @@ from vikingbot.compile.ops.common import payload
 from vikingbot.compile.pipeline_io import ModelCallError, ModelCallLimitError
 from vikingbot.compile.renderer import validate_relative_file_path
 from vikingbot.compile.results import FileResponse, Group
-from vikingbot.compile.sources import split_source
+from vikingbot.compile.sources import ensure_compile_source_supported, split_source
 
 
 class EntryResponse(FileResponse):
@@ -143,6 +143,7 @@ async def run(runtime, sources, context):
                     await runtime.files.put("inputs", manifest)
                     selected = set()
                     for uri in dict.fromkeys(source_uris):
+                        ensure_compile_source_supported(uri)
                         text = await runtime.client.read_raw(uri)
                         lines = text.splitlines(keepends=True)
                         excerpt = "".join(
