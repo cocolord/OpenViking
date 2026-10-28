@@ -15,6 +15,7 @@ from vikingbot.agent.tools.compile import CompileChildTool
 from vikingbot.agent.tools.registry import ToolRegistry
 from vikingbot.compile import file_ops
 from vikingbot.compile.hashing import content_hash
+from vikingbot.compile.media import model_content
 from vikingbot.compile.models import COMPILE_DRAFT_ROOT
 from vikingbot.compile.pipeline_io import ROOT, TaskFiles, retry_allowed
 from vikingbot.compile.renderer import validate_relative_file_path
@@ -37,6 +38,9 @@ class ChildProvider(LLMProvider):
     def get_default_model(self):
         return self.model.model
 
+    def supports_tool_result_media(self, model=None):
+        return self.model.provider.supports_tool_result_media(model or self.model.model)
+
     async def chat(self, messages, tools=None, **kwargs):
         """Retry truncated output without executing incomplete tool calls."""
         while True:
@@ -52,7 +56,7 @@ class ChildProvider(LLMProvider):
             messages = [*messages, {"role": "user", "content": error}]
 
 
-async def complete_tool_result(result, session_key):
+async def complete_tool_result(result, session_key, *, preserve_complete: bool = False):
     """Keep scoped tool evidence complete for subsequent model requests.
 
     Child file tools cannot read shared preview spill files, so head/tail previews
@@ -71,8 +75,8 @@ async def prepare_assignment(data, sandbox, root):
     assignment["inputs"] = []
     for item in data.get("inputs", []):
         payload = item.get("payload", {})
-        if "text" in payload and "uri" in payload:
-            payload = {k: v for k, v in payload.items() if k != "text"}
+        if "uri" in payload and ("text" in payload or "media" in payload):
+            payload = {k: v for k, v in payload.items() if k not in {"text", "media"}}
             payload["source_ranges"] = [item["id"]]
         assignment["inputs"].append({**item, "payload": payload})
     if "candidates" in data:
@@ -347,7 +351,7 @@ def agent_runner(loop, session_key, connection, limits):
                     "role": "system",
                     "content": system + instructions,
                 },
-                {"role": "user", "content": json.dumps(assignment, ensure_ascii=False)},
+                {"role": "user", "content": model_content(assignment)},
             ],
             session_key=session_key,
             publish_events=False,

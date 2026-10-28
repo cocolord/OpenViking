@@ -73,8 +73,8 @@ from vikingbot.compile.renderer import (
 from vikingbot.compile.sandbox import CompileSandboxManager
 from vikingbot.compile.sources import (
     CompileSourceRange,
-    ensure_compile_source_supported,
-    pack_source_batches,
+    pack_source_ranges,
+    read_source,
 )
 from vikingbot.compile.store import CompileTaskStore
 from vikingbot.config.schema import SandboxBackend, SandboxMode, SessionKey
@@ -1147,10 +1147,12 @@ class BotCompileService:
             """Retain at most one read batch of source bodies while seeding task shards."""
             for start in range(0, len(ordered), 8):
                 uris = ordered[start : start + 8]
-                for uri in uris:
-                    ensure_compile_source_supported(uri)
                 contents = await asyncio.gather(
-                    *(client.read_raw(uri) for uri in uris), return_exceptions=True
+                    *(
+                        read_source(client, uri, self.limits, pipeline.model.provider)
+                        for uri in uris
+                    ),
+                    return_exceptions=True,
                 )
                 readable = []
                 for uri, content in zip(uris, contents, strict=True):
@@ -1158,12 +1160,17 @@ class BotCompileService:
                         manifest = await pipeline.files.get("inputs")
                         manifest[uri] = "failed"
                         await pipeline.files.put("inputs", manifest)
+                        if (
+                            isinstance(content, CompileFailure)
+                            and content.code == "UNSUPPORTED_MEDIA"
+                        ):
+                            raise content
                         pipeline.failures.append(f"Source read failed: {uri}: {str(content)[:400]}")
                     elif isinstance(content, BaseException):
                         raise content
                     else:
-                        readable.append((uri, content))
-                for batch in pack_source_batches(readable, self.limits):
+                        readable.extend(content)
+                for batch in pack_source_ranges(readable, self.limits):
                     yield batch
 
         try:
@@ -1582,15 +1589,16 @@ class BotCompileService:
         self, client: VikingClient, roots: list[str], *, files: list[str] | None = None
     ) -> list[list[CompileSourceRange]]:
         """Read selected files (or inventory roots) eight at a time; read errors propagate."""
-        sources: list[tuple[str, str]] = []
+        sources: list[CompileSourceRange] = []
         ordered = files if files is not None else await self._list_source_files(client, roots)
         for start in range(0, len(ordered), 8):
             uris = ordered[start : start + 8]
-            for uri in uris:
-                ensure_compile_source_supported(uri)
-            contents = await asyncio.gather(*(client.read_raw(uri) for uri in uris))
-            sources.extend(zip(uris, contents, strict=True))
-        return pack_source_batches(sources, self.limits)
+            contents = await asyncio.gather(
+                *(read_source(client, uri, self.limits, self.agent_loop.provider) for uri in uris)
+            )
+            for parts in contents:
+                sources.extend(parts)
+        return pack_source_ranges(sources, self.limits)
 
     def _configure_compile_subagents(
         self,

@@ -450,6 +450,9 @@ class Pipeline:
 
         return {
             "file_count": count,
+            "image_count": sum(
+                self.evidence[r.record_id].get("media_kind") == "image" for r in sources
+            ),
             "range_count": len(sources),
             "total_chars": sum(lengths),
             "file_chars": {
@@ -470,9 +473,10 @@ class Pipeline:
 
         async def write_source(item):
             """Atomically write one (ID, metadata, range); return its record and evidence."""
-            record_id, metadata, text, context = item
+            record_id, metadata, text, context, media = item
             await self.files.put(
-                f"sources/{record_id}", {**metadata, "text": text, "context": context}
+                f"sources/{record_id}",
+                {**metadata, **({"media": media} if media else {"text": text, "context": context})},
             )
             return Record(
                 record_id, f"sources/{record_id}", [record_id], metadata["uri"], {}, []
@@ -499,7 +503,7 @@ class Pipeline:
             for part in batch:
                 metadata = {
                     "uri": part.uri,
-                    "hash": content_hash(part.content),
+                    "hash": part.sha256 or content_hash(part.content),
                     "start_char": part.start_char,
                     "end_char": part.end_char,
                     "start_line": part.start_line,
@@ -507,11 +511,17 @@ class Pipeline:
                     "continues_before": part.continues_before,
                     "continues_after": part.continues_after,
                 }
+                if part.media_kind:
+                    metadata["media_kind"] = part.media_kind
+                if part.media:
+                    metadata["media_bytes"] = part.media_bytes
+                if part.representation:
+                    metadata["representation"] = part.representation
                 record_id = digest(metadata)[:24]
                 if record_id in seen:
                     continue
                 seen.add(record_id)
-                pending.append((record_id, metadata, part.content, part.context))
+                pending.append((record_id, metadata, part.content, part.context, part.media))
                 if len(pending) >= self.limits.source_concurrency:
                     await flush()
         if pending:
@@ -543,7 +553,7 @@ class Pipeline:
                     continue
                 seen.add(record_id)
                 manifest.setdefault(uri, "pending")
-                pending.append((record_id, metadata, text, ""))
+                pending.append((record_id, metadata, text, "", None))
                 if len(pending) >= self.limits.source_concurrency:
                     await flush()
             if pending:

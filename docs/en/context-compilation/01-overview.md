@@ -14,6 +14,14 @@ Use the optional `--instruction` to specify this run's scope, audience, language
 
 The configured [Agent Runtime](../api/23-agent-runtime.md) runs the compilation; local deployments can use the built-in [VikingBot](../concepts/15-vikingbot.md). It reads the sources and Skill under the requesting user's identity, then organizes and writes content in a dedicated agent loop. The task runs asynchronously and returns a `task_id` for checking progress and results.
 
+### Images and other media
+
+The built-in VikingBot shares the `openviking_multi_read` source reader. Text keeps its original content and line references; PNG, JPEG, GIF and WebP images are delivered as native image evidence with their source URI and byte hash. Image evidence has no text line ranges. Audio and video use an existing textual overview, explicitly marked as derived content; missing overviews and unsupported media formats are reported as errors.
+
+Image sources require a vision-capable model and a provider adapter with native tool-result media support. The current adapter enables this for `anthropic` and `openai-codex` backends, with every configured fallback also required to support it. Other providers receive an explicit unsupported-media diagnostic. Successful image ingestion alone does not establish Compile image support.
+
+The reader batches up to four images within the existing inline media byte budget. Oversized images or model requests report a limit error instead of silently dropping evidence. Repeated image reads increase request size and visual token usage; Compile does not add a separate image-summary model call.
+
 ## Run it in one command
 
 First import the sources and install the Skill using the [LLM Wiki example](02-llm-wiki.md), then run:

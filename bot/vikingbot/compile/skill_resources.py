@@ -11,6 +11,7 @@ from openviking.core.namespace import relative_uri_path
 from openviking.utils.path_safety import safe_join_viking_uri
 from vikingbot.agent.tools.base import Tool
 from vikingbot.compile.hashing import content_hash
+from vikingbot.compile.media import tool_result
 from vikingbot.compile.models import COMPILE_STAGING_ROOT
 from vikingbot.compile.renderer import validate_relative_file_path
 
@@ -127,7 +128,8 @@ class EvidenceReader(Tool):
     name = "read_evidence"
     description = (
         "Read assigned original evidence. Optional start_line/end_line are one-based, inclusive "
-        "lines within the source_range shard; omit both for the complete shard."
+        "lines within the source_range shard; omit both for the complete shard. "
+        "Original images are returned as native media and do not have text line ranges."
     )
     parameters = {
         "type": "object",
@@ -155,7 +157,7 @@ class EvidenceReader(Tool):
         )
         for item in data.get("inputs", []) if isinstance(data, dict) else []:
             payload = item.get("payload", {})
-            if "text" in payload and "uri" in payload:
+            if "uri" in payload and ("text" in payload or "media" in payload):
                 self.allowed.add(item["id"])
                 self.delivered.add(item["id"])
             self.allowed.update(payload.get("source_ranges", []))
@@ -180,6 +182,10 @@ class EvidenceReader(Tool):
         value = await self.files.get(f"sources/{source_range}")
         if value is None:
             raise ValueError("Assigned source range is missing")
+        if value.get("media_kind") == "image":
+            if spans:
+                raise ValueError("Image evidence has no text line ranges; omit line bounds")
+            return {**value, "complete": True}
         lines = value["text"].splitlines(keepends=True)
         merged = []
         for start, end in sorted(spans):
@@ -210,4 +216,4 @@ class EvidenceReader(Tool):
         if (start_line is None) != (end_line is None):
             raise ValueError("Supply both start_line and end_line, or neither")
         spans = [] if start_line is None else [(start_line, end_line)]
-        return json.dumps(await self.read(source_range, spans), ensure_ascii=False)
+        return tool_result(await self.read(source_range, spans))

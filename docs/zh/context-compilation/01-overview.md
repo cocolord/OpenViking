@@ -14,6 +14,14 @@
 
 编译由服务端配置的 [Agent Runtime](../api/23-agent-runtime.md) 执行，本地部署可使用内置 [VikingBot](../concepts/15-vikingbot.md)。它以请求用户的身份读取来源和 Skill，在独立的 Agent Loop 中整理并写入内容。任务异步运行，返回 `task_id` 后可查询进度和结果。
 
+### 图片与其他媒体
+
+内置 VikingBot 与 `openviking_multi_read` 共用素材读取实现。文本保留原文及行范围；PNG、JPEG、GIF、WebP 图片以原生图片证据传入模型，保留来源 URI 和原始字节哈希。图片没有文本行范围。音视频读取已有文字概览，并明确标记为派生内容；缺少概览或格式不受支持时报告错误。
+
+图片来源需要支持视觉输入的模型，以及支持原生工具结果媒体的 provider 适配器。当前适配器为 `anthropic`、`openai-codex` 后端开放该能力，配置的所有备用后端也必须支持。其他 provider 返回明确的不支持媒体诊断。图片导入成功不等于 Compile 可以使用图片。
+
+读取按现有内联媒体字节预算分批，每批最多四张图片。图片或模型请求超出预算时明确报错，不静默丢弃证据。重复读取图片会增加请求体和视觉 token 用量；Compile 不额外增加独立的图片摘要模型调用。
+
 ## 一条命令跑起来
 
 先按 [LLM Wiki 示例](02-llm-wiki.md) 导入来源、安装 Skill，再执行：
