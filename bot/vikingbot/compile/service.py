@@ -71,11 +71,7 @@ from vikingbot.compile.renderer import (
     validate_declared_okf_markdown,
 )
 from vikingbot.compile.sandbox import CompileSandboxManager
-from vikingbot.compile.sources import (
-    CompileSourceRange,
-    pack_source_ranges,
-    read_source,
-)
+from vikingbot.compile.sources import CompileSourceRange, pack_source_batches, read_source
 from vikingbot.compile.store import CompileTaskStore
 from vikingbot.config.schema import SandboxBackend, SandboxMode, SessionKey
 from vikingbot.openviking_mount.ov_server import VikingClient
@@ -1148,10 +1144,7 @@ class BotCompileService:
             for start in range(0, len(ordered), 8):
                 uris = ordered[start : start + 8]
                 contents = await asyncio.gather(
-                    *(
-                        read_source(client, uri, self.limits, pipeline.model.provider)
-                        for uri in uris
-                    ),
+                    *(read_source(client, uri, pipeline.model.provider) for uri in uris),
                     return_exceptions=True,
                 )
                 readable = []
@@ -1169,8 +1162,8 @@ class BotCompileService:
                     elif isinstance(content, BaseException):
                         raise content
                     else:
-                        readable.extend(content)
-                for batch in pack_source_ranges(readable, self.limits):
+                        readable.append((uri, content))
+                for batch in pack_source_batches(readable, self.limits):
                     yield batch
 
         try:
@@ -1589,16 +1582,15 @@ class BotCompileService:
         self, client: VikingClient, roots: list[str], *, files: list[str] | None = None
     ) -> list[list[CompileSourceRange]]:
         """Read selected files (or inventory roots) eight at a time; read errors propagate."""
-        sources: list[CompileSourceRange] = []
+        sources: list[tuple[str, str | CompileSourceRange]] = []
         ordered = files if files is not None else await self._list_source_files(client, roots)
         for start in range(0, len(ordered), 8):
             uris = ordered[start : start + 8]
             contents = await asyncio.gather(
-                *(read_source(client, uri, self.limits, self.agent_loop.provider) for uri in uris)
+                *(read_source(client, uri, self.agent_loop.provider) for uri in uris)
             )
-            for parts in contents:
-                sources.extend(parts)
-        return pack_source_ranges(sources, self.limits)
+            sources.extend(zip(uris, contents, strict=True))
+        return pack_source_batches(sources, self.limits)
 
     def _configure_compile_subagents(
         self,

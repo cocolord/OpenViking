@@ -15,7 +15,6 @@ from vikingbot.agent.tools.compile import CompileChildTool
 from vikingbot.agent.tools.registry import ToolRegistry
 from vikingbot.compile import file_ops
 from vikingbot.compile.hashing import content_hash
-from vikingbot.compile.media import model_content
 from vikingbot.compile.models import COMPILE_DRAFT_ROOT
 from vikingbot.compile.pipeline_io import ROOT, TaskFiles, retry_allowed
 from vikingbot.compile.renderer import validate_relative_file_path
@@ -75,8 +74,8 @@ async def prepare_assignment(data, sandbox, root):
     assignment["inputs"] = []
     for item in data.get("inputs", []):
         payload = item.get("payload", {})
-        if "uri" in payload and ("text" in payload or "media" in payload):
-            payload = {k: v for k, v in payload.items() if k not in {"text", "media"}}
+        if "text" in payload and "uri" in payload:
+            payload = {k: v for k, v in payload.items() if k != "text"}
             payload["source_ranges"] = [item["id"]]
         assignment["inputs"].append({**item, "payload": payload})
     if "candidates" in data:
@@ -351,7 +350,7 @@ def agent_runner(loop, session_key, connection, limits):
                     "role": "system",
                     "content": system + instructions,
                 },
-                {"role": "user", "content": model_content(assignment)},
+                {"role": "user", "content": json.dumps(assignment, ensure_ascii=False)},
             ],
             session_key=session_key,
             publish_events=False,

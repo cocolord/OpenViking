@@ -14,7 +14,6 @@ from openviking.core.namespace import relative_uri_path
 from openviking.models.model_error import ModelErrorKind, model_error_kind
 from vikingbot.compile import file_ops
 from vikingbot.compile.hashing import content_hash, digest
-from vikingbot.compile.media import media_view
 from vikingbot.compile.pipeline_io import MAX_JOB_ATTEMPTS
 from vikingbot.compile.renderer import validate_relative_file_path
 from vikingbot.compile.results import (
@@ -55,16 +54,20 @@ async def payload(runtime: Pipeline, record: Record, *, combine=False) -> dict:
     data = await runtime.files.get(record.payload_ref)
     if data is None:
         raise ValueError(f"Missing evidence/payload: {record.payload_ref}")
+    if data.get("image"):
+        return {
+            "id": record.record_id,
+            "payload": {
+                **{key: value for key, value in data.items() if key != "image"},
+                "source_ranges": [record.record_id],
+            },
+        }
     if combine:
-        if "uri" in data and ("text" in data or "media" in data):
+        if "text" in data and "uri" in data:
             return {
                 "id": record.record_id,
                 "path": data["uri"],
-                "content": {
-                    k: v
-                    for k, v in data.items()
-                    if k in {"text", "context", "media", "media_kind", "uri", "hash", "media_bytes"}
-                },
+                "content": {k: data[k] for k in ("text", "context") if k in data},
             }
         content = {"facts": data["fields"]}
         if data.get("scope"):
@@ -116,8 +119,7 @@ async def pack(
             or not runtime.model.fits(system, candidate, schema)
             or (
                 max_payload_chars is not None
-                and len(json.dumps(media_view(candidate["inputs"])[0], ensure_ascii=False))
-                > max_payload_chars
+                and len(json.dumps(candidate["inputs"], ensure_ascii=False)) > max_payload_chars
             )
         ):
             batches.append(current)

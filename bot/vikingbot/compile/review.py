@@ -10,7 +10,6 @@ from loguru import logger
 
 from vikingbot.agent.tools.base import Tool
 from vikingbot.compile import file_ops
-from vikingbot.compile.media import media_view
 from vikingbot.compile.plan import PLANNING_RULES, ReviewDecision, parse_plan
 from vikingbot.compile.results import Group, Record
 from vikingbot.compile.skill_resources import EvidenceReader
@@ -99,7 +98,8 @@ class StageOutputReader(Tool):
         if payload is None:
             raise ValueError(f"Missing stage payload: {record.record_id}")
         self.evidence.allowed.update(record.source_refs)
-        value = {"id": record.record_id, "payload": media_view(payload.get("fields", payload))[0]}
+        visible = {key: item for key, item in payload.items() if key != "image"}
+        value = {"id": record.record_id, "payload": visible.get("fields", visible)}
         if record.ready_ref:
             ready = await self.runtime.files.get(record.ready_ref)
             if ready is None:

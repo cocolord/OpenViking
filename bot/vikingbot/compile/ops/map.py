@@ -45,9 +45,6 @@ Skill location, for reading referenced files: {skill_uri}
 ## Inputs
 
 The user message supplies inputs: source text or earlier results.
-Image inputs are attached as original native media with source IDs and byte hashes;
-inspect the images and preserve their source IDs, without inventing text line ranges.
-Inputs marked representation=overview are derived semantic content, not verbatim sources.
 Optional record_fields and scope_fields describe requested content and applicability.
 Read assignment_file first when provided.
 

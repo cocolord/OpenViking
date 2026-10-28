@@ -4,37 +4,18 @@ from __future__ import annotations
 
 import re
 from bisect import bisect_right
-from dataclasses import dataclass, replace
-from typing import Any, Iterable
+from dataclasses import dataclass
+from typing import Iterable
 from urllib.parse import urlsplit
 
-from openviking.parse.base import MediaType
 from openviking.parse.parsers.media.utils import get_media_type
-from openviking.utils.media_limits import MAX_INLINE_TOOL_RESULT_MEDIA_BYTES
 from vikingbot.agent.tools.ov_file import VikingMultiReadTool
-from vikingbot.compile.media import MAX_IMAGES
 from vikingbot.compile.models import CompileFailure, CompileLimits
 
 _HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+\S")
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _FRONTMATTER = re.compile(r"\A---\r?\n.*?\r?\n(?:---|\.\.\.)(?:\r?\n|$)", re.DOTALL)
 _TABLE_SEPARATOR = re.compile(r"\s*\|(?:\s*:?-{3,}:?\s*\|)+\s*")
-
-
-def ensure_compile_source_supported(uri: str) -> None:
-    """Reject known media formats that multi-read cannot consume, before any text read."""
-    media_type = get_media_type(urlsplit(uri).path, None)
-    if media_type in {"image", "audio", "video"} and VikingMultiReadTool._media_kind(uri) is None:
-        message = (
-            f"Compile cannot read this image format: {uri}. Use PNG, JPEG, GIF or WebP."
-            if media_type == MediaType.IMAGE.value
-            else f"Compile cannot read this media format: {uri}."
-        )
-        raise CompileFailure(
-            "INVALID_ARGUMENT",
-            message,
-            stage="pipeline",
-        )
 
 
 @dataclass(frozen=True)
@@ -47,9 +28,7 @@ class CompileSourceRange:
     frontmatter, enclosing headings and a table header when they fit the repeat budget.
     Continuation flags identify cuts inside an oversized line or table row;
     these fragments require their adjacent ranges for complete interpretation.
-
-    Original images use zero offsets, a byte hash and native media instead of
-    content. Audio/video ranges explicitly identify the derived overview view.
+    Images keep zero offsets and carry their original bytes and hash instead of text.
     """
 
     uri: str
@@ -61,11 +40,8 @@ class CompileSourceRange:
     context: str = ""
     continues_before: bool = False
     continues_after: bool = False
-    media: dict[str, Any] | None = None
+    image: dict | None = None
     sha256: str | None = None
-    media_bytes: int = 0
-    media_kind: str | None = None
-    representation: str | None = None
 
     @property
     def input_chars(self) -> int:
@@ -73,55 +49,29 @@ class CompileSourceRange:
         return len(self.content) + len(self.context)
 
 
-async def read_source(client, uri, limits, provider, *, offset=0, limit=-1):
-    """Load Compile evidence through multi-read, keeping raw text and native images distinct."""
-    ensure_compile_source_supported(uri)
-    if (
-        VikingMultiReadTool._media_kind(uri) == "image"
-        and not provider.supports_tool_result_media()
-    ):
+async def read_source(client, uri, provider) -> str | CompileSourceRange:
+    """Keep text reads intact; consume image sources through multi-read's native reader."""
+    if get_media_type(urlsplit(uri).path, None) != "image":
+        return await client.read_raw(uri)
+    if VikingMultiReadTool._media_kind(uri) != "image":
+        raise CompileFailure(
+            "INVALID_ARGUMENT", f"Unsupported Compile image format: {uri}", stage="pipeline"
+        )
+    if not provider.supports_tool_result_media():
         raise CompileFailure(
             "UNSUPPORTED_MEDIA",
-            f"Compile provider cannot deliver native image evidence: {uri}",
+            f"Compile provider cannot deliver image evidence: {uri}",
             stage="pipeline",
         )
-    result = (await VikingMultiReadTool.read_resources(client, [uri], raw_text=True))[0]
+    result = await VikingMultiReadTool._read_image(client, uri)
     if not result["success"]:
         raise CompileFailure("SOURCE_READ_FAILED", f"{uri}: {result['content']}", stage="pipeline")
-    if result.get("image") is not None:
-        return [
-            CompileSourceRange(
-                uri,
-                0,
-                0,
-                0,
-                0,
-                "",
-                media=result["image"],
-                sha256=result["sha256"],
-                media_bytes=result["media_bytes"],
-                media_kind="image",
-            )
-        ]
-    content = result["content"]
-    lines = content.splitlines(keepends=True)
-    excerpt = "".join(lines[offset:] if limit == -1 else lines[offset : offset + limit])
-    start = len("".join(lines[:offset]))
-    return [
-        replace(
-            part,
-            start_char=part.start_char + start,
-            end_char=part.end_char + start,
-            start_line=part.start_line + offset,
-            end_line=part.end_line + offset,
-            media_kind=result["media_kind"],
-            representation="overview" if result["media_kind"] else None,
-        )
-        for part in split_source(uri, excerpt, limits.source_batch_chars)
-    ]
+    return CompileSourceRange(uri, 0, 0, 0, 0, "", image=result["image"], sha256=result["sha256"])
 
 
-def split_source(uri: str, content: str, max_chars: int) -> list[CompileSourceRange]:
+def split_source(
+    uri: str, content: str | CompileSourceRange, max_chars: int
+) -> list[CompileSourceRange]:
     """Partition original text by characters, preferring headings, paragraphs and whole lines.
 
     Complete table rows fit together with their header whenever the budget permits.
@@ -129,7 +79,9 @@ def split_source(uri: str, content: str, max_chars: int) -> list[CompileSourceRa
     frontmatter/headings/table headers use at most one quarter of the budget; their
     original text remains in the source ranges. Empty files retain one empty range.
     """
-    if get_media_type(urlsplit(uri).path, None) == MediaType.IMAGE.value:
+    if isinstance(content, CompileSourceRange):
+        return [content]
+    if get_media_type(urlsplit(uri).path, None) == "image":
         raise CompileFailure(
             "INVALID_ARGUMENT", "Image evidence must not be split as text", stage="pipeline"
         )
@@ -218,7 +170,7 @@ def split_source(uri: str, content: str, max_chars: int) -> list[CompileSourceRa
 
 
 def pack_source_batches(
-    sources: Iterable[tuple[str, str]], limits: CompileLimits
+    sources: Iterable[tuple[str, str | CompileSourceRange]], limits: CompileLimits
 ) -> list[list[CompileSourceRange]]:
     """Pack exact source ranges in input order, bounded only by characters.
 
@@ -226,34 +178,16 @@ def pack_source_batches(
     capacity; original URIs remain the citation targets for all ranges. Source text
     and repeated context both count toward ``source_batch_chars``.
     """
-    return pack_source_ranges(
-        (
-            part
-            for uri, content in sources
-            for part in split_source(uri, content, limits.source_batch_chars)
-        ),
-        limits,
-    )
-
-
-def pack_source_ranges(sources: Iterable[CompileSourceRange], limits: CompileLimits):
-    """Bound text ranges and original images independently, without dropping sources."""
     batches: list[list[CompileSourceRange]] = []
     batch: list[CompileSourceRange] = []
     size = 0
-    media_bytes = images = 0
-    for part in sources:
-        if batch and (
-            size + part.input_chars > limits.source_batch_chars
-            or images + int(part.media is not None) > MAX_IMAGES
-            or media_bytes + part.media_bytes > MAX_INLINE_TOOL_RESULT_MEDIA_BYTES
-        ):
-            batches.append(batch)
-            batch, size, media_bytes, images = [], 0, 0, 0
-        batch.append(part)
-        size += part.input_chars
-        media_bytes += part.media_bytes
-        images += int(part.media is not None)
+    for uri, content in sources:
+        for part in split_source(uri, content, limits.source_batch_chars):
+            if batch and size + part.input_chars > limits.source_batch_chars:
+                batches.append(batch)
+                batch, size = [], 0
+            batch.append(part)
+            size += part.input_chars
     if batch:
         batches.append(batch)
     return batches

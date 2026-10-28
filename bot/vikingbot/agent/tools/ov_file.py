@@ -1114,198 +1114,56 @@ class VikingMultiReadTool(OVFileTool):
         }
 
     @classmethod
-    async def read_resources(
-        cls,
-        client,
-        uris,
-        *,
-        offset=0,
-        limit=-1,
-        with_revision=False,
-        raw_text=False,
-        skill_runtime=None,
-    ) -> list[dict[str, Any]]:
-        """Read structured resources using the caller's authenticated client.
-
-        Compile requests exact text with raw_text; media retains the same native
-        representation, validation and budgets as the ordinary multi-read tool.
-        """
-        max_concurrent = 10
-        semaphore = asyncio.Semaphore(max_concurrent)
-
-        image_indexes = [index for index, uri in enumerate(uris) if cls._media_kind(uri) == "image"]
-        inline_image_indexes = set(image_indexes[: cls._MAX_INLINE_IMAGES])
-
-        async def read_single_uri(index: int, uri: str) -> dict[str, Any]:
-            async with semaphore:
-                try:
-                    media_kind = cls._media_kind(uri)
-                    if with_revision and (media_kind or offset < 0 or (limit != -1 and limit < 1)):
-                        raise ValueError("Revision reads require text files and valid line ranges")
-                    if media_kind == "image":
-                        if index not in inline_image_indexes:
-                            return {
-                                "uri": uri,
-                                "content": (
-                                    "Image was not attached because one tool result supports "
-                                    f"at most {cls._MAX_INLINE_IMAGES} images. Read fewer "
-                                    "images at once."
-                                ),
-                                "success": False,
-                                "media_kind": media_kind,
-                            }
-                        stat = await client.stat(uri)
-                        size = stat.get("size") if isinstance(stat, dict) else None
-                        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
-                            return {
-                                "uri": uri,
-                                "content": "Image size is unavailable; cannot attach it safely.",
-                                "success": False,
-                                "media_kind": media_kind,
-                            }
-                        if size > cls._MAX_INLINE_MEDIA_BYTES:
-                            return {
-                                "uri": uri,
-                                "content": (
-                                    f"Image is {size} bytes; the inline limit is "
-                                    f"{cls._MAX_INLINE_MEDIA_BYTES} bytes."
-                                ),
-                                "success": False,
-                                "media_kind": media_kind,
-                            }
-                        data = await client.download_bytes(uri)
-                        if len(data) > size:
-                            return {
-                                "uri": uri,
-                                "content": "Image changed after its size was checked; retry the read.",
-                                "success": False,
-                                "media_kind": media_kind,
-                            }
-                        image_format = sniff_image_format(data)
-                        if (
-                            image_format is None
-                            or image_format.mime_type not in cls._INLINE_IMAGE_MIME_TYPES
-                        ):
-                            return {
-                                "uri": uri,
-                                "content": (
-                                    "File bytes do not match a supported PNG, JPEG, GIF, "
-                                    "or WebP image."
-                                ),
-                                "success": False,
-                                "media_kind": media_kind,
-                            }
-                        encoded = base64.b64encode(data).decode("ascii")
-                        return {
-                            "uri": uri,
-                            "content": (
-                                f"Image resource ({image_format.mime_type}, {len(data)} bytes)."
-                            ),
-                            "image": {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{image_format.mime_type};base64,{encoded}"
-                                },
-                            },
-                            "media_bytes": len(data),
-                            "sha256": hashlib.sha256(data).hexdigest(),
-                            "success": True,
-                            "media_kind": media_kind,
-                        }
-
-                    if media_kind in {"audio", "video"}:
-                        content = await client.read_content(uri, level="overview")
-                        if not content:
-                            return {
-                                "uri": uri,
-                                "content": (
-                                    "No OpenViking textual overview is available for this "
-                                    f"{media_kind} resource."
-                                ),
-                                "success": False,
-                                "media_kind": media_kind,
-                            }
-                        return {
-                            "uri": uri,
-                            "content": content,
-                            "success": True,
-                            "media_kind": media_kind,
-                        }
-
-                    if not raw_text and limit == -1:
-                        try:
-                            stat = await client.stat(uri)
-                            size = stat.get("size")
-                        except Exception:
-                            size = None
-                        if isinstance(size, int) and size > cls._FULL_READ_WARN_BYTES:
-                            return {
-                                "uri": uri,
-                                "content": (
-                                    f"File is {size} bytes; reading it fully would exceed "
-                                    "the tool result budget. Use openviking_grep to locate "
-                                    "relevant lines, then read a window with "
-                                    "openviking_multi_read offset/limit."
-                                ),
-                                "success": False,
-                                "media_kind": None,
-                            }
-                    if with_revision:
-                        raw = await client.download_bytes(uri)
-                        lines = raw.decode("utf-8").splitlines(keepends=True)
-                        return {
-                            "uri": uri,
-                            "content": "".join(
-                                lines[offset:] if limit == -1 else lines[offset : offset + limit]
-                            ),
-                            "base_hash": hashlib.sha256(raw).hexdigest(),
-                            "success": True,
-                        }
-                    if raw_text:
-                        content = await client.read_raw(uri, offset=offset, limit=limit)
-                    else:
-                        content = await client.read_content(
-                            uri, level="read", offset=offset, limit=limit
-                        )
-                    if skill_runtime is not None and not raw_text:
-                        active_skill = await skill_runtime.activate_from_read(uri, content)
-                        if active_skill is not None:
-                            content = skill_runtime.render_skill_content(active_skill)
-                    return {
-                        "uri": uri,
-                        "content": content,
-                        "success": True,
-                        "media_kind": None,
-                    }
-                except Exception as e:
-                    logger.warning(f"Error reading from {uri}: {e}")
-                    return {
-                        "uri": uri,
-                        "content": f"Error reading from Viking: {str(e)}",
-                        "success": False,
-                        "media_kind": cls._media_kind(uri),
-                    }
-
-        # 并发读取所有URI
-        read_tasks = [read_single_uri(index, uri) for index, uri in enumerate(uris)]
-        results = await asyncio.gather(*read_tasks)
-        inline_media_bytes = 0
-        for result in results:
-            if result.get("image") is None:
-                continue
-            media_bytes = result.get("media_bytes", 0)
-            if inline_media_bytes + media_bytes > cls._MAX_INLINE_MEDIA_BYTES:
-                result.pop("image", None)
-                result["media_bytes"] = 0
-                result["content"] = (
-                    "Image was not attached because the combined inline media size would "
-                    f"exceed {cls._MAX_INLINE_MEDIA_BYTES} bytes. Read fewer images at once."
-                )
-                result["success"] = False
-                continue
-            inline_media_bytes += media_bytes
-
-        return results
+    async def _read_image(cls, client, uri):
+        """Load one native image for multi-read and Compile using the same checks."""
+        stat = await client.stat(uri)
+        size = stat.get("size") if isinstance(stat, dict) else None
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            return {
+                "uri": uri,
+                "content": "Image size is unavailable; cannot attach it safely.",
+                "success": False,
+                "media_kind": "image",
+            }
+        if size > cls._MAX_INLINE_MEDIA_BYTES:
+            return {
+                "uri": uri,
+                "content": (
+                    f"Image is {size} bytes; the inline limit is "
+                    f"{cls._MAX_INLINE_MEDIA_BYTES} bytes."
+                ),
+                "success": False,
+                "media_kind": "image",
+            }
+        data = await client.download_bytes(uri)
+        if len(data) > size:
+            return {
+                "uri": uri,
+                "content": "Image changed after its size was checked; retry the read.",
+                "success": False,
+                "media_kind": "image",
+            }
+        image_format = sniff_image_format(data)
+        if image_format is None or image_format.mime_type not in cls._INLINE_IMAGE_MIME_TYPES:
+            return {
+                "uri": uri,
+                "content": ("File bytes do not match a supported PNG, JPEG, GIF, or WebP image."),
+                "success": False,
+                "media_kind": "image",
+            }
+        encoded = base64.b64encode(data).decode("ascii")
+        return {
+            "uri": uri,
+            "content": (f"Image resource ({image_format.mime_type}, {len(data)} bytes)."),
+            "image": {
+                "type": "image_url",
+                "image_url": {"url": f"data:{image_format.mime_type};base64,{encoded}"},
+            },
+            "media_bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "success": True,
+            "media_kind": "image",
+        }
 
     async def execute(
         self,
@@ -1324,16 +1182,132 @@ class VikingMultiReadTool(OVFileTool):
                 return "Error: No URIs provided."
 
             client = await self._get_client(tool_context)
-            results = await self.read_resources(
-                client,
-                uris,
-                offset=offset,
-                limit=limit,
-                with_revision=with_revision,
-                skill_runtime=getattr(tool_context, "skill_runtime", None),
-            )
+            max_concurrent = 10
+            semaphore = asyncio.Semaphore(max_concurrent)
+
+            image_indexes = [
+                index for index, uri in enumerate(uris) if self._media_kind(uri) == "image"
+            ]
+            inline_image_indexes = set(image_indexes[: self._MAX_INLINE_IMAGES])
+
+            async def read_single_uri(index: int, uri: str) -> dict[str, Any]:
+                async with semaphore:
+                    try:
+                        media_kind = self._media_kind(uri)
+                        if with_revision and (
+                            media_kind or offset < 0 or (limit != -1 and limit < 1)
+                        ):
+                            raise ValueError(
+                                "Revision reads require text files and valid line ranges"
+                            )
+                        if media_kind == "image":
+                            if index not in inline_image_indexes:
+                                return {
+                                    "uri": uri,
+                                    "content": (
+                                        "Image was not attached because one tool result supports "
+                                        f"at most {self._MAX_INLINE_IMAGES} images. Read fewer "
+                                        "images at once."
+                                    ),
+                                    "success": False,
+                                    "media_kind": media_kind,
+                                }
+                            return await self._read_image(client, uri)
+
+                        if media_kind in {"audio", "video"}:
+                            content = await client.read_content(uri, level="overview")
+                            if not content:
+                                return {
+                                    "uri": uri,
+                                    "content": (
+                                        "No OpenViking textual overview is available for this "
+                                        f"{media_kind} resource."
+                                    ),
+                                    "success": False,
+                                    "media_kind": media_kind,
+                                }
+                            return {
+                                "uri": uri,
+                                "content": content,
+                                "success": True,
+                                "media_kind": media_kind,
+                            }
+
+                        if limit == -1:
+                            try:
+                                stat = await client.stat(uri)
+                                size = stat.get("size")
+                            except Exception:
+                                size = None
+                            if isinstance(size, int) and size > self._FULL_READ_WARN_BYTES:
+                                return {
+                                    "uri": uri,
+                                    "content": (
+                                        f"File is {size} bytes; reading it fully would exceed "
+                                        "the tool result budget. Use openviking_grep to locate "
+                                        "relevant lines, then read a window with "
+                                        "openviking_multi_read offset/limit."
+                                    ),
+                                    "success": False,
+                                    "media_kind": None,
+                                }
+                        if with_revision:
+                            raw = await client.download_bytes(uri)
+                            lines = raw.decode("utf-8").splitlines(keepends=True)
+                            return {
+                                "uri": uri,
+                                "content": "".join(
+                                    lines[offset:]
+                                    if limit == -1
+                                    else lines[offset : offset + limit]
+                                ),
+                                "base_hash": hashlib.sha256(raw).hexdigest(),
+                                "success": True,
+                            }
+                        content = await client.read_content(
+                            uri, level=level, offset=offset, limit=limit
+                        )
+                        skill_runtime = getattr(tool_context, "skill_runtime", None)
+                        if skill_runtime is not None:
+                            active_skill = await skill_runtime.activate_from_read(uri, content)
+                            if active_skill is not None:
+                                content = skill_runtime.render_skill_content(active_skill)
+                        return {
+                            "uri": uri,
+                            "content": content,
+                            "success": True,
+                            "media_kind": None,
+                        }
+                    except Exception as e:
+                        logger.warning(f"Error reading from {uri}: {e}")
+                        return {
+                            "uri": uri,
+                            "content": f"Error reading from Viking: {str(e)}",
+                            "success": False,
+                            "media_kind": self._media_kind(uri),
+                        }
+
+            # 并发读取所有URI
+            read_tasks = [read_single_uri(index, uri) for index, uri in enumerate(uris)]
+            results = await asyncio.gather(*read_tasks)
             if with_revision:
                 return json.dumps(results, ensure_ascii=False)
+
+            inline_media_bytes = 0
+            for result in results:
+                if result.get("image") is None:
+                    continue
+                media_bytes = result.get("media_bytes", 0)
+                if inline_media_bytes + media_bytes > self._MAX_INLINE_MEDIA_BYTES:
+                    result.pop("image", None)
+                    result["media_bytes"] = 0
+                    result["content"] = (
+                        "Image was not attached because the combined inline media size would "
+                        f"exceed {self._MAX_INLINE_MEDIA_BYTES} bytes. Read fewer images at once."
+                    )
+                    result["success"] = False
+                    continue
+                inline_media_bytes += media_bytes
 
             # 构建结果
             range_note = (

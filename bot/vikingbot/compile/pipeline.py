@@ -473,10 +473,10 @@ class Pipeline:
 
         async def write_source(item):
             """Atomically write one (ID, metadata, range); return its record and evidence."""
-            record_id, metadata, text, context, media = item
+            record_id, metadata, text, context, image = item
             await self.files.put(
                 f"sources/{record_id}",
-                {**metadata, **({"media": media} if media else {"text": text, "context": context})},
+                {**metadata, **({"image": image} if image else {"text": text, "context": context})},
             )
             return Record(
                 record_id, f"sources/{record_id}", [record_id], metadata["uri"], {}, []
@@ -511,17 +511,13 @@ class Pipeline:
                     "continues_before": part.continues_before,
                     "continues_after": part.continues_after,
                 }
-                if part.media_kind:
-                    metadata["media_kind"] = part.media_kind
-                if part.media:
-                    metadata["media_bytes"] = part.media_bytes
-                if part.representation:
-                    metadata["representation"] = part.representation
+                if part.image:
+                    metadata["media_kind"] = "image"
                 record_id = digest(metadata)[:24]
                 if record_id in seen:
                     continue
                 seen.add(record_id)
-                pending.append((record_id, metadata, part.content, part.context, part.media))
+                pending.append((record_id, metadata, part.content, part.context, part.image))
                 if len(pending) >= self.limits.source_concurrency:
                     await flush()
         if pending:
