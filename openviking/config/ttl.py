@@ -20,7 +20,7 @@ class TTLIndexType(str, Enum):
     SESSIONS = "sessions"
 
 
-_ROOT_DEPTH = {
+TTL_ROOT_DEPTH = {
     TTLIndexType.USER_EVENTS: 4,
     TTLIndexType.PEER_EVENTS: 6,
     TTLIndexType.SESSIONS: 3,
@@ -91,7 +91,7 @@ def validate_ttl_root(uri: str, *, allow_peer_scope: bool = False) -> None:
     peer_scope = allow_peer_scope and kind == TTLIndexType.PEER_EVENTS and len(parts) == 3
     if (
         kind is None
-        or (not peer_scope and len(parts) != _ROOT_DEPTH[kind])
+        or (not peer_scope and len(parts) != TTL_ROOT_DEPTH[kind])
         or uri != "viking://" + "/".join(parts)
         or validate_identifier_part(parts[1], "user_id")
         or (

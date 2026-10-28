@@ -183,7 +183,6 @@ class _OpsMixin:
         uri: str,
         data: Union[bytes, str],
         ctx: Optional[RequestContext] = None,
-        lease_ref: Dict[str, Any] | None = None,
     ) -> str:
         """Write file"""
         await self._ensure_access(uri, ctx, action=AclAction.WRITE)
@@ -192,9 +191,7 @@ class _OpsMixin:
             data = data.encode("utf-8")
 
         # Encryption (when configured) happens inside the ragfs layer keyed by account_id.
-        result = await self._async_agfs.write(
-            path, data, **({"fs_ctx": self._pathlock_fs_ctx(ctx, lease_ref)} if lease_ref else {})
-        )
+        result = await self._async_agfs.write(path, data)
         await self._notify_post_write(uri, ctx)
         return result
 

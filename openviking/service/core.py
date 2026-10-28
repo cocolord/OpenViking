@@ -609,7 +609,7 @@ class OpenVikingService:
             viking_fs=self._viking_fs,
             session_service=self._session_service,
         )
-        # Install optional server write guards before any producer or consumer starts.
+        # Install optional server write hooks before any producer or consumer starts.
         if before_background_start is not None:
             await before_background_start()
         try:
@@ -851,7 +851,7 @@ class OpenVikingService:
             self._queue_manager = None
             logger.info("Queue manager stopped")
 
-        # Draining writers still need the adapter's source and directory guards.
+        # Draining writers still need source checks and post-write registration.
         # Stop TTL consumers only after those writers settle, while their storage
         # and vector clients remain available for in-flight recycling.
         from openviking.ttl.wiring import get_ttl_adapter, set_ttl_adapter

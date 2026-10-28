@@ -325,7 +325,7 @@ async def test_slow_init_does_not_block_health(monkeypatch):
 
 @pytest.mark.parametrize("ttl_enabled", [False, True])
 async def test_initialize_runtime_state_loads_api_key_manager(monkeypatch, ttl_enabled):
-    """Install TTL guards before workers; preserve system-asset reconciliation."""
+    """Install TTL hooks before workers; preserve system-asset reconciliation."""
     events = []
 
     class MockService:

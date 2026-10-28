@@ -36,7 +36,10 @@ def engine(monkeypatch, caplog):
             pathlock_release=AsyncMock(),
         ),
     )
-    e.account_manager = SimpleNamespace(list_accounts=AsyncMock(return_value=[]))
+    e.account_manager = SimpleNamespace(
+        list_accounts=AsyncMock(return_value=[]),
+        list_users_page=AsyncMock(return_value={"users": []}),
+    )
     return e
 
 
@@ -154,11 +157,16 @@ async def test_expiry_restart_resumes_checkpoint_without_full_scan(
         if not done:
             assert e.fs.ls.call_args.args == (root,)
         e.fs.stat.assert_not_called()  # The checkpoint excludes the old child.
-        # Disable keeps a cheap durable wake-up, but creates no work or filesystem I/O.
+        # Disable retains the hourly check without resuming scans or deletion.
         e.pair = (None, None)
-        previous = e._task
+        e.fs.ls.reset_mock()
         await e.handle(request)
-        assert e._task is previous and not e._recycle
+        async with asyncio.timeout(2):
+            await e._task
+        assert not e._pending and not e._recycle
+        e.fs.ls.assert_not_called()
+        e.fs.stat.assert_not_called()
+        e.fs.rm.assert_not_called()
     finally:
         await e.aclose()
 
@@ -374,30 +382,33 @@ async def test_initial_partial_failure_reset_and_no_rescan(engine):
 
 
 @pytest.mark.asyncio
-async def test_session_renewal_and_delete_retry(engine):
+@pytest.mark.parametrize("with_registry", [False, True])
+async def test_session_renewal_and_delete_retry(engine, with_registry):
     e = engine
+    if not with_registry:
+        e.account_manager = None  # Local dev mode still supports TTL.
     uri = "viking://user/u/sessions/s"
     key = e.prefix("a") + "sessions"
     await e.redis.set(e.prefix("a") + "backfill:initial:done", "1")
     await e.redis.zadd(key, {uri: 1})
     now = datetime.now(timezone.utc)
     e.fs.stat.return_value = {"modTime": now.isoformat()}
-    result = await e.recycle_due(TTLRecycleRequest("r", "a", 2**53 - 1))
+    result = await e.recycle_due(TTLRecycleRequest("r", "a"))
     assert result.skipped >= 1
     e.fs.rm.assert_not_called()
     assert await e.redis.zscore(key, uri) > 1
     await e.redis.zadd(key, {uri: 1})
     e.fs.stat.return_value = {"modTime": "2000-01-01T00:00:00Z"}
     e.fs.rm.side_effect = OSError("delete failed")
-    result = await e.recycle_due(TTLRecycleRequest("r", "a", 2**53 - 1))
+    result = await e.recycle_due(TTLRecycleRequest("r", "a"))
     assert result.failed == 1 and await e.redis.zscore(key, uri) == 1
     e.fs.rm.side_effect = None
-    result = await e.recycle_due(TTLRecycleRequest("r", "a", 2**53 - 1))
+    result = await e.recycle_due(TTLRecycleRequest("r", "a"))
     assert result.deleted == 1 and await e.redis.zscore(key, uri) is None
     await e.redis.zadd(key, {uri: 1})
     e.fs.stat.side_effect = FileNotFoundError(uri)
     e.fs.rm.side_effect = FileNotFoundError(uri)
-    result = await e.recycle_due(TTLRecycleRequest("r", "a", 2**53 - 1))
+    result = await e.recycle_due(TTLRecycleRequest("r", "a"))
     assert result.deleted == 1 and await e.redis.zscore(key, uri) is None
 
 
@@ -867,3 +878,104 @@ async def test_user_only_ttl_reset_and_restart_reuse_saved_roots(engine, schedul
     e.fs.stat.assert_not_called()
     e.fs.read_file.assert_awaited_once()
     assert e.fs.read_file.call_args.args[0].endswith("/u/settings/user_config.json")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("account_days", [30, "disabled"])
+async def test_later_user_short_ttl_survives_cache_loss(engine, scheduler, account_days):
+    from openviking.ttl.runtime import DAY_MS
+
+    e = engine
+    e.pair = (TTLConfig(sessions=30), None)
+    prefix = e.prefix("a")
+    await e.redis.hset(
+        prefix + "backfill:initial", mapping={"roots": '["viking://user/old/sessions"]'}
+    )
+    await e.redis.set(prefix + "backfill:initial:done", "1")
+    ctx = e.context("a")
+    config = TTLConfig(sessions=1)
+    await e.prepare_user_configuration(ctx, None, config)
+    await e.publish_user_configuration(ctx, config)
+    uri = "viking://user/ttl-internal/sessions/new"
+    written = int(datetime.now(timezone.utc).timestamp() * 1000) - 2 * DAY_MS
+    await e.on_post_write(uri + "/messages.jsonl", ctx, written)
+    await e._retry_writes()
+    e._user_policies.clear()  # Restart/eviction must not change candidate coverage.
+    e.pair = (TTLConfig(sessions=account_days), None)
+    e.fs.read_file = AsyncMock(
+        side_effect=lambda path, **kw: (
+            '{"ttl":{"sessions":1}}' if "/ttl-internal/" in path else "{}"
+        )
+    )
+    e.fs.stat.return_value = {
+        "modTime": datetime.fromtimestamp(written / 1000, timezone.utc).isoformat()
+    }
+    e.account_manager.list_users_page.side_effect = [
+        {"users": [{"user_id": "old"}]},
+        {"users": [{"user_id": "old"}, {"user_id": "ttl-internal"}]},
+    ]
+    # A user added after this round's snapshot is picked up in the next round.
+    assert (await e.recycle_due(TTLRecycleRequest("r", "a"))).deleted == 0
+    e.fs.stat.assert_not_called()
+    result = await e.recycle_due(TTLRecycleRequest("r", "a"))
+    assert result.deleted == 1 and await e.redis.zscore(prefix + "sessions", uri) is None
+    assert e.fs.read_file.await_count == 2
+    e.account_manager.list_users_page.assert_awaited_with("a", limit=None, expose_key=False)
+    e.fs.ls.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_hourly_callback_skips_config_and_maintenance_loads_users_once(engine, scheduler):
+    from openviking.scheduling.expiry.api import CallbackRequest
+
+    e = engine
+    prefix = e.prefix("a") + "backfill:"
+    roots = [f"viking://user/u{i}/sessions" for i in range(1025)]
+    await e.redis.hset(prefix + "initial", "roots", json.dumps(roots))
+    await e.redis.set(prefix + "initial:done", "1")
+    await e.redis.zadd(e.prefix("a") + "sessions", {roots[0] + "/new": 2**53 - 1})
+    e.account_manager.list_users_page.return_value = {
+        "users": [{"user_id": f"u{i}"} for i in range(1025)]
+    }
+    e.fs.read_file = AsyncMock(return_value="{}")
+    for _ in range(2):
+        before = e.fs.read_file.await_count
+        await e.handle(CallbackRequest(e._identity("a")))
+        assert e.fs.read_file.await_count == before
+        await e._run()
+        assert e.fs.read_file.await_count - before == 1025
+    e.fs.ls.assert_not_called()
+    e.fs.stat.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_maintenance_failure_isolated_to_one_account(engine, scheduler):
+    e = engine
+    e._recycle.update(("bad", "good"))
+    bad, good = list(e._initial_requests | e._pending | e._recycle)
+    for account in e._recycle:
+        await e.redis.set(e.prefix(account) + "backfill:initial:done", "1")
+    read = e.read_initial
+    failing = True
+
+    async def state(account):
+        if account == bad and failing:
+            raise ConnectionError("account read failed")
+        return await read(account)
+
+    e.read_initial = AsyncMock(side_effect=state)
+    await e.start()
+    e._wake_worker()
+    try:
+        async with asyncio.timeout(2):
+            while good in e._recycle:
+                await asyncio.sleep(0)
+        assert e._recycle == {bad}
+        failing = False
+        e._wake_worker()
+        async with asyncio.timeout(2):
+            await e._task
+        assert not e._recycle
+        assert [c.args[0] for c in e.read_initial.await_args_list].count(good) == 1
+    finally:
+        await e.aclose()

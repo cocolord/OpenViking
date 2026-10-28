@@ -241,6 +241,8 @@ async def test_embedding_queue_checks_sources_without_ttl_locks(
 async def test_real_registration_reset_recycle(tmp_path):
     from uuid import uuid4
 
+    from openviking.server.store_assembly import build_api_key_manager
+
     agfs = create_agfs_client(
         RagfsBindingConfig(agfs=AGFSConfig(path=str(tmp_path), backend="local"))
     )
@@ -253,10 +255,12 @@ async def test_real_registration_reset_recycle(tmp_path):
     e.fs = fs
 
     async def policies(_):
-        return TTLConfig(sessions=1, user_events=1), None
+        return TTLConfig(sessions=7, user_events=7), None
 
     e.policies = policies
-    e.account_manager = SimpleNamespace(list_accounts=lambda **kw: [])
+    e.account_manager = build_api_key_manager(root_key="ttl-test", viking_fs=fs)
+    await e.account_manager.load()
+    await e.account_manager.ensure_trusted_identities({"a": {"u"}})
     ctx = e.context("a")
     root = "viking://user/u/sessions"
     uri = root + "/one/messages.jsonl"
@@ -287,11 +291,21 @@ async def test_real_registration_reset_recycle(tmp_path):
     assert await redis.zscore(e.prefix("a") + "sessions", root + "/missing") == historical
     # Old score cannot delete a renewed root; actual ModTime wins under its lock.
     await redis.zadd(e.prefix("a") + "sessions", {root + "/one": 1})
-    result = await e.recycle_due(TTLRecycleRequest(e.resource_id, "a", 100))
+    result = await e.recycle_due(TTLRecycleRequest(e.resource_id, "a"))
     assert result.skipped == 1
     assert await fs.read_file(uri, ctx=ctx) == "first\nsecond\n"
     echo = await e.resolve_expires_at([root + "/one", uri], ctx)
     assert echo[uri] == echo[root + "/one"] and echo[uri]
+    # More than one Redis scan page; removing entries must not skip later pages.
+    e.batch_size = 7
+    missing = {root + f"/removed-{i}": 1 for i in range(257)}
+    await redis.zadd(e.prefix("a") + "sessions", missing)
+    result = await e.recycle_due(TTLRecycleRequest(e.resource_id, "a", 100))
+    assert result.failed == 0 and result.deleted >= len(missing)
+    assert set(await redis.zrange(e.prefix("a") + "sessions", 0, -1)) == {
+        root + "/one",
+        root + "/missing",
+    }
     # Only delete this test's scoped keys.
     keys = [
         e.prefix("a") + suffix
@@ -304,6 +318,7 @@ async def test_real_registration_reset_recycle(tmp_path):
     ]
     await redis.delete(*keys)
     await e.aclose()
+    await e.account_manager.close()
 
 
 @pytest.mark.asyncio
@@ -1068,9 +1083,11 @@ async def test_reindex_vector_queue_without_ttl_owner_handoff(
         assert "_write_lease" not in db.upsert.call_args.args[0]
         assert all("_write_lease" not in message.context_data for message in messages)
         if enabled:
-            # Replays need no persisted lease, but still check source existence.
+            # Queued messages from the earlier implementation may retain a lease.
+            messages[0].context_data["_write_lease"] = {"lease_ref": "obsolete"}
             await enqueue(messages[0])
             assert results[-1].outcome is ProcessOutcome.SUCCESS
+            assert "_write_lease" not in db.upsert.call_args.args[0]
             await fs.write_file(uri, "Historical Event writes remain allowed", ctx=ctx)
             assert ("a", "user_events", uri.rsplit("/", 1)[0]) in engine._retry
             fs._get_vector_store = lambda: None

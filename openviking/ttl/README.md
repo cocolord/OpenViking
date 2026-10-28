@@ -91,6 +91,19 @@ using a stable ResourceID offset. Its TTL consumer starts on first registration;
 Redis retains that activation across restarts. An overdue callback after restart
 schedules the next window instead of immediately recycling. OV discovers initial
 roots when needed, reuses saved checkpoints and checks due candidates itself.
+The callback only schedules the next window and wakes maintenance; it never
+loads UserConfig. Maintenance isolates failures per Account. Completed initial
+scans are not replayed unless reset intent exists. A disabled scope retains the
+hourly check, but its directories are neither backfilled nor deleted.
+Each round uses the existing Account user registry and UserConfig cache to
+compute its TTL cutoff, then queries the directory ZSETs by score in batches.
+It does not enumerate every directory index entry or rely on initial roots to
+find later users. Policy changes during a round may wait until the next round;
+deletion still rechecks current policy. No business directories are listed.
+Existing deletion throttling applies to eligible attempts, including failed or
+renewed Sessions.
+Local dev mode has no user registry, so it uses the minimum legal TTL as a
+conservative query bound and checks each candidate's policy before deletion.
 `/api/v1/admin/ttl/recycle` also supports explicit internal requests. The hidden
 GET `/api/v1/admin/ttl/initial` reads internal recovery state; no caller needs a
 Redis connection. TTL policy PATCHes persist reset intent before saving, so the

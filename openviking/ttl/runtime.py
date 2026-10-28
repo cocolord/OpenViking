@@ -20,6 +20,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from openviking.config.ttl import (
+    TTL_ROOT_DEPTH,
     TTLIndexType,
     classify_ttl_uri,
     resolve_effective_ttl,
@@ -116,7 +117,7 @@ def directory(uri: str) -> TTLDirectory | None:
     kind = classify_ttl_uri(uri)
     if kind is None:
         return None
-    root_depth = {"sessions": 3, "user_events": 4, "peer_events": 6}[kind]
+    root_depth = TTL_ROOT_DEPTH[kind]
     root = "viking://" + "/".join(parts[:root_depth])
     unit_depth = 1 if kind == "sessions" else 3
     if len(parts) < root_depth + unit_depth:
@@ -191,6 +192,7 @@ class DirectoryTTL:
         self._dispatcher = OwnerLoopDispatcher()
         self._user_policies = OrderedDict()
         self._user_loads = {}
+        self.account_manager = None
 
     def bind_runtime(self, service: OpenVikingService, account_manager: APIKeyManager) -> None:
         # Bind before queue workers can invoke the write hooks.
@@ -235,9 +237,7 @@ class DirectoryTTL:
         # Confirm the next durable wake-up before acknowledging this one.
         # Long-running filesystem work stays outside the short expiry callback.
         await self._schedule(account, force=True)
-        if time.time_ns() // 1_000_000 >= self._recycle_after_ms and await self.active_policies(
-            account
-        ):
+        if time.time_ns() // 1_000_000 >= self._recycle_after_ms:
             self._recycle.add(account)
             self._wake_worker()
         return CallbackResult(CallbackStatus.COMPLETED, "maintenance_scheduled")
@@ -295,19 +295,7 @@ class DirectoryTTL:
                 pair = await self.policies(account)
                 roots = set(self.policy_roots())
                 scopes = [root for root in roots if not resolve_effective_ttl(*pair, root).enabled]
-                try:
-                    if scopes:
-                        redis = await self.client()
-                        pipe = redis.pipeline(transaction=False)
-                        token = uuid4().hex
-                        for scope in scopes:
-                            pipe.hsetnx(
-                                self.prefix(account) + "backfill:reset_required", scope, token
-                            )
-                        await pipe.execute()
-                    await self._schedule(account)
-                except Exception as exc:
-                    raise UnavailableError("TTL reset intent registration unavailable") from exc
+                await self._register_reset_intent(account, scopes)
         if account_id is None:
             await self.manager.patch_cluster(settings)
         else:
@@ -315,6 +303,19 @@ class DirectoryTTL:
         self._initial_requests.update(account["account_id"] for account in accounts)
         if accounts:
             self._wake_worker()
+
+    async def _register_reset_intent(self, account: str, scopes: Sequence[str]) -> None:
+        try:
+            if scopes:
+                redis = await self.client()
+                pipe = redis.pipeline(transaction=False)
+                token = uuid4().hex
+                for scope in scopes:
+                    pipe.hsetnx(self.prefix(account) + "backfill:reset_required", scope, token)
+                await pipe.execute()
+            await self._schedule(account)
+        except Exception as exc:
+            raise UnavailableError("TTL reset intent registration unavailable") from exc
 
     async def read_initial(self, account_id: str) -> dict:
         prefix = self.prefix(account_id) + "backfill:"
@@ -420,17 +421,18 @@ class DirectoryTTL:
             await self._dispatcher.run(lambda: self._recover(account))
         return policy
 
-    async def active_policies(self, account: str, pair=None, state=None):
-        pair = pair if pair is not None else await self.policies(account)
-        state = state if state is not None else await self.read_initial(account)
-        policies = [resolve_effective_ttl(*pair, root) for root in self.policy_roots()]
+    async def _initial_enabled(self, account: str, pair, state) -> bool:
+        if self.enabled(pair):
+            return True
         roots = set(json.loads(state["roots"]) if state["roots"] else [])
         roots.update(state["reset_required"])
         for (scope, user), (_, config) in list(self._user_policies.items()):
             if scope == account and config is not None:
                 roots.update(self.user_roots(user))
-        policies.extend([await self.policy(account, root, pair) for root in sorted(roots)])
-        return [policy for policy in policies if policy.enabled]
+        for root in sorted(roots):
+            if (await self.policy(account, root, pair)).enabled:
+                return True
+        return False
 
     async def prepare_user_configuration(self, ctx, before, after) -> None:
         pair = await self.policies(ctx.account_id)
@@ -442,16 +444,7 @@ class DirectoryTTL:
         ]
         if not opening:
             return
-        try:
-            redis = await self.client()
-            pipe = redis.pipeline(transaction=False)
-            token = uuid4().hex
-            for root in opening:
-                pipe.hsetnx(self.prefix(ctx.account_id) + "backfill:reset_required", root, token)
-            await pipe.execute()
-            await self._schedule(ctx.account_id)
-        except Exception as exc:
-            raise UnavailableError("TTL reset intent registration unavailable") from exc
+        await self._register_reset_intent(ctx.account_id, opening)
 
     async def publish_user_configuration(self, ctx, config) -> None:
         async def publish():
@@ -484,13 +477,9 @@ class DirectoryTTL:
             self._initial_requests.add(account_id)
             self._wake_worker()
 
-    @staticmethod
-    def policy_roots() -> list[str]:
-        return [
-            "viking://user/_ttl_/sessions",
-            "viking://user/_ttl_/memories/events",
-            "viking://user/_ttl_/peers",
-        ]
+    @classmethod
+    def policy_roots(cls) -> list[str]:
+        return cls.user_roots("_ttl_")
 
     @classmethod
     def enabled(cls, pair: tuple[TTLConfig | None, TTLConfig | None]) -> bool:
@@ -644,8 +633,12 @@ class DirectoryTTL:
         account = request.account_id
         pair = await self.policies(account)
         state = await self.read_initial(account)
-        if not await self.active_policies(account, pair, state):
+        if not await self._initial_enabled(account, pair, state):
             raise FailedPreconditionError("TTL is disabled")
+        await self._register_initial(request, pair, state)
+
+    async def _register_initial(self, request: TTLBackfillRequest, pair, state) -> None:
+        account = request.account_id
         await self._schedule(account)
         intents = request.reset_intents or {
             root: token
@@ -726,49 +719,47 @@ class DirectoryTTL:
         )
         self._wake_worker()
 
+    async def _resume_initial(self, account: str) -> None:
+        state = await self.read_initial(account)
+        if state["done"] and not state["reset_required"]:
+            return
+        pair = await self.policies(account)
+        if not await self._initial_enabled(account, pair, state):
+            self._recovered.discard(account)
+            self._pending.discard(account)
+            return
+        await self._register_initial(TTLBackfillRequest(self.resource_id, account), pair, state)
+
     async def _run(self):
         delay = 1
         while not self._closed:
             self._wake.clear()
-            try:
-                for account in self._initial_requests | self._recycle:
-                    if self._closed:
-                        break
-                    if not await self.active_policies(account):
-                        # Keep the durable wake-up across disable/re-enable races.
-                        self._recovered.discard(account)
-                        self._initial_requests.discard(account)
-                        self._pending.discard(account)
-                        self._recycle.discard(account)
-                        continue
-                    await self.register_initial_backfill(
-                        TTLBackfillRequest(self.resource_id, account)
-                    )
+            failed = False
+            for account in self._initial_requests | self._pending | self._recycle:
+                if self._closed:
+                    break
+                try:
+                    await self._resume_initial(account)
                     self._initial_requests.discard(account)
-                for account in list(self._pending):
-                    if self._closed:
-                        break
-                    if not await self.active_policies(account):
-                        self._pending.discard(account)
-                        continue
-                    async with self._locks.setdefault(account, asyncio.Lock()):
-                        await self._scan(account)
-                for account in list(self._recycle):
-                    if self._closed:
-                        break
-                    result = await self.recycle_due(TTLRecycleRequest(self.resource_id, account))
-                    logger.info(
-                        "TTL recycle resource=%s account=%s result=%s",
-                        self.resource_id,
-                        account,
-                        result,
-                    )
-                    self._recycle.discard(account)
-                delay = 1
-            except Exception:
-                logger.exception("TTL worker retry delay=%s", delay)
-                delay = min(delay * 2, 60)
-            else:
+                    if account in self._pending and not self._closed:
+                        async with self._locks.setdefault(account, asyncio.Lock()):
+                            await self._scan(account)
+                    if account in self._recycle and not self._closed:
+                        result = await self._recycle_registered(
+                            TTLRecycleRequest(self.resource_id, account)
+                        )
+                        logger.info(
+                            "TTL recycle resource=%s account=%s result=%s",
+                            self.resource_id,
+                            account,
+                            result,
+                        )
+                        self._recycle.discard(account)
+                except Exception:
+                    failed = True
+                    logger.exception("TTL worker retry scope=%s delay=%s", account, delay)
+            delay = min(delay * 2, 60) if failed else 1
+            if not failed:
                 if not (self._initial_requests or self._pending or self._recycle):
                     return
                 if self._initial_requests:
@@ -944,20 +935,11 @@ class DirectoryTTL:
     async def recycle_due(self, request: TTLRecycleRequest) -> TTLRecycleResult:
         if not self.writer or request.resource_id != self.resource_id:
             raise FailedPreconditionError("TTL request must target this writer")
-        pair = await self.policies(request.account_id)
-        policies = await self.active_policies(request.account_id, pair)
-        if not policies:
-            return TTLRecycleResult()
         if request.max_base_time_ms is None:
-            # Hourly orchestration supplies only identity. Redis and policy
-            # interpretation stay in the writer; explicit test cutoffs remain supported.
-            await self.register_initial_backfill(
-                TTLBackfillRequest(self.resource_id, request.account_id)
-            )
-            days = min(policy.days for policy in policies)
-            cutoff = time.time_ns() // 1_000_000 - (days - 1) * DAY_MS
-        else:
-            cutoff = request.max_base_time_ms
+            await self._resume_initial(request.account_id)
+        return await self._recycle_registered(request)
+
+    async def _recycle_registered(self, request: TTLRecycleRequest) -> TTLRecycleResult:
         if self._recycle_lock.locked():
             raise ConflictError("TTL recycle round is already running")
         counts = {"scanned": 0, "deleted": 0, "skipped": 0, "failed": 0}
@@ -967,6 +949,13 @@ class DirectoryTTL:
             prefix = self.prefix(account)
             if await redis.get(prefix + "backfill:initial:done") != "1":
                 return TTLRecycleResult()
+            cutoff = request.max_base_time_ms
+            if cutoff is None:
+                if not await redis.exists(*(prefix + kind for kind in TTLIndexType)):
+                    return TTLRecycleResult()
+                cutoff = await self._recycle_cutoff(account)
+                if cutoff is None:
+                    return TTLRecycleResult()
             ctx = self.context(account)
             for kind in ("user_events", "peer_events", "sessions"):
                 offset = 0
@@ -981,11 +970,11 @@ class DirectoryTTL:
                     )
                     if not candidates:
                         break
+                    if await redis.get(prefix + "backfill:initial:done") != "1":
+                        return TTLRecycleResult(**counts)
                     removed = 0
                     for uri, score in candidates:
                         if self._closed or account in self._stop_scan:
-                            return TTLRecycleResult(**counts)
-                        if await redis.get(prefix + "backfill:initial:done") != "1":
                             return TTLRecycleResult(**counts)
                         counts["scanned"] += 1
                         try:
@@ -995,13 +984,45 @@ class DirectoryTTL:
                         except Exception:
                             counts["failed"] += 1
                             logger.exception("TTL recycle failed scope=%s uri=%s", account, uri)
-                        await asyncio.sleep(self.delete_interval)
                     offset += len(candidates) - removed
         return TTLRecycleResult(**counts)
+
+    async def _recycle_cutoff(self, account: str) -> int | None:
+        # Use the current user registry, not initial roots or an incomplete cache.
+        # Changes after this snapshot enter the next hourly round.
+        pair = await self.policies(account)
+        roots = self.policy_roots()
+
+        def minimum(config, days=None):
+            for root in roots:
+                value = resolve_effective_ttl(*pair, root, config).days
+                if value is not None and (days is None or value < days):
+                    days = value
+            return days
+
+        days = minimum(None)
+        if days != 1:
+            if self.account_manager is None:
+                # Local dev mode has no user registry; use the safe lower bound.
+                return time.time_ns() // 1_000_000
+            users = await self.account_manager.list_users_page(
+                account, limit=None, expose_key=False
+            )
+            for user in users["users"]:
+                days = minimum(await self.user_policy(account, user["user_id"]), days)
+                if days == 1:
+                    break
+        if days is None:
+            return None
+        return time.time_ns() // 1_000_000 - (days - 1) * DAY_MS
 
     async def _delete(self, account, uri, score, ctx):
         item = directory(uri)
         if item is None or item[2] != uri:
+            return False, 0
+        # Every valid TTL is at least one day. Skip young entries without loading
+        # user configuration; Events retain their existing calendar-day semantics.
+        if self.expiry(item, score, 1) > time.time_ns() // 1_000_000:
             return False, 0
         policy = await self.policy(account, item[1])
         if (
@@ -1009,6 +1030,7 @@ class DirectoryTTL:
             or self.expiry(item, score, policy.days) > time.time_ns() // 1_000_000
         ):
             return False, 0
+        await asyncio.sleep(self.delete_interval)
         path = self.fs._uri_to_path(uri, ctx=ctx)
         agfs = self.fs._async_agfs
         lease = await agfs.pathlock_acquire_tree(path)
