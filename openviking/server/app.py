@@ -212,7 +212,7 @@ async def _initialize_runtime_state(
         await _initialize_auth_plugin(app, service, config)
         await _initialize_ttl_adapter(app, service, config)
     manager = getattr(app.state, "api_key_manager", None)
-    if manager is not None:
+    if manager is not None and get_openviking_config().reconcile_system_assets_on_startup:
         account_count = await service.reconcile_system_assets(manager)
         logger.info("Reconciled system assets for %d active accounts", account_count)
     compile_scheduler = getattr(service, "compile_scheduler", None)
@@ -229,6 +229,7 @@ async def _initialize_runtime_state(
         oauth_store=getattr(app.state, "oauth_store", None),
         usage_audit_runtime=getattr(app.state, "usage_audit_runtime", None),
         gateway_app=getattr(app.state, "gateway_app", None),
+        require_registered_identity=config.get_effective_auth_mode() == "api_key",
     )
     logger.info("OpenVikingService initialization complete")
 
@@ -744,11 +745,11 @@ def create_app(
                 or "http://127.0.0.1:1933"
             )
 
-            async def _current_role(account_id: str, user_id: str) -> Role:
+            async def _registered_account_role(account_id: str, user_id: str) -> Role | None:
                 manager = getattr(app.state, "api_key_manager", None)
                 if manager is None:
-                    return Role.USER
-                return await manager.get_registered_user_role(account_id, user_id) or Role.USER
+                    return None
+                return await manager.get_registered_user_role(account_id, user_id)
 
             _route_provider = OpenVikingOAuthProvider(
                 store=_route_store,
@@ -756,7 +757,7 @@ def create_app(
                 access_token_ttl_seconds=ov_cfg.oauth.access_token_ttl_seconds,
                 refresh_token_ttl_seconds=ov_cfg.oauth.refresh_token_ttl_seconds,
                 auth_code_ttl_seconds=ov_cfg.oauth.auth_code_ttl_seconds,
-                role_resolver=_current_role,
+                role_resolver=_registered_account_role,
             )
             # Stash the route-time instances; the lifespan replaces these with
             # initialized copies before the first request lands.

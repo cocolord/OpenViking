@@ -48,8 +48,7 @@ Admin API 用于多租户环境下的账户、用户和用户组管理。包括�
 - `ov --sudo admin` - 账户和用户管理
 - `ov --sudo system` - 系统工具命令
 - `ov --sudo reindex` - 重建索引
-- `ov --sudo admin migrate` - 旧 Session 迁移和清理
-- `ov --sudo task status/list` - 查询 root/system 后台任务，例如迁移任务
+- `ov --sudo task status/list` - 查询 root/system 后台任务，例如账号删除任务
 
 ### 使用限制
 
@@ -781,7 +780,7 @@ credential 合并；不能用 `extra_request_body` 设置 `stream`，因为 Open
 | 路径 | 生命周期 | 类型和约束 | 含义 |
 | --- | --- | --- | --- |
 | `embedding.dense` / `sparse` / `hybrid` | mode 存在性创建期 | object/null | 三种模型输出模式；创建后不能新增、删除或切换 |
-| `embedding.max_concurrent` | 动态 | integer，`>= 1` | 该 Account 的 provider 调用并发上限 |
+| `embedding.max_concurrent` | 动态 | integer，`>= 1` | 该 Account 的入库文档 Embedding 调用并发上限；检索查询的 Embedding 请求不受此限制 |
 | `embedding.max_retries` | 动态 | integer，`>= 0` | 瞬时 provider 错误重试次数 |
 | `embedding.circuit_breaker.failure_threshold` | 动态 | integer，`>= 1` | 熔断前的连续失败次数 |
 | `embedding.circuit_breaker.reset_timeout` | 动态 | number，`> 0` | 熔断恢复基础等待秒数 |
@@ -922,7 +921,7 @@ User override 并重新继承上述默认值，请 PATCH `{"memory_policy": null
 
 **代码入口：**
 - `openviking/server/routers/admin.py:create_account` - HTTP 路由
-- `openviking/server/api_keys/new.py:APIKeyManager.create_account` - 核心实现
+- `openviking/server/api_keys/key_mgr.py:APIKeyManager.create_account` - 核心实现
 - `sdk/python/openviking_sdk/client.py:SyncHTTPClient.admin_create_account` - Python SDK
 
 #### 2. 接口和参数说明
@@ -1109,7 +1108,7 @@ ov --sudo admin create-account acme-private --admin alice \
 
 **代码入口：**
 - `openviking/server/routers/admin.py:list_accounts` - HTTP 路由
-- `openviking/server/api_keys/new.py:APIKeyManager.get_accounts` - 核心实现
+- `openviking/server/api_keys/key_mgr.py:APIKeyManager.get_accounts` - 核心实现
 - `sdk/python/openviking_sdk/client.py:SyncHTTPClient.admin_list_accounts` - Python SDK
 
 #### 2. 接口和参数说明
@@ -1320,7 +1319,7 @@ ov --sudo task status <task_id>
 
 **代码入口：**
 - `openviking/server/routers/admin.py:register_user` - HTTP 路由
-- `openviking/server/api_keys/new.py:APIKeyManager.register_user` - 核心实现
+- `openviking/server/api_keys/key_mgr.py:APIKeyManager.register_user` - 核心实现
 - `sdk/python/openviking_sdk/client.py:SyncHTTPClient.admin_register_user` - Python SDK
 
 #### 2. 接口和参数说明
@@ -1454,7 +1453,7 @@ ov admin register-user acme bob-private --role user \
 
 **代码入口：**
 - `openviking/server/routers/admin.py:list_users` - HTTP 路由
-- `openviking/server/api_keys/new.py:APIKeyManager.get_users` - 核心实现
+- `openviking/server/api_keys/key_mgr.py:APIKeyManager.get_users` - 核心实现
 - `sdk/python/openviking_sdk/client.py:SyncHTTPClient.admin_list_users` - Python SDK
 
 #### 2. 接口和参数说明
@@ -1685,7 +1684,7 @@ ov --sudo admin remove-user acme bob
 
 **代码入口：**
 - `openviking/server/routers/admin.py:set_user_role` - HTTP 路由
-- `openviking/server/api_keys/new.py:APIKeyManager.set_role` - 核心实现
+- `openviking/server/api_keys/key_mgr.py:APIKeyManager.set_role` - 核心实现
 - `sdk/python/openviking_sdk/client.py:SyncHTTPClient.admin_set_role` - Python SDK
 
 #### 2. 接口和参数说明
@@ -1785,7 +1784,7 @@ ov --sudo admin set-role acme bob user
 
 **代码入口：**
 - `openviking/server/routers/admin.py:regenerate_key` - HTTP 路由
-- `openviking/server/api_keys/new.py:APIKeyManager.regenerate_key` - 核心实现
+- `openviking/server/api_keys/key_mgr.py:APIKeyManager.regenerate_key` - 核心实现
 - `sdk/python/openviking_sdk/client.py:SyncHTTPClient.admin_regenerate_key` - Python SDK
 
 #### 2. 接口和参数说明
@@ -1896,113 +1895,22 @@ CLI 在请求轮换前检查能否准备替换文件。如果服务端已换钥�
 
 ---
 
-### migrate_legacy_data
+### 预留迁移入口
 
-#### 1. API 实现介绍
+`POST /api/v1/admin/migrate` 为后续迁移需求保留，仅 ROOT 可调用。当前返回
+`400 Bad Request`，错误码为 `INVALID_ARGUMENT`，错误消息为
+`Data migration is not currently supported.`（当前不支持数据迁移）。
 
-将旧 `viking://session/...` 数据迁移到 `viking://user/<user_id>/sessions/...`，或在确认迁移结果后清理旧 Session 目录。该接口仅 ROOT 可调用，并以后台 task 执行。`agent` 是账号内公共目录，不参与迁移或 cleanup。
-
-**处理流程：**
-1. 验证请求者具有 ROOT 权限
-2. `action=migrate` 时执行 preflight，检查 account registry、session owner 等前置条件
-3. 创建 root 级后台 task
-4. 迁移时复制 Session 文件；cleanup 时先删除旧 Session 向量记录，再删除旧 Session AGFS 目录
-
-迁移保留目标路径中已有的文件。cleanup 不删除 `agent` 公共目录或已迁移的用户数据。
-
-**代码入口：**
-- `openviking/server/routers/admin.py:migrate_legacy_data` - HTTP 路由
-- `openviking/service/legacy_migration.py:LegacyDataMigration` - 迁移实现
-
-#### 2. 接口和参数说明
-
-**HTTP API**
-
-```
-POST /api/v1/admin/migrate
-```
-
-**参数**
-
-| 参数 | 类型 | 必填 | 默认值 | 说明 |
-|------|------|------|--------|------|
-| action | str | 否 | migrate | `migrate` 执行迁移；`cleanup` 清理旧 namespace |
-
-**迁移结果字段**
-
-| 字段 | 说明 |
-|------|------|
-| migrated.files / migrated.directories | 复制的文件和目录数量 |
-| migrated.operations | Session 迁移操作数量（`sessions`） |
-| skipped / created_users | 跳过的文件、自动创建的用户 |
-
-**Cleanup 结果字段**
-
-| 字段 | 说明 |
-|------|------|
-| cleanup.directories | 删除的 legacy 目录数量 |
-| cleanup.vector_records | 删除的旧向量记录数量 |
-| cleanup.targets | 已清理的 legacy scope |
-| skipped / warnings | 跳过项和告警 |
-
-#### 3. 使用示例
-
-**HTTP API**
+当前没有支持的迁移参数。传入原来的 `{"action":"migrate"}` 或
+`{"action":"cleanup"}` 也返回上述错误，不创建任务，不读写迁移数据。
+未认证请求返回 `401`；已认证的 ADMIN 或 USER 请求返回 `403`。
 
 ```bash
-# 执行迁移
 curl -X POST http://localhost:1933/api/v1/admin/migrate \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: <root-key>" \
-  -d '{"action": "migrate"}'
-
-# 迁移任务完成并核对目标数据后，再清理旧 namespace
-curl -X POST http://localhost:1933/api/v1/admin/migrate \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: <root-key>" \
-  -d '{"action": "cleanup"}'
+  -H "X-API-Key: <root-key>"
 ```
 
-**Python SDK**
-
-```python
-print(client.admin_migrate(cleanup=False))
-```
-
-**TypeScript SDK**
-
-```typescript
-console.log(await client.adminMigrate(false));
-```
-
-**Go SDK**
-
-```go
-result, err := client.AdminMigrate(ctx, &openviking.AdminMigrateOptions{
-    Cleanup: false,
-})
-if err != nil {
-    return err
-}
-fmt.Println(result["task_id"])
-```
-
-**CLI**
-
-```bash
-ov --sudo admin migrate --output json
-# 先用 ov --sudo task status <task_id> 查询返回的任务，再核对迁移结果。
-ov --sudo admin migrate --cleanup --output json
-```
-
-**CLI 响应示例（默认 compact 输出）**
-
-```json
-{
-  "ok": true,
-  "result": {"task_id": "6de05fc3-0334-40d6-ba9b-dd317eb4d351"}
-}
-```
+旧 `ov admin migrate` 命令和对应 SDK 方法已移除。
 
 ---
 

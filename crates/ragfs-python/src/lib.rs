@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tracing::Level;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
+use uuid::Uuid;
 
 /// Cached reference to the Python `openviking.storage.errors.LockAcquisitionError` class,
 /// imported at module init so that native and Python code share the same exception type.
@@ -182,6 +183,7 @@ use std::fmt;
 use std::fs;
 use std::future::Future;
 use std::time::{Duration, UNIX_EPOCH};
+use tokio::sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock};
 
 /// Validate and convert a wait timeout from Python.
 ///
@@ -197,8 +199,20 @@ fn validate_timeout_secs(v: f64) -> PyResult<Duration> {
     }
 }
 
+/// Validate a positive leader lease TTL from Python.
+fn validate_leader_ttl_secs(v: f64) -> PyResult<Duration> {
+    let max_ttl_secs = (i64::MAX as f64) / 1000.0;
+    if v.is_finite() && (0.001..=max_ttl_secs).contains(&v) {
+        Ok(Duration::from_secs_f64(v))
+    } else {
+        Err(PyValueError::new_err(
+            "ttl_secs must be a finite number between 0.001 and i64::MAX milliseconds",
+        ))
+    }
+}
+
 use ragfs::cache::{CachePolicy, CacheTraversalMode};
-use ragfs::cache_runtime::{CacheRuntime, DynamicProviderConfig, RedisProviderConfig};
+use ragfs::cache_runtime::{CacheError, CacheRuntime, DynamicProviderConfig, RedisProviderConfig};
 use ragfs::core::builder::{
     CacheFsConfig, CacheRuntimeProviderConfig, CacheStackConfig, EncryptionConfig,
 };
@@ -208,6 +222,7 @@ use ragfs::core::{
     OperationStats, PathLockContext, PluginConfig, RagfsConfig, SortOrder, TreeEntry, WriteFlag,
     FS_CTX,
 };
+use ragfs::leader::{LeaderLease, LeaderManager};
 use ragfs::lock::types::PathLockError;
 use ragfs::lock::{
     BorrowedPathLockLease, OwnedPathLockLease, PathLockConfig, PathLockHandoffRef, PathLockKind,
@@ -1522,6 +1537,12 @@ struct RAGFSBindingClient {
     pathlock_manager: Arc<PathLockManager>,
     /// Shared cache runtime. Closed only after mounted QueueFS instances shut down.
     cache_runtime: Option<Arc<CacheRuntime>>,
+    /// Service namespace used for shared leader keys.
+    service_name: String,
+    /// Opaque public references to hidden leader ownership tokens.
+    leader_leases: Arc<AsyncMutex<HashMap<String, LeaderLease>>>,
+    /// Blocks leader operations during close and waits in-flight operations out.
+    leader_closing: Arc<AsyncRwLock<bool>>,
 }
 
 impl RAGFSBindingClient {
@@ -1544,6 +1565,16 @@ impl RAGFSBindingClient {
     /// Clone the PathLock manager shared by this binding client.
     fn clone_pathlock_manager(&self) -> Arc<PathLockManager> {
         self.pathlock_manager.clone()
+    }
+
+    /// Build the leader manager lazily so providers without scripting still construct normally.
+    fn clone_leader_manager(&self) -> PyResult<Arc<LeaderManager>> {
+        let runtime = self.cache_runtime.clone().ok_or_else(|| {
+            PyRuntimeError::new_err("distributed leadership requires an AGFS CacheRuntime")
+        })?;
+        LeaderManager::new(runtime, &self.service_name)
+            .map(Arc::new)
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))
     }
 }
 
@@ -1721,6 +1752,9 @@ impl RAGFSBindingClient {
             git_backend,
             pathlock_manager: stack.pathlock_manager,
             cache_runtime: stack.cache_runtime,
+            service_name: service_name.unwrap_or_else(|| "ragfs".to_string()),
+            leader_leases: Arc::new(AsyncMutex::new(HashMap::new())),
+            leader_closing: Arc::new(AsyncRwLock::new(false)),
         })
     }
 
@@ -1728,13 +1762,27 @@ impl RAGFSBindingClient {
     fn close(&self, py: Python<'_>) -> PyResult<()> {
         let mountable = Arc::clone(&self.mountable);
         let cache_runtime = self.cache_runtime.clone();
+        let service_name = self.service_name.clone();
+        let leader_leases = Arc::clone(&self.leader_leases);
+        let leader_closing = Arc::clone(&self.leader_closing);
         py_detach_blocking(py, || {
             self.rt.block_on(async move {
+                let mut closing = leader_closing.write().await;
+                *closing = true;
                 let mount_result = mountable.shutdown().await;
                 let cache_result = match cache_runtime {
-                    Some(runtime) => runtime.close().await.map_err(|error| error.to_string()),
+                    Some(runtime) => {
+                        if let Ok(manager) = LeaderManager::new(runtime.clone(), &service_name) {
+                            let leases = std::mem::take(&mut *leader_leases.lock().await);
+                            for lease in leases.into_values() {
+                                let _ = manager.release(&lease).await;
+                            }
+                        }
+                        runtime.close().await.map_err(|error| error.to_string())
+                    }
                     None => Ok(()),
                 };
+                drop(closing);
                 mount_result.map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
                 cache_result.map_err(PyRuntimeError::new_err)
             })
@@ -2540,6 +2588,113 @@ impl RAGFSBindingClient {
     }
 
     // ── PathLock API ──
+
+    /// Validate that distributed leadership is available on this client.
+    fn leader_validate(&self) -> PyResult<()> {
+        self.clone_leader_manager().map(|_| ())
+    }
+
+    /// Try to acquire a distributed leader lease and return an opaque local reference.
+    #[pyo3(signature = (key, holder_id, ttl_secs))]
+    fn leader_try_acquire_async<'py>(
+        &self,
+        py: Python<'py>,
+        key: String,
+        holder_id: String,
+        ttl_secs: f64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let ttl = validate_leader_ttl_secs(ttl_secs)?;
+        let manager = self.clone_leader_manager()?;
+        let leases = Arc::clone(&self.leader_leases);
+        let leader_closing = Arc::clone(&self.leader_closing);
+        let task = self.rt.spawn(async move {
+            let closing = leader_closing.read().await;
+            if *closing {
+                return Err(CacheError::Closed);
+            }
+            let lease = manager.try_acquire(&key, &holder_id, ttl).await?;
+            let Some(lease) = lease else {
+                return Ok(None);
+            };
+            let lease_ref = Uuid::new_v4().to_string();
+            leases.lock().await.insert(lease_ref.clone(), lease);
+            Ok::<Option<String>, CacheError>(Some(lease_ref))
+        });
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            task.await
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+        })
+    }
+
+    /// Renew an opaque leader lease. False means ownership has been lost.
+    #[pyo3(signature = (lease_ref, ttl_secs))]
+    fn leader_renew_async<'py>(
+        &self,
+        py: Python<'py>,
+        lease_ref: String,
+        ttl_secs: f64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let ttl = validate_leader_ttl_secs(ttl_secs)?;
+        let manager = self.clone_leader_manager()?;
+        let leases = Arc::clone(&self.leader_leases);
+        let leader_closing = Arc::clone(&self.leader_closing);
+        let task = self.rt.spawn(async move {
+            let closing = leader_closing.read().await;
+            if *closing {
+                return Err(CacheError::Closed);
+            }
+            let lease = {
+                let leases = leases.lock().await;
+                leases.get(&lease_ref).cloned()
+            };
+            let Some(lease) = lease else {
+                return Ok(false);
+            };
+            let renewed = manager.renew(&lease, ttl).await?;
+            if !renewed {
+                leases.lock().await.remove(&lease_ref);
+            }
+            Ok::<bool, ragfs::cache_runtime::CacheError>(renewed)
+        });
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            task.await
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+        })
+    }
+
+    /// Release an opaque leader lease if it is still owned.
+    #[pyo3(signature = (lease_ref))]
+    fn leader_release_async<'py>(
+        &self,
+        py: Python<'py>,
+        lease_ref: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let manager = self.clone_leader_manager()?;
+        let leases = Arc::clone(&self.leader_leases);
+        let leader_closing = Arc::clone(&self.leader_closing);
+        let task = self.rt.spawn(async move {
+            let closing = leader_closing.read().await;
+            if *closing {
+                return Err(CacheError::Closed);
+            }
+            let lease = {
+                let leases = leases.lock().await;
+                leases.get(&lease_ref).cloned()
+            };
+            if let Some(lease) = lease {
+                manager.release(&lease).await?;
+                leases.lock().await.remove(&lease_ref);
+            }
+            Ok::<(), ragfs::cache_runtime::CacheError>(())
+        });
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            task.await
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+        })
+    }
 
     /// Acquire an exact lock on a single path.
     #[pyo3(signature = (ctx, path, timeout_secs=0.0, owner_lease_ref=None))]

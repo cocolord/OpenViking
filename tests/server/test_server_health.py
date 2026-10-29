@@ -104,7 +104,17 @@ async def test_health_endpoint_without_api_key():
 
 
 @pytest.mark.parametrize(
-    "credentials", ["anonymous", "partial", "trusted", "keyed", "malformed", "asserted-root", "root-only", "invalid-root-only"]
+    "credentials",
+    [
+        "anonymous",
+        "partial",
+        "trusted",
+        "keyed",
+        "malformed",
+        "asserted-root",
+        "root-only",
+        "invalid-root-only",
+    ],
 )
 async def test_health_trusted_identity_contract(credentials, caplog, service):
     app = create_app(
@@ -288,10 +298,6 @@ async def test_ready_returns_200_after_initialized(monkeypatch):
         "openviking_cli.utils.ollama.detect_ollama_in_config",
         lambda config: (False, None, None),
     )
-    monkeypatch.setattr(
-        "openviking_cli.utils.config.open_viking_config.OpenVikingConfigSingleton.get_instance",
-        lambda: SimpleNamespace(embedding=SimpleNamespace(get_embedder=lambda: None)),
-    )
 
     app = create_app(config=ServerConfig(), service=service)
     transport = httpx.ASGITransport(app=app)
@@ -330,6 +336,8 @@ async def test_slow_init_does_not_block_health(monkeypatch):
 async def test_initialize_runtime_state_loads_api_key_manager(monkeypatch):
     """Install TTL hooks before workers; preserve system-asset reconciliation."""
     events = []
+    ov_config = SimpleNamespace(reconcile_system_assets_on_startup=True)
+    monkeypatch.setattr("openviking.server.app.get_openviking_config", lambda: ov_config)
 
     class MockService:
         def __init__(self):
@@ -379,6 +387,14 @@ async def test_initialize_runtime_state_loads_api_key_manager(monkeypatch):
     service.compile_scheduler.set_identity_resolver.assert_called_once_with(
         manager.resolve_identity, manager.get_user_group_ids
     )
+
+    events.clear()
+    ov_config.reconcile_system_assets_on_startup = False
+    await _initialize_runtime_state(app, service, config)
+
+    assert service._initialized is True
+    assert app.state.api_key_manager is manager
+    assert events == ["service", "agent-evolution", "auth", "deletion"]
 
 
 async def test_initialize_runtime_state_skips_reconcile_without_account_manager(monkeypatch):
