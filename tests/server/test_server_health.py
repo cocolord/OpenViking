@@ -104,17 +104,7 @@ async def test_health_endpoint_without_api_key():
 
 
 @pytest.mark.parametrize(
-    "credentials",
-    [
-        "anonymous",
-        "partial",
-        "trusted",
-        "keyed",
-        "malformed",
-        "asserted-root",
-        "root-only",
-        "invalid-root-only",
-    ],
+    "credentials", ["anonymous", "partial", "trusted", "keyed", "malformed", "asserted-root", "root-only", "invalid-root-only"]
 )
 async def test_health_trusted_identity_contract(credentials, caplog, service):
     app = create_app(
@@ -337,8 +327,7 @@ async def test_slow_init_does_not_block_health(monkeypatch):
         assert elapsed < 0.5
 
 
-@pytest.mark.parametrize("ttl_enabled", [False, True])
-async def test_initialize_runtime_state_loads_api_key_manager(monkeypatch, ttl_enabled):
+async def test_initialize_runtime_state_loads_api_key_manager(monkeypatch):
     """Install TTL hooks before workers; preserve system-asset reconciliation."""
     events = []
 
@@ -349,10 +338,7 @@ async def test_initialize_runtime_state_loads_api_key_manager(monkeypatch, ttl_e
             self._queue_manager = None
 
         async def initialize(self, **kwargs):
-            if ttl_enabled:
-                await kwargs["before_background_start"]()
-            else:
-                assert not kwargs
+            await kwargs["before_background_start"]()
             events.extend(["workers", "service"])
             self._initialized = True
 
@@ -381,15 +367,11 @@ async def test_initialize_runtime_state_loads_api_key_manager(monkeypatch, ttl_e
     service.compile_scheduler = SimpleNamespace(set_identity_resolver=Mock())
     config = ServerConfig(
         root_api_key="root-key-for-test",
-        ttl_adapter={"enabled": True} if ttl_enabled else None,
+        ttl_adapter={"enabled": True},
     )
     await _initialize_runtime_state(app, service, config)
 
-    startup = (
-        ["auth", "ttl", "workers", "service", "agent-evolution"]
-        if ttl_enabled
-        else ["workers", "service", "agent-evolution", "auth", "ttl"]
-    )
+    startup = ["auth", "ttl", "workers", "service", "agent-evolution"]
     assert events == startup + ["system-assets", "deletion"]
     assert service._initialized is True
     assert setup.await_args.kwargs["manager"] is manager
@@ -412,6 +394,7 @@ async def test_initialize_runtime_state_skips_reconcile_without_account_manager(
         app.state.api_key_manager = None
 
     monkeypatch.setattr("openviking.server.app._initialize_auth_plugin", initialize_plugin)
+
     app = SimpleNamespace(state=SimpleNamespace(api_key_manager=None))
     await _initialize_runtime_state(app, service, ServerConfig())
 

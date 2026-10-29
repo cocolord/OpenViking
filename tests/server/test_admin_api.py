@@ -141,9 +141,6 @@ class _FakeService:
         self.sessions = self
         self.runtime_config_manager = manager_over_source(MemoryConfigSource())
 
-    def configure_ttl(self, adapter):
-        self.ttl_adapter = adapter
-
     async def get_agent_evolution_enabled(self, account_id):
         del account_id
         return True
@@ -420,116 +417,6 @@ async def test_studio_file_configuration_permissions_revision_and_overrides(
     ).status_code == 400
     settings = await manager.get_settings(ConfigScope.account(account_id))
     assert settings["vlm"]["model"] == "override-model"
-
-
-async def test_unconfigured_redis_ttl_rejects_explicit_policy_after_auth(
-    lightweight_admin_client: httpx.AsyncClient,
-):
-    message = "Redis-backed TTL is not enabled in this deployment."
-    cluster_url = "/api/v1/admin/configuration"
-    denied = await lightweight_admin_client.patch(cluster_url, json={"settings": {"ttl": {}}})
-    assert denied.status_code == 401
-
-    cluster = await lightweight_admin_client.patch(
-        cluster_url,
-        headers=root_headers(),
-        json={"settings": {"ttl": {"global": {"days": 7}}}},
-    )
-    assert cluster.status_code == 501
-    assert cluster.json()["error"] == {
-        "code": "UNIMPLEMENTED",
-        "message": message,
-        "details": {},
-    }
-
-    account_id = _uid()
-    created = await lightweight_admin_client.post(
-        "/api/v1/admin/accounts",
-        headers=root_headers(),
-        json={"account_id": account_id, "admin_user_id": "alice"},
-    )
-    assert created.status_code == 200, created.text
-    account = await lightweight_admin_client.patch(
-        f"/api/v1/admin/accounts/{account_id}/configuration",
-        headers=root_headers(),
-        json={"settings": {"ttl": "disabled"}},
-    )
-    assert account.status_code == 501
-    assert account.json()["error"]["code"] == "UNIMPLEMENTED"
-    assert account.json()["error"]["message"] == message
-
-
-async def test_unconfigured_redis_ttl_rejects_file_policy_before_save(
-    lightweight_admin_client,
-    tmp_path,
-    monkeypatch,
-):
-    from openviking_cli.utils.config.open_viking_config import OpenVikingConfigSingleton
-
-    path = tmp_path / "ov.conf"
-    original = json.dumps({"server": {"port": 1933}})
-    path.write_text(original)
-    monkeypatch.setattr(OpenVikingConfigSingleton, "_config_file", path)
-    response = await lightweight_admin_client.patch(
-        "/api/v1/admin/configuration",
-        params={"source": "file"},
-        headers=root_headers(),
-        json={
-            "revision": hashlib.sha256(original.encode()).hexdigest(),
-            "content": json.dumps({"ttl": {"global": {"days": 7}}}),
-        },
-    )
-
-    assert response.status_code == 501
-    assert response.json()["error"]["code"] == "UNIMPLEMENTED"
-    assert path.read_text() == original
-
-
-async def test_loaded_ttl_adapter_allows_ttl_configuration(
-    lightweight_admin_client,
-):
-    """An enabled Redis TTL implementation permits TTL config."""
-    from openviking.ttl import wiring
-
-    class _FakeTTLAdapter:
-        def supports_config(self) -> bool:
-            return True
-
-        async def patch_configuration(self, settings, account_id=None):
-            from openviking.server.dependencies import get_service
-
-            manager = get_service().runtime_config_manager
-            if account_id is None:
-                await manager.patch_cluster(settings)
-            else:
-                await manager.patch_account(account_id, settings)
-
-        async def on_post_write(self, uri, ctx, written_at_ms):  # noqa: ANN001
-            return None
-
-    wiring.set_ttl_adapter(_FakeTTLAdapter())
-    try:
-        account_id = _uid()
-        created = await lightweight_admin_client.post(
-            "/api/v1/admin/accounts",
-            headers=root_headers(),
-            json={"account_id": account_id, "admin_user_id": "alice"},
-        )
-        assert created.status_code == 200, created.text
-        account = await lightweight_admin_client.patch(
-            f"/api/v1/admin/accounts/{account_id}/configuration",
-            headers=root_headers(),
-            json={"settings": {"ttl": {"sessions": 30, "global": 45}}},
-        )
-        assert account.status_code == 200, account.text
-        cluster = await lightweight_admin_client.patch(
-            "/api/v1/admin/configuration",
-            headers=root_headers(),
-            json={"settings": {"ttl": {"global": 7}}},
-        )
-        assert cluster.status_code == 200, cluster.text
-    finally:
-        wiring.set_ttl_adapter(None)
 
 
 @pytest.mark.parametrize("cli_host", [None, "127.0.0.1"])
@@ -2268,19 +2155,24 @@ async def test_create_user_paths_accept_initial_user_config(
     assert bob_settings.resource_uri == "viking://user/bob/resources/bob"
 
 
-async def test_user_memory_policy_can_be_initialized_and_hot_updated(
-    lightweight_admin_client: httpx.AsyncClient,
-    lightweight_admin_app: FastAPI,
+async def test_user_settings_preserve_policy_inheritance_backup_and_sparse_updates(
+    lightweight_admin_client, lightweight_admin_app, monkeypatch
 ):
+    import fakeredis.aioredis
+
+    from openviking.ttl import wiring
+    from openviking.ttl.runtime import DirectoryTTL
+    from openviking_cli.utils.config.open_viking_config import set_openviking_config
+
+    client = lightweight_admin_client
     acct = _uid()
-    create_account = await lightweight_admin_client.post(
+    created = await client.post(
         "/api/v1/admin/accounts",
         json={"account_id": acct, "admin_user_id": "alice"},
         headers=root_headers(),
     )
-    assert create_account.status_code == 200, create_account.text
-
-    create_user = await lightweight_admin_client.post(
+    assert created.status_code == 200, created.text
+    created = await client.post(
         f"/api/v1/admin/accounts/{acct}/users",
         json={
             "user_id": "bob",
@@ -2289,80 +2181,107 @@ async def test_user_memory_policy_can_be_initialized_and_hot_updated(
         },
         headers=root_headers(),
     )
-    assert create_user.status_code == 200, create_user.text
-
-    get_settings = await lightweight_admin_client.get(
-        f"/api/v1/admin/accounts/{acct}/users/bob/settings",
-        headers=root_headers(),
-    )
-    assert get_settings.status_code == 200, get_settings.text
-    assert get_settings.json()["result"]["memory_policy"] == {
-        "self": {"enabled": True},
-        "peer": {"enabled": True},
-        "working_memory": {"enabled": False},
-        "memory_types": ["profile"],
-    }
-
-    patch_settings = await lightweight_admin_client.patch(
-        f"/api/v1/admin/accounts/{acct}/users/bob/settings",
-        json={"memory_policy": {"memory_types": ["experiences"]}},
-        headers=root_headers(),
-    )
-    assert patch_settings.status_code == 200, patch_settings.text
-    memory_policy = patch_settings.json()["result"]["memory_policy"]
-    assert memory_policy["memory_types"] == [
-        "cases",
-        "experiences",
-        "trajectories",
-    ]
-
-    viking_fs = lightweight_admin_app.state.fake_service.viking_fs
-    persisted = await read_user_config(
-        viking_fs,
-        RequestContext(user=UserIdentifier(acct, "bob"), role=Role.USER),
-    )
-    assert persisted.memory_policy["memory_types"] == [
-        "cases",
-        "experiences",
-        "trajectories",
-    ]
+    assert created.status_code == 200, created.text
+    url = f"/api/v1/admin/accounts/{acct}/users/bob/settings"
+    service = lightweight_admin_app.state.fake_service
+    fs = service.viking_fs
     user_ctx = RequestContext(user=UserIdentifier(acct, "bob"), role=Role.USER)
-    backup = json.loads(viking_fs.files[user_config_backup_uri(user_ctx)])
-    assert backup["memory_policy"]["memory_types"] == ["profile"]
+    monkeypatch.setattr(wiring, "_adapter", None)
+    before = dict(fs.files)
+    rejected = await client.patch(url, json={"ttl": {"sessions": 7}}, headers=root_headers())
+    assert rejected.status_code == 501 and fs.files == before
 
-    writes_before_noop = len(viking_fs.writes)
-    noop_patch = await lightweight_admin_client.patch(
-        f"/api/v1/admin/accounts/{acct}/users/bob/settings",
-        json={"memory_policy": persisted.memory_policy},
-        headers=root_headers(),
-    )
-    assert noop_patch.status_code == 200, noop_patch.text
-    assert len(viking_fs.writes) == writes_before_noop
+    engine = DirectoryTTL(resource_id="settings-contract", timezone_name="UTC")
+    engine.bind_runtime(service, lightweight_admin_app.state.api_key_manager)
+    engine.redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    monkeypatch.setattr(wiring, "_adapter", engine)
+    previous_config = get_openviking_config()
+    try:
+        await service.runtime_config_manager.patch_cluster({"ttl": {"global": 60, "sessions": 30}})
+        configured = await client.patch(
+            f"/api/v1/admin/accounts/{acct}/configuration",
+            json={"settings": {"ttl": {"global": 45, "peer_events": 14}}},
+            headers=root_headers(),
+        )
+        assert configured.status_code == 200, configured.text
+        patched = await client.patch(
+            url,
+            json={
+                "memory_policy": {"memory_types": ["experiences"]},
+                "ttl": {"sessions": 7, "peer_events": 3, "user_events": "disabled"},
+            },
+            headers=root_headers(),
+        )
+        assert patched.status_code == 200, patched.text
+        settings = (await client.get(url, headers=root_headers())).json()["result"]
+        assert settings["ttl"] == {"sessions": 7, "peer_events": 3, "user_events": "disabled"}
+        assert settings["memory_policy"]["memory_types"] == ["cases", "experiences", "trajectories"]
+        persisted = await read_user_config(fs, user_ctx)
+        assert persisted.ttl.sessions == 7
+        assert persisted.memory_policy["memory_types"] == settings["memory_policy"]["memory_types"]
+        backup = json.loads(fs.files[user_config_backup_uri(user_ctx)])
+        assert backup["memory_policy"]["memory_types"] == ["profile"]
 
-    lightweight_admin_app.state.config.user_config_defaults = UserConfig(
-        memory_policy={"memory_types": ["events"]}
-    )
-    reset_settings = await lightweight_admin_client.patch(
-        f"/api/v1/admin/accounts/{acct}/users/bob/settings",
-        json={"memory_policy": None},
-        headers=root_headers(),
-    )
-    assert reset_settings.status_code == 200, reset_settings.text
-    assert reset_settings.json()["result"]["memory_policy"] == {
-        "self": {"enabled": True},
-        "peer": {"enabled": True},
-        "working_memory": {"enabled": False},
-        "memory_types": ["events"],
-    }
+        first_peer = "viking://user/bob/peers/first/memories/events/2026/01/01"
+        second_peer = "viking://user/bob/peers/second/memories/events/2026/01/01"
+        user_event = "viking://user/bob/memories/events/2026/01/01"
+        assert await engine.resolve_expires_at([first_peer, second_peer, user_event], user_ctx) == {
+            first_peer: "2026-01-04T00:00:00Z",
+            second_peer: "2026-01-04T00:00:00Z",
+            user_event: None,
+        }
+        queried = await client.get(
+            f"/api/v1/admin/accounts/{acct}/configuration",
+            params={"path": "viking://user/bob/peers"},
+            headers=root_headers(),
+        )
+        assert queried.status_code == 200 and queried.json()["result"]["effective_policy"] == 3
 
-    persisted = await read_user_config(viking_fs, user_ctx)
-    assert persisted.memory_policy is None
-    backup = json.loads(viking_fs.files[user_config_backup_uri(user_ctx)])
-    assert backup["memory_policy"]["memory_types"] == [
-        "cases",
-        "experiences",
-        "trajectories",
-    ]
+        writes_before_noop = len(fs.writes)
+        noop = await client.patch(
+            url, json={"memory_policy": persisted.memory_policy}, headers=root_headers()
+        )
+        assert noop.status_code == 200 and len(fs.writes) == writes_before_noop
+        patched = await client.patch(
+            url, json={"ttl": {"sessions": None, "peer_events": "disabled"}}, headers=root_headers()
+        )
+        assert patched.status_code == 200, patched.text
+        assert patched.json()["result"]["ttl"] == {
+            "peer_events": "disabled",
+            "user_events": "disabled",
+        }
+        assert (await engine.policy(acct, "viking://user/bob/sessions")).days == 30
+        assert not (await engine.policy(acct, first_peer)).enabled
+        assert patched.json()["result"]["memory_policy"] == settings["memory_policy"]
+        assert json.loads(fs.files[user_config_backup_uri(user_ctx)])["ttl"]["sessions"] == 7
+
+        # Enabling retention must persist recovery intent before changing UserConfig.
+        before = dict(fs.files)
+        with monkeypatch.context() as failure:
+            failure.setattr(engine, "client", AsyncMock(side_effect=OSError("Redis unavailable")))
+            rejected = await client.patch(
+                url, json={"ttl": {"user_events": 7}}, headers=root_headers()
+            )
+        assert rejected.status_code == 503 and fs.files == before
+        cleared = await client.patch(url, json={"ttl": None}, headers=root_headers())
+        assert cleared.status_code == 200, cleared.text
+        assert cleared.json()["result"]["ttl"] is None
+        assert cleared.json()["result"]["memory_policy"] == settings["memory_policy"]
+        assert (await engine.policy(acct, first_peer)).days == 14
+
+        lightweight_admin_app.state.config.user_config_defaults = UserConfig(
+            memory_policy={"memory_types": ["events"]}
+        )
+        reset = await client.patch(url, json={"memory_policy": None}, headers=root_headers())
+        assert reset.status_code == 200, reset.text
+        assert reset.json()["result"]["memory_policy"]["memory_types"] == ["events"]
+        assert (await read_user_config(fs, user_ctx)).memory_policy is None
+        assert json.loads(fs.files[user_config_backup_uri(user_ctx)])["memory_policy"][
+            "memory_types"
+        ] == ["cases", "experiences", "trajectories"]
+    finally:
+        set_openviking_config(previous_config)
+        await engine.aclose()
 
 
 async def test_user_memory_policy_uses_server_default_without_user_override(
@@ -2714,13 +2633,15 @@ async def test_delete_account(
             assert (await manager.resolve_identity(replacement_key)).user_id == "bob"
 
 
-async def test_delete_account_retries_when_runtime_config_cleanup_fails(
-    admin_client: httpx.AsyncClient,
-    admin_service: OpenVikingService,
-    admin_app: FastAPI,
-    monkeypatch: pytest.MonkeyPatch,
+async def test_delete_account_retries_cleanup_and_retires_ttl_callbacks(
+    admin_client, admin_service, admin_app, monkeypatch
 ):
-    """Config cleanup failure keeps the deletion fence and can be retried."""
+    import fakeredis.aioredis
+
+    from openviking.scheduling.expiry.api import CallbackRequest, ItemIdentity
+    from openviking.ttl import wiring
+    from openviking.ttl.runtime import DirectoryTTL
+
     acct = _uid()
     resp = await admin_client.post(
         "/api/v1/admin/accounts",
@@ -2728,131 +2649,62 @@ async def test_delete_account_retries_when_runtime_config_cleanup_fails(
         headers=root_headers(),
     )
     user_key = resp.json()["result"]["user_key"]
-    runtime_config = admin_service.runtime_config_manager
-    delete_config = AsyncMock(side_effect=OSError("provider unavailable"))
-    monkeypatch.setattr(runtime_config, "delete_account", delete_config)
-
-    resp = await admin_client.delete(
-        f"/api/v1/admin/accounts/{acct}",
-        headers=root_headers(),
-    )
-    assert resp.status_code == 202
-    failed = await _wait_for_task(admin_client, resp.json()["result"]["task_id"])
-    assert failed["status"] == "failed"
-    assert "provider unavailable" in failed["error"]
-    denied = await admin_client.get(
-        "/api/v1/fs/ls?uri=viking://",
-        headers={"X-API-Key": user_key},
-    )
-    assert denied.status_code == 401
-    assert await admin_app.state.api_key_manager.get_deletion(acct) is not None
-
-    conflict = await admin_client.post(
-        "/api/v1/admin/accounts",
-        json={"account_id": acct, "admin_user_id": "replacement"},
-        headers=root_headers(),
-    )
-    assert conflict.status_code == 409
-
-    delete_config.side_effect = None
-    retry = await admin_client.delete(
-        f"/api/v1/admin/accounts/{acct}",
-        headers=root_headers(),
-    )
-    completed = await _wait_for_task(admin_client, retry.json()["result"]["task_id"])
-    assert completed["status"] == "completed"
-    assert await admin_app.state.api_key_manager.get_deletion(acct) is None
-    assert delete_config.await_count == 2
-
-
-@pytest.mark.parametrize("fail_cleanup", [False, True])
-async def test_account_deletion_cleans_ttl_state_and_late_callbacks(
-    admin_client, admin_service, admin_app, monkeypatch, fail_cleanup
-):
-    import fakeredis.aioredis
-
-    from openviking.scheduling.expiry.api import CallbackRequest
-    from openviking.ttl import wiring
-    from openviking.ttl.adapter import TTLBackfillRequest
-    from openviking.ttl.runtime import DirectoryTTL
-    from openviking_cli.utils.config.ttl_config import TTLConfig
-
-    account = _uid()
-    created = await admin_client.post(
-        "/api/v1/admin/accounts",
-        json={"account_id": account, "admin_user_id": "alice"},
-        headers=root_headers(),
-    )
-    assert created.status_code == 200, created.text
-    engine = DirectoryTTL(resource_id="ttl-delete-account", batch_interval=0)
+    engine = DirectoryTTL(resource_id="account-cleanup")
     engine.bind_runtime(admin_service, admin_app.state.api_key_manager)
     engine.redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
-    engine.policies = AsyncMock(return_value=(TTLConfig(sessions=7, user_events=7), None))
     scheduler = Mock(report=AsyncMock(), unregister=AsyncMock())
     engine.install_expiry(scheduler)
     monkeypatch.setattr(wiring, "_adapter", engine)
-    root = "viking://user/alice/sessions"
-    other_key = engine.prefix("other") + "sessions"
+    prefix = engine.prefix(acct)
+    other = engine.prefix("other") + "sessions"
+    await engine.redis.zadd(prefix + "sessions", {"viking://user/alice/sessions/s": 1})
+    await engine.redis.hset(prefix + "backfill:initial", "roots", "[]")
+    await engine.redis.set(prefix + "backfill:initial:done", "1")
+    await engine.redis.zadd(other, {"viking://user/alice/sessions/kept": 1})
+    unlink = engine.redis.unlink
+    monkeypatch.setattr(engine.redis, "unlink", AsyncMock(side_effect=OSError("Redis unavailable")))
+    delete_config = AsyncMock(side_effect=OSError("provider unavailable"))
+    monkeypatch.setattr(admin_service.runtime_config_manager, "delete_account", delete_config)
     try:
-        await engine.register_initial_backfill(
-            TTLBackfillRequest(engine.resource_id, account, (root,))
+        resp = await admin_client.delete(f"/api/v1/admin/accounts/{acct}", headers=root_headers())
+        assert resp.status_code == 202
+        failed = await _wait_for_task(admin_client, resp.json()["result"]["task_id"])
+        assert failed["status"] == "failed" and "Redis unavailable" in failed["error"]
+        assert await engine.redis.zcard(prefix + "sessions") == 1
+        denied = await admin_client.get(
+            "/api/v1/fs/ls?uri=viking://", headers={"X-API-Key": user_key}
         )
-        await engine._scan(account)
-        await engine.redis.hset(engine.prefix(account) + "backfill:reset_required", root, "token")
-        for kind in ("sessions", "user_events", "peer_events"):
-            await engine.redis.zadd(engine.prefix(account) + kind, {root + "/s": 1})
-        await engine.redis.zadd(other_key, {root + "/kept": 1})
-        await engine.on_post_write(root + "/s/messages.jsonl", engine.context(account), 2)
-        engine._pending.add(account)
-        engine._recycle.add(account)
-        unlink = engine.redis.unlink
-
-        async def unlink_ttl(*keys):
-            if fail_cleanup:
-                raise OSError("TTL Redis unavailable")
-            return await unlink(*keys)
-
-        monkeypatch.setattr(engine.redis, "unlink", unlink_ttl)
-
-        response = await admin_client.delete(
-            f"/api/v1/admin/accounts/{account}", headers=root_headers()
+        assert denied.status_code == 401
+        assert await admin_app.state.api_key_manager.get_deletion(acct) is not None
+        conflict = await admin_client.post(
+            "/api/v1/admin/accounts",
+            json={"account_id": acct, "admin_user_id": "replacement"},
+            headers=root_headers(),
         )
-        assert response.status_code == 202, response.text
-        task = await _wait_for_task(admin_client, response.json()["result"]["task_id"])
-        if fail_cleanup:
-            assert task["status"] == "failed" and "TTL Redis unavailable" in task["error"]
-            assert await admin_app.state.api_key_manager.get_deletion(account) is not None
-            assert await engine.redis.zcard(engine.prefix(account) + "sessions") == 1
-            assert await engine.redis.zcard(other_key) == 1
-            fail_cleanup = False
-            response = await admin_client.delete(
-                f"/api/v1/admin/accounts/{account}", headers=root_headers()
-            )
-            task = await _wait_for_task(admin_client, response.json()["result"]["task_id"])
-        assert task["status"] == "completed", task
-        assert not [key async for key in engine.redis.scan_iter(match=engine.prefix(account) + "*")]
-        assert await engine.redis.zcard(other_key) == 1
-        assert not engine._retry
-        assert account not in engine._pending | engine._recycle | engine._scheduled
-        scheduler.unregister.assert_awaited_with(engine._identity(account))
+        assert conflict.status_code == 409
 
-        # Simulate a late bucket delivery, including after local runtime state is lost.
-        engine._scheduled.clear()
-        reports = scheduler.report.await_count
-        for _ in range(2):
-            result = await engine.handle(CallbackRequest(engine._identity(account)))
-            assert result.reason == "account_deleted"
-        assert scheduler.report.await_count == reports
-        assert not engine._recycle
-        from openviking_cli.exceptions import FailedPreconditionError
+        monkeypatch.setattr(engine.redis, "unlink", unlink)
+        retry = await admin_client.delete(f"/api/v1/admin/accounts/{acct}", headers=root_headers())
+        failed = await _wait_for_task(admin_client, retry.json()["result"]["task_id"])
+        assert failed["status"] == "failed" and "provider unavailable" in failed["error"]
+        assert await admin_app.state.api_key_manager.get_deletion(acct) is not None
+        delete_config.side_effect = None
+        retry = await admin_client.delete(f"/api/v1/admin/accounts/{acct}", headers=root_headers())
+        completed = await _wait_for_task(admin_client, retry.json()["result"]["task_id"])
+        assert completed["status"] == "completed"
+        assert await admin_app.state.api_key_manager.get_deletion(acct) is None
+        assert delete_config.await_count == 2
+        assert not [key async for key in engine.redis.scan_iter(match=prefix + "*")]
+        assert await engine.redis.zcard(other) == 1
 
-        with pytest.raises(FailedPreconditionError, match="Account is unavailable"):
-            await engine.register_initial_backfill(
-                TTLBackfillRequest(engine.resource_id, account, (root,))
-            )
-        assert not [key async for key in engine.redis.scan_iter(match=engine.prefix(account) + "*")]
+        # A delivery already in flight cannot revive maintenance for the deleted account.
+        callback = CallbackRequest(ItemIdentity("ttl", acct, "_system", "maintenance"))
+        assert (await engine.handle(callback)).reason == "account_deleted"
+        scheduler.report.assert_not_awaited()
+        assert not [key async for key in engine.redis.scan_iter(match=prefix + "*")]
     finally:
         await engine.aclose()
+
 
 async def test_create_duplicate_account_fails(admin_client: httpx.AsyncClient):
     """Creating duplicate account should fail."""
@@ -4667,235 +4519,3 @@ async def test_user_point_read_sees_peer_process_writes_without_a_list(
         assert rerole.json()["result"] == {"user_id": "bob", "role": "admin"}
     finally:
         await writer.close()
-
-
-async def test_ttl_internal_routes_absent_without_adapter(
-    lightweight_admin_app, lightweight_admin_client
-):
-    from openviking.server.app import _initialize_ttl_adapter
-
-    await _initialize_ttl_adapter(
-        lightweight_admin_app, lightweight_admin_app.state.fake_service, ServerConfig()
-    )
-    response = await lightweight_admin_client.post(
-        "/api/v1/admin/ttl/initial", json={}, headers=root_headers()
-    )
-    assert response.status_code == 404
-
-
-async def test_ttl_internal_bridge_auth_reset_and_configuration(
-    lightweight_admin_app, lightweight_admin_client, monkeypatch
-):
-    from openviking.server.app import _initialize_ttl_adapter
-    from openviking.ttl import wiring
-    from openviking.ttl.adapter import TTLBackfillRequest
-
-    monkeypatch.setattr(wiring, "_adapter", None)
-    adapter = Mock(
-        start=AsyncMock(),
-        register_initial_backfill=AsyncMock(),
-        read_initial=AsyncMock(return_value={"done": True, "pending": False}),
-    )
-    monkeypatch.setattr("openviking.ttl.wiring.build_ttl_adapter", lambda _: adapter)
-    service = lightweight_admin_app.state.fake_service
-    monkeypatch.setattr(service.viking_fs, "set_post_write_hook", Mock(), raising=False)
-    await _initialize_ttl_adapter(lightweight_admin_app, service, ServerConfig())
-    account_id = _uid()
-    await lightweight_admin_client.post(
-        "/api/v1/admin/accounts",
-        json={"account_id": account_id, "admin_user_id": "admin"},
-        headers=root_headers(),
-    )
-    await service.runtime_config_manager.patch_account(account_id, {"ttl": {"sessions": 30}})
-    body = {
-        "resource_id": "resource",
-        "account_id": account_id,
-        "roots": ["viking://user/u/sessions"],
-        "reset": True,
-    }
-    denied = await lightweight_admin_client.post("/api/v1/admin/ttl/initial", json=body)
-    assert denied.status_code == 401
-    adapter.register_initial_backfill.assert_not_called()
-    for reset, intents in (
-        (True, None),
-        (False, None),
-        (True, {"viking://user/u/sessions": "saved-token"}),
-    ):
-        body["reset"] = reset
-        body["reset_intents"] = intents
-        response = await lightweight_admin_client.post(
-            "/api/v1/admin/ttl/initial", json=body, headers=root_headers()
-        )
-        assert response.status_code == 200, response.text
-        adapter.register_initial_backfill.assert_awaited_with(
-            TTLBackfillRequest(
-                "resource", account_id, ("viking://user/u/sessions",), reset, intents
-            )
-        )
-    response = await lightweight_admin_client.get(
-        "/api/v1/admin/ttl/configuration", params={"account_id": account_id}, headers=root_headers()
-    )
-    assert response.status_code == 200, response.text
-    assert response.json()["result"]["account"]["sessions"] == 30
-    state = await lightweight_admin_client.get(
-        "/api/v1/admin/ttl/initial", params={"account_id": account_id}, headers=root_headers()
-    )
-    assert state.status_code == 200 and state.json()["result"]["done"]
-    adapter.read_initial.assert_awaited_once_with(account_id)
-    denied = await lightweight_admin_client.get(
-        "/api/v1/admin/ttl/initial", params={"account_id": account_id}
-    )
-    assert denied.status_code == 401
-    assert "/api/v1/admin/ttl/initial" not in lightweight_admin_app.openapi()["paths"]
-
-
-@pytest.mark.parametrize(
-    "error_type,status",
-    [("InternalError", 500), ("UnavailableError", 503), ("DeadlineExceededError", 504)],
-)
-async def test_ttl_internal_preserves_error_contract(
-    lightweight_admin_app, lightweight_admin_client, monkeypatch, error_type, status
-):
-    from openviking.server.app import _initialize_ttl_adapter
-    from openviking.ttl import wiring
-    from openviking_cli import exceptions
-
-    monkeypatch.setattr(wiring, "_adapter", None)
-    error = getattr(exceptions, error_type)("fixture failure")
-    error.details["scope"] = "test"
-    adapter = Mock(start=AsyncMock(), register_initial_backfill=AsyncMock(side_effect=error))
-    monkeypatch.setattr("openviking.ttl.wiring.build_ttl_adapter", lambda _: adapter)
-    service = lightweight_admin_app.state.fake_service
-    monkeypatch.setattr(service.viking_fs, "set_post_write_hook", Mock(), raising=False)
-    await _initialize_ttl_adapter(lightweight_admin_app, service, ServerConfig())
-    account_id = _uid()
-    created = await lightweight_admin_client.post(
-        "/api/v1/admin/accounts",
-        json={"account_id": account_id, "admin_user_id": "admin"},
-        headers=root_headers(),
-    )
-    assert created.status_code == 200
-    response = await lightweight_admin_client.post(
-        "/api/v1/admin/ttl/initial",
-        json={"resource_id": "resource", "account_id": account_id, "roots": [], "reset": True},
-        headers=root_headers(),
-    )
-    assert response.status_code == status, response.text
-    assert response.json()["error"]["details"]["scope"] == "test"
-    assert adapter.register_initial_backfill.await_count == 1
-
-
-async def test_user_ttl_reuses_settings_backup_and_sparse_type_patch(
-    lightweight_admin_client, lightweight_admin_app, monkeypatch
-):
-    from types import SimpleNamespace
-    from unittest.mock import AsyncMock
-
-    from openviking.ttl import wiring
-
-    adapter = SimpleNamespace(
-        supports_config=lambda: True,
-        prepare_user_configuration=AsyncMock(),
-        publish_user_configuration=AsyncMock(),
-    )
-    monkeypatch.setattr(wiring, "_adapter", adapter)
-    created = await lightweight_admin_client.post(
-        "/api/v1/admin/accounts",
-        json={"account_id": "ttl-user", "admin_user_id": "alice"},
-        headers=root_headers(),
-    )
-    assert created.status_code == 200, created.text
-    for suffix in ("memories/events", "peers", "sessions"):
-        missing = await lightweight_admin_client.get(
-            "/api/v1/admin/accounts/ttl-user/configuration",
-            params={"path": f"viking://user/ghost/{suffix}"},
-            headers=root_headers(),
-        )
-        assert missing.status_code == 404, missing.text
-        assert missing.json()["error"]["message"] == "User not found: ghost"
-    await lightweight_admin_app.state.fake_service.runtime_config_manager.patch_account(
-        "ttl-user", {"ttl": {"peer_events": 14}}
-    )
-    url = "/api/v1/admin/accounts/ttl-user/users/alice/settings"
-    response = await lightweight_admin_client.patch(
-        url,
-        json={
-            "memory_policy": {"memory_types": ["profile"]},
-            "ttl": {"sessions": 7, "peer_events": 3, "user_events": "disabled"},
-        },
-        headers=root_headers(),
-    )
-    assert response.status_code == 200, response.text
-    settings = response.json()["result"]
-    assert settings["ttl"] == {"sessions": 7, "peer_events": 3, "user_events": "disabled"}
-    for path in (
-        "viking://user/alice/peers",
-        "viking://user/alice/peers/p1/memories/events",
-        "viking://user/alice/peers/p2/memories/events",
-    ):
-        queried = await lightweight_admin_client.get(
-            "/api/v1/admin/accounts/ttl-user/configuration",
-            params={"path": path},
-            headers=root_headers(),
-        )
-        assert queried.status_code == 200, queried.text
-        assert queried.json()["result"]["effective_policy"] == 3
-        assert queried.json()["result"]["user_ttl"] == settings["ttl"]
-    rejected = await lightweight_admin_client.patch(
-        url, json={"ttl": {"peers": {"p1": 1}}}, headers=root_headers()
-    )
-    assert rejected.status_code == 400, rejected.text
-    response = await lightweight_admin_client.patch(
-        url, json={"ttl": {"peer_events": None, "user_events": 30}}, headers=root_headers()
-    )
-    assert response.status_code == 200, response.text
-    settings = response.json()["result"]
-    assert settings["ttl"] == {"sessions": 7, "user_events": 30}
-    assert settings["memory_policy"]["memory_types"] == ["profile"]
-    user_ctx = RequestContext(user=UserIdentifier("ttl-user", "alice"), role=Role.USER)
-    fs = lightweight_admin_app.state.fake_service.viking_fs
-    backup = json.loads(fs.files[user_config_backup_uri(user_ctx)])
-    assert backup["ttl"]["peer_events"] == 3
-    for policy, expected in (("disabled", "disabled"), (None, 14)):
-        changed = await lightweight_admin_client.patch(
-            url, json={"ttl": {"peer_events": policy}}, headers=root_headers()
-        )
-        assert changed.status_code == 200, changed.text
-        for path in ("viking://user/alice/peers", "viking://user/alice/peers/p2/memories/events"):
-            queried = await lightweight_admin_client.get(
-                "/api/v1/admin/accounts/ttl-user/configuration",
-                params={"path": path},
-                headers=root_headers(),
-            )
-            assert queried.status_code == 200, queried.text
-            assert queried.json()["result"]["effective_policy"] == expected
-    # Existing memory-policy PATCH still replaces the whole policy; TTL is sparse.
-    for policy in (
-        {"self": {"enabled": False}, "memory_types": ["profile"]},
-        {"memory_types": ["profile"]},
-    ):
-        response = await lightweight_admin_client.patch(
-            url, json={"memory_policy": policy}, headers=root_headers()
-        )
-        assert response.status_code == 200, response.text
-    assert response.json()["result"]["memory_policy"]["self"]["enabled"] is True
-    before = dict(fs.files)
-    from openviking_cli.exceptions import UnavailableError
-
-    adapter.prepare_user_configuration.side_effect = UnavailableError("Redis unavailable")
-    response = await lightweight_admin_client.patch(
-        url, json={"ttl": {"sessions": 1}}, headers=root_headers()
-    )
-    assert response.status_code == 503 and fs.files == before
-    adapter.prepare_user_configuration.side_effect = None
-    assert adapter.publish_user_configuration.await_count == 4
-    monkeypatch.setattr(wiring, "_adapter", None)
-    response = await lightweight_admin_client.patch(url, json={"ttl": None}, headers=root_headers())
-    assert response.status_code == 501 and fs.files == before
-    monkeypatch.setattr(wiring, "_adapter", adapter)
-    cleared = await lightweight_admin_client.patch(url, json={"ttl": None}, headers=root_headers())
-    assert cleared.status_code == 200, cleared.text
-    assert cleared.json()["result"]["ttl"] is None
-    queried = await lightweight_admin_client.get(url, headers=root_headers())
-    assert queried.json()["result"]["ttl"] is None
-    assert queried.json()["result"]["memory_policy"]["memory_types"] == ["profile"]

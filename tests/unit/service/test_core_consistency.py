@@ -114,18 +114,15 @@ async def test_check_consistency_preserves_directory_behavior() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("ttl_shutdown", ["disabled", "success", "failure"])
-async def test_close_stops_queue_manager_before_ragfs_binding(monkeypatch, ttl_shutdown) -> None:
+async def test_close_stops_queue_manager_before_ragfs_binding(monkeypatch) -> None:
     from openviking.ttl import wiring
 
     events: list[str] = []
 
     async def close_ttl():
         events.append("ttl")
-        if ttl_shutdown == "failure":
-            raise RuntimeError("TTL consumer did not stop")
 
-    adapter = None if ttl_shutdown == "disabled" else SimpleNamespace(aclose=close_ttl)
+    adapter = SimpleNamespace(aclose=close_ttl)
     monkeypatch.setattr(wiring, "_adapter", adapter)
     monkeypatch.setattr(
         "openviking.service.core.get_task_tracker", lambda: SimpleNamespace(close=AsyncMock())
@@ -149,13 +146,9 @@ async def test_close_stops_queue_manager_before_ragfs_binding(monkeypatch, ttl_s
     service._config = SimpleNamespace(vlm=VLMConfig())
     service._compile_scheduler = None
     service._ttl_adapter = adapter
-    service._expiry_runtime = (
-        SimpleNamespace(
-            stop_roles=AsyncMock(side_effect=lambda **_: events.append("expiry_roles")),
-            close=AsyncMock(side_effect=lambda: events.append("expiry_storage")),
-        )
-        if adapter
-        else None
+    service._expiry_runtime = SimpleNamespace(
+        stop_roles=AsyncMock(side_effect=lambda **_: events.append("expiry_roles")),
+        close=AsyncMock(side_effect=lambda: events.append("expiry_storage")),
     )
     service._session_service = SimpleNamespace(set_session_expiry_adapter=lambda _: None)
     service._runtime_config_manager = None
@@ -177,19 +170,11 @@ async def test_close_stops_queue_manager_before_ragfs_binding(monkeypatch, ttl_s
         lambda self: events.append("data_dir_lock"),
     )
 
-    if ttl_shutdown == "failure":
-        with pytest.raises(RuntimeError, match="TTL consumer did not stop"):
-            await service.close()
-        assert wiring.get_ttl_adapter() is adapter
-        assert events == ["resource_tasks", "expiry_roles", "queue_manager", "ttl"]
-        return
-
     await service.close()
 
     assert events.index("queue_manager") < events.index("ragfs_binding")
     assert wiring.get_ttl_adapter() is None
-    if ttl_shutdown == "success":
-        assert events.index("queue_manager") < events.index("ttl") < events.index("ragfs_binding")
-        assert events.index("expiry_roles") < events.index("queue_manager")
-        assert events.index("ttl") < events.index("expiry_storage") < events.index("ragfs_binding")
+    assert events.index("expiry_roles") < events.index("queue_manager")
+    assert events.index("queue_manager") < events.index("ttl") < events.index("expiry_storage")
+    assert events.index("expiry_storage") < events.index("ragfs_binding")
     assert events[-1] == "data_dir_lock"

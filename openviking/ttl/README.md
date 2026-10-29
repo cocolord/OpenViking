@@ -134,7 +134,6 @@ current policy and Session ModTime. Rare late vectors may remain after directory
 recycling; once the directory index is removed, another TTL round is not
 guaranteed to find them. No automatic orphan-vector repair is added.
 
-Tests live in `tests/ttl/`. `TTL_TEST_REDIS` and `TTL_TEST_CLUSTER` opt into isolated
-real Redis tests; ordinary tests use fakeredis with Lua support. Integration tests
-cover writer scheduling, restart recovery and real queue-thread registration.
-`tests/ttl/benchmark_ttl.py` is a local cost sample, not production acceptance.
+Retention coverage lives in the existing admin API, storage deletion, Session
+commit and service lifecycle tests, using native local RAGFS and fakeredis with
+Lua support.
