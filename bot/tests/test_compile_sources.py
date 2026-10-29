@@ -172,6 +172,31 @@ async def test_discovered_images_use_existing_multi_read_wrapper(runtime):
 
 
 @pytest.mark.asyncio
+async def test_image_evidence_view_reads_snapshot_once(runtime):
+    pipeline, png = runtime
+    image = await seed(runtime)
+    data = {"inputs": [await payload(pipeline, image)]}
+    get = AsyncMock(wraps=pipeline.files.get)
+    reader = EvidenceReader(SimpleNamespace(get=get), data)
+
+    result = await reader.execute(source_range=image.record_id)
+
+    get.assert_awaited_once_with(f"sources/{image.record_id}")
+    assert isinstance(result, MultimodalToolResult)
+    assert _inline_media_bytes([{"content": result.content}]) == len(png)
+    attached = next(part for part in result.content if part["type"] == "image_url")
+    assert base64.b64decode(attached["image_url"]["url"].split(",", 1)[1]) == png
+    assert "base64," not in result.text
+    assert "image" not in json.loads(result.text)
+    assert (await pipeline.files.get(image.payload_ref))["image"] == attached
+
+    get.reset_mock()
+    metadata = await reader.read(image.record_id)
+    get.assert_awaited_once_with(f"sources/{image.record_id}")
+    assert "image" not in metadata and metadata["complete"] is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "stage,schema",
     [("map", RecordResponse), ("reduce", FileResponse), ("combine", CombineResponse)],

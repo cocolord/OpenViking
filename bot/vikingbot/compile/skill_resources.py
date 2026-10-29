@@ -170,7 +170,7 @@ class EvidenceReader(Tool):
         for reference in full:
             self.spans.pop(reference, None)
 
-    async def read(self, source_range, spans=()):
+    async def read(self, source_range, spans=(), *, include_image=False):
         """Return exact original excerpts with shard metadata, or the full shard without bounds.
 
         Reject unauthorized IDs and invalid shard-local lines; merge overlapping/adjacent
@@ -185,7 +185,7 @@ class EvidenceReader(Tool):
             if spans:
                 raise ValueError("Image evidence has no text line ranges")
             return {
-                **{key: item for key, item in value.items() if key != "image"},
+                **{key: item for key, item in value.items() if key != "image" or include_image},
                 "complete": False,
             }
         lines = value["text"].splitlines(keepends=True)
@@ -218,9 +218,9 @@ class EvidenceReader(Tool):
         if (start_line is None) != (end_line is None):
             raise ValueError("Supply both start_line and end_line, or neither")
         spans = [] if start_line is None else [(start_line, end_line)]
-        value = await self.read(source_range, spans)
+        value = await self.read(source_range, spans, include_image=True)
+        image = value.pop("image", None)
         text = json.dumps(value, ensure_ascii=False)
-        if value.get("media_kind") == "image":
-            image = (await self.files.get(f"sources/{source_range}"))["image"]
+        if image:
             return MultimodalToolResult(text, [{"type": "text", "text": text}, image])
         return text
