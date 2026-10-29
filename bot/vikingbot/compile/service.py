@@ -37,6 +37,7 @@ from vikingbot.agent.subagent import SubagentManager
 from vikingbot.agent.tools.base import ToolContext
 from vikingbot.agent.tools.compile import (
     CompileChildTool,
+    CompileImageReadTool,
     CompileSpawnTool,
     SubmitCompileDraftTool,
     SubmitWikiBundleTool,
@@ -1613,6 +1614,12 @@ class BotCompileService:
             return None
         manager = request_loop.subagents
         claimed_roots: set[str] = set()
+        image_hashes = {
+            part.uri: part.sha256
+            for batch in source_batches or []
+            for part in batch
+            if part.image and part.sha256
+        }
 
         async def run_child(
             child_id: str,
@@ -1677,6 +1684,8 @@ class BotCompileService:
             for name in _COMPILE_READ_TOOLS:
                 tool = registry.get(name)
                 if tool is not None:
+                    if name == "openviking_multi_read" and image_hashes:
+                        tool = CompileImageReadTool(tool, image_hashes)
                     child_tools.register(tool)
 
             async def require_draft_submission(context: _PlainTextContext) -> _PlainTextDelivered:
