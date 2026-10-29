@@ -545,13 +545,6 @@ class Session:
         except Exception as exc:
             if not _is_storage_not_found(exc):
                 raise
-            from openviking.ttl.wiring import get_ttl_adapter
-
-            adapter = get_ttl_adapter()
-            if adapter is not None and await adapter.requires_existing_session(
-                self._session_uri, self.ctx
-            ):
-                raise
             content = None
         self._messages = self._parse_live_messages(content or "")
         await self._load_meta()
@@ -758,23 +751,10 @@ class Session:
             session_path, timeout_secs=_SESSION_PHASE1_LOCK_TIMEOUT_SECONDS
         )
         try:
-            from openviking.ttl.wiring import get_ttl_adapter
-
             if not filenames:
                 # Phase 1 writes different child files, each with its own lock.
                 yield session_lease
                 return
-
-            adapter = get_ttl_adapter()
-            requires_existing = adapter is not None and await adapter.requires_existing_session(
-                self._session_uri, self.ctx
-            )
-            if requires_existing:
-                # Check under the mutex before child-lock sidecars can recreate
-                # a deleted root. Keep file locks across the whole state update.
-                await self._viking_fs.stat(
-                    f"{self._session_uri}/messages.jsonl", ctx=self.ctx, skip_count=True
-                )
             file_lease = await agfs.pathlock_acquire_exact_batch(
                 [f"{session_path}/{name}" for name in filenames],
                 timeout_secs=_SESSION_PHASE1_LOCK_TIMEOUT_SECONDS,

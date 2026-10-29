@@ -359,12 +359,16 @@ async def test_disabled_account_cached_policy_no_business_io(engine):
     e.pair = (TTLConfig(sessions=7), TTLConfig(sessions="disabled"))
     e._cache_user_policy(("a", "u"), None)
     e.client = AsyncMock(side_effect=AssertionError("off write path touched Redis"))
-    e._dispatcher.run = AsyncMock(side_effect=AssertionError("cached off path dispatched work"))
+    e.policies = AsyncMock(wraps=e.policies)
+    e.policy = AsyncMock(wraps=e.policy)
     uri = "viking://user/u/sessions/s"
     await e.on_post_write(uri + "/messages.jsonl", e.context("a"), 1)
+    e.policies.assert_not_awaited()
+    e.policy.assert_not_awaited()
+    assert e._retry == {("a", "sessions", uri): 1}
+    await e._retry_writes()
     assert await e.resolve_expires_at([uri], e.context("a")) == {uri: None}
     e.client.assert_not_called()
-    e._dispatcher.run.assert_not_called()
     assert not e._retry and not e._wake.is_set()
     e.fs.stat.assert_not_called()
     e.fs._async_agfs.pathlock_acquire_tree.assert_not_called()
@@ -683,6 +687,8 @@ async def test_async_batch_grouping_partial_failure_and_concurrent_update(engine
         (session + "/messages.jsonl", 1),
         (event + "/a", 1),
         (event + "/b", 2),
+        (event + "/.abstract.md", 3),
+        (event + "/.overview.md", 4),
     ):
         await e.on_post_write(uri, e.context("a"), now)
     await e.on_post_write(session + "/messages.jsonl", e.context("b"), 1)

@@ -148,6 +148,8 @@ async def test_session_mutation_keeps_native_locks_across_ttl_change(
     unit_path = fs._uri_to_path(session.uri, ctx=session.ctx)
     acquire = AsyncMock(wraps=fs._async_agfs.pathlock_acquire_exact)
     monkeypatch.setattr(fs._async_agfs, "pathlock_acquire_exact", acquire)
+    stat = AsyncMock(wraps=fs.stat)
+    monkeypatch.setattr(fs, "stat", stat)
     if operation == "append":
         await session.add_message_async("user", [TextPart(text="written under the held owner")])
         assert [message.content for message in session.messages] == ["written under the held owner"]
@@ -157,6 +159,7 @@ async def test_session_mutation_keeps_native_locks_across_ttl_change(
         saved = await session._merge_and_save_commit_meta(1, {"events": 1}, None)
         assert saved is not None
 
+    assert not any(call.args[0].endswith("/messages.jsonl") for call in stat.await_args_list)
     meta = json.loads(await fs.read_file(session.uri + "/.meta.json", ctx=session.ctx))
     if operation == "append":
         assert meta["message_count"] == 1

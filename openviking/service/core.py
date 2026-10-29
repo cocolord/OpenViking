@@ -891,7 +891,7 @@ class OpenVikingService:
             self._queue_manager = None
             logger.info("Queue manager stopped")
 
-        # Draining writers still need source checks and post-write registration.
+        # Draining writers still need post-write registration.
         # Stop TTL consumers only after those writers settle, while their storage
         # and vector clients remain available for in-flight recycling.
         from openviking.ttl.wiring import get_ttl_adapter, set_ttl_adapter

@@ -39,9 +39,10 @@ and its publisher deployment. TTL also requires `expiry.service_name` and
 An omitted or disabled `server.ttl_adapter` installs no write hook, starts no TTL
 worker and loads no TTL Redis client. Explicit policy writes then return
 `501 UNIMPLEMENTED`: `Redis-backed TTL is not enabled in this deployment.`
-An enabled adapter still skips Redis, stat and TTL locks when the target's
-effective policy is disabled. UserConfig is read once on a cache miss or refresh,
-not once per file. A reader uses `config.writer=false`: expiry display is
+With the adapter enabled, writes only enqueue in-memory candidates. The
+registration worker loads policy and drops disabled candidates before Redis I/O.
+UserConfig cold reads stay off the business write path. A reader uses
+`config.writer=false`: expiry display is
 available, but it never scans or recycles. TTL is soft: searches and reads keep
 returning expired content until physical deletion. Historical Event writes are
 allowed; they do not renew the date directory's lifetime.
@@ -57,12 +58,9 @@ and memory updates keep their existing native file/transaction locks. Deletion
 uses the native Tree lock for the policy/ModTime recheck, recursive removal and
 conditional index cleanup; lock conflicts retain the registration for retry.
 
-With TTL enabled, an existing Session must still have its live-message file.
-Delayed Event and vector writes check that their source/target exists and that
-the archive task still matches. These checks acquire no locks and do not make
-the check and cross-directory write atomic. Disabling TTL skips these checks,
-including for earlier work; no per-task TTL snapshot is retained. Redis reporting
-remains asynchronous and does not acquire path locks.
+TTL adds no Session existence preflight or missing-file rule. Session APIs keep
+their existing lookup behavior; TTL does not add guards to stale Session objects
+or delayed writes. Redis reporting remains asynchronous and acquires no path locks.
 
 User TTL lives in `settings/user_config.json` and uses the existing
 `GET/PATCH /api/v1/admin/accounts/{account_id}/users/{user_id}/settings` API:
@@ -107,8 +105,10 @@ Existing deletion throttling applies to eligible attempts, including failed or
 renewed Sessions.
 Background directory listings, policy batches and index pages wait
 `batch_interval` (50 ms by default), including Events and already-indexed entries.
-Incremental registration sends its first batch promptly and paces further batches
-independently. Failure backoff includes jitter and is capped at 60 seconds.
+Incremental registration coalesces its first batch for at most 50 ms and paces
+further batches independently. Event summary writes do not enqueue registration;
+cross-batch Event writes may still repeat the idempotent `ZADD NX`.
+Failure backoff includes jitter and is capped at 60 seconds.
 These limits do not bound a single large `ls` or recursive `rm`, or total load
 across libraries sharing Redis. No new global coordinator is introduced.
 Local dev mode has no user registry, so it uses the minimum legal TTL as a

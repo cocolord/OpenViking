@@ -77,9 +77,6 @@ class TTLAdapter(Protocol):
     def install_expiry(self, scheduler: "ExpiryScheduler") -> None:
         """Register maintenance on the existing Redis scheduler before roles start."""
 
-    async def requires_existing_session(self, uri: str, ctx: Any) -> bool:
-        """Whether an append must reject a missing live-message file."""
-
     def supports_config(self) -> bool:
         """Return True when explicit TTL configuration writes are allowed.
 

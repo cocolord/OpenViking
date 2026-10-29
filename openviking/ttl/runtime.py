@@ -304,6 +304,8 @@ class DirectoryTTL:
                 )
 
     async def _flush_registrations(self) -> None:
+        # Coalesce a commit's writes without delaying the business request.
+        await asyncio.sleep(min(self.batch_interval, 0.05))
         delay = 1
         while self._retry and not self._closed:
             self._registration_wake.clear()
@@ -570,17 +572,13 @@ class DirectoryTTL:
                 await self.redis.aclose()
                 self.redis = None
 
-    async def requires_existing_session(self, uri: str, ctx: RequestContext) -> bool:
-        return (await self.policy(ctx.account_id, uri)).enabled
-
     async def on_post_write(self, uri: str, ctx: RequestContext | None, written_at_ms: int) -> None:
         if not self.writer or ctx is None:
             return
         item = directory(uri)
         if item is None or (item[0] == "sessions" and uri != item[2] + "/messages.jsonl"):
             return
-        pair = await self.policies(ctx.account_id)
-        if not (await self.policy(ctx.account_id, item[1], pair)).enabled:
+        if item[0] != "sessions" and uri.rsplit("/", 1)[-1] in ABSTRACT_OVERVIEW_FILENAMES:
             return
         base = written_at_ms if item[0] == "sessions" else self.base(item)
         await self._dispatcher.run(

@@ -137,7 +137,10 @@ async def test_real_queue_writes_keep_ttl_on_service_loop(tmp_path, enabled):
             echo = await engine.resolve_expires_at([session, event], engine.context("a"))
             assert echo[session] and echo[event]
         else:
-            assert engine.redis is engine._task is engine._registration_task is None
+            async with asyncio.timeout(5):
+                while engine._retry:
+                    await asyncio.sleep(0.01)
+            assert engine.redis is engine._task is None
             assert not engine._retry and not engine._pending
     finally:
         await asyncio.to_thread(queues.stop)
@@ -363,7 +366,6 @@ async def test_commit_writes_and_delayed_vector_delivery(tmp_path, monkeypatch):
     from openviking.storage.queuefs.embedding_msg import EmbeddingMsg
     from openviking.storage.queuefs.process_result import ProcessOutcome
     from openviking.ttl import wiring
-    from openviking_cli.exceptions import NotFoundError
     from openviking_cli.session.user_id import UserIdentifier
 
     fs = VikingFS(
@@ -486,11 +488,6 @@ async def test_commit_writes_and_delayed_vector_delivery(tmp_path, monkeypatch):
     monkeypatch.setattr("openviking.ttl.runtime.time.time_ns", lambda: later)
     deleted = await e.recycle_due(TTLRecycleRequest(e.resource_id, "a", later // 1_000_000))
     assert deleted.deleted == 3
-    assert not await session.exists()
-    with pytest.raises(NotFoundError):
-        await session.add_messages_async(
-            [{"role": "user", "parts": [TextPart(text="late append")]}]
-        )
     assert not await session.exists()
     await redis.delete(
         *(
