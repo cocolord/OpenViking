@@ -129,7 +129,10 @@ maintenance or scan the filesystem.
 TTL does not inspect archives before delayed writes: no `.meta.json` read,
 source stat or archive URI propagation. Existing Session and queue checks remain
 unchanged; in-flight extraction may finish after its source Session is deleted.
-Vector delivery retains a target-existence check, not atomic with the write.
+Vector delivery adds no TTL policy or filesystem check. Deletion still rechecks
+current policy and Session ModTime. Rare late vectors may remain after directory
+recycling; once the directory index is removed, another TTL round is not
+guaranteed to find them. No automatic orphan-vector repair is added.
 
 Tests live in `tests/ttl/`. `TTL_TEST_REDIS` and `TTL_TEST_CLUSTER` opt into isolated
 real Redis tests; ordinary tests use fakeredis with Lua support. Integration tests

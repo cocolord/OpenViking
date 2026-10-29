@@ -152,9 +152,7 @@ async def test_real_queue_writes_keep_ttl_on_service_loop(tmp_path, enabled):
     "state,level",
     [("enabled", 1), ("enabled", 2), ("source_missing", 2), ("target_missing", 2), ("disabled", 2)],
 )
-async def test_embedding_queue_checks_targets_without_ttl_source_io(
-    tmp_path, monkeypatch, state, level
-):
+async def test_embedding_queue_does_not_add_ttl_io_or_locks(tmp_path, monkeypatch, state, level):
     """A held directory mutex must not add TTL contention to vector delivery."""
     import asyncio
     from unittest.mock import AsyncMock
@@ -232,20 +230,15 @@ async def test_embedding_queue_checks_targets_without_ttl_source_io(
         async with asyncio.timeout(10):
             while not results:
                 await asyncio.sleep(0.01)
-        success = state != "target_missing"
-        assert results[0].outcome is (ProcessOutcome.SUCCESS if success else ProcessOutcome.FAILED)
-        assert db.upsert.await_count == int(success)
-        if not success:
-            assert "not found" in results[0].error.lower()
+        assert results[0].outcome is ProcessOutcome.SUCCESS
+        db.upsert.assert_awaited_once()
         embedder.embed_async.assert_awaited_once()
         assert loops[0] is not asyncio.get_running_loop()
         acquire.assert_not_awaited()
-        assert not any(
-            call.args and call.args[0].startswith(source)
-            for call in stat.await_args_list + read.await_args_list
-        )
-        if success:
-            assert "_write_source" not in db.upsert.await_args.args[0]
+        stat.assert_not_awaited()
+        read.assert_not_awaited()
+        engine.policy.assert_not_awaited()
+        assert "_write_source" not in db.upsert.await_args.args[0]
         assert engine.redis is None
     finally:
         await fs._async_agfs.pathlock_release(blocker)
@@ -1106,7 +1099,8 @@ async def test_reindex_vector_queue_without_ttl_owner_handoff(
             await fs.rm(uri, ctx=ctx)
             written = db.upsert.await_count
             await enqueue(messages[0])
-            assert results[-1].outcome is ProcessOutcome.FAILED
-            assert db.upsert.await_count == written
+            # Soft TTL permits late queued vectors without another target stat.
+            assert results[-1].outcome is ProcessOutcome.SUCCESS
+            assert db.upsert.await_count == written + 1
     finally:
         await asyncio.to_thread(queues.stop)

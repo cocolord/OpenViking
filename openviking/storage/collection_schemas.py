@@ -924,11 +924,6 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                             )
                         )
                     else:
-                        from openviking.ttl.wiring import get_ttl_adapter
-
-                        adapter = get_ttl_adapter()
-                        if adapter is not None:
-                            await adapter.check_target(uri, ctx)
                         result = await self._vikingdb.upsert(
                             inserted_data, ctx=ctx, options=upsert_options
                         )

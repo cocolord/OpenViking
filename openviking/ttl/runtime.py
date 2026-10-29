@@ -1101,10 +1101,3 @@ class DirectoryTTL:
             return True, int(removed)
         finally:
             await agfs.pathlock_release(lease)
-
-    async def check_target(self, uri, ctx):
-        """Check a delayed vector's target exists; no lock spans the write."""
-        item = directory(uri) if uri else None
-        if ctx is None or item is None or not await self.requires_existing_session(item[1], ctx):
-            return
-        await self.fs.stat(uri, ctx=ctx, skip_count=True)
