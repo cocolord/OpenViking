@@ -77,10 +77,8 @@ class TTLAdapter(Protocol):
     def install_expiry(self, scheduler: "ExpiryScheduler") -> None:
         """Register maintenance on the existing Redis scheduler before roles start."""
 
-    async def check_source(
-        self, source_uri: str, ctx: Any, *, task_id: Optional[str] = None
-    ) -> None:
-        """Check a delayed write's source and task owner without acquiring locks."""
+    async def check_target(self, uri: str, ctx: Any) -> None:
+        """Check a delayed vector's target exists without acquiring locks."""
 
     async def requires_existing_session(self, uri: str, ctx: Any) -> bool:
         """Whether an append must reject a missing live-message file."""

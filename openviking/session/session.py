@@ -3105,13 +3105,6 @@ class Session:
                 # a clean auto-commit even after Phase 2 reloads the latest meta.
                 latest_meta.last_auto_commit_at = get_current_timestamp()
             self._meta = latest_meta
-            from openviking.ttl.wiring import get_ttl_adapter
-
-            adapter = get_ttl_adapter()
-            if adapter is not None:
-                await adapter.check_source(
-                    f"{self._session_uri}/history/archive_{archive_index:03d}", self.ctx
-                )
             await self._save_meta(lease_ref=lease)
             return latest_meta
 

@@ -363,7 +363,7 @@ async def test_disabled_account_cached_policy_no_business_io(engine):
     uri = "viking://user/u/sessions/s"
     await e.on_post_write(uri + "/messages.jsonl", e.context("a"), 1)
     assert await e.resolve_expires_at([uri], e.context("a")) == {uri: None}
-    await e.check_source(uri + "/messages.jsonl", e.context("a"))
+    await e.check_target(uri + "/messages.jsonl", e.context("a"))
     e.client.assert_not_called()
     e._dispatcher.run.assert_not_called()
     assert not e._retry and not e._wake.is_set()
@@ -1124,21 +1124,20 @@ async def test_maintenance_failure_isolated_to_one_account(engine, scheduler):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("archive,task_id", [(True, "task"), (True, None), (False, "task")])
-async def test_source_check_avoids_redundant_archive_stat(engine, archive, task_id):
+@pytest.mark.parametrize(
+    "target",
+    [
+        "viking://user/u/sessions/s/history/archive_001",
+        "viking://user/u/memories/events/2026/10/28/event.md",
+    ],
+)
+async def test_target_checks_do_not_read_metadata(engine, target):
     e = engine
     e._cache_user_policy(("a", "u"), None)
-    source = (
-        "viking://user/u/sessions/s/history/archive_001"
-        if archive
-        else "viking://user/u/memories/events/2026/10/28/event.md"
-    )
-    e.fs.read_file = AsyncMock(
-        return_value=json.dumps({"phase1": {"queue_message": {"task_id": "task"}}})
-    )
-    await e.check_source(source, e.context("a"), task_id=task_id)
-    assert e.fs.stat.await_count == int(not (archive and task_id))
-    assert e.fs.read_file.await_count == int(bool(archive and task_id))
+    e.fs.read_file = AsyncMock(side_effect=AssertionError("TTL target check read metadata"))
+    await e.check_target(target, e.context("a"))
+    e.fs.stat.assert_awaited_once()
+    e.fs.read_file.assert_not_awaited()
 
 
 @pytest.mark.asyncio

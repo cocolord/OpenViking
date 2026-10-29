@@ -152,7 +152,7 @@ async def test_real_queue_writes_keep_ttl_on_service_loop(tmp_path, enabled):
     "state,level",
     [("enabled", 1), ("enabled", 2), ("source_missing", 2), ("target_missing", 2), ("disabled", 2)],
 )
-async def test_embedding_queue_checks_sources_without_ttl_locks(
+async def test_embedding_queue_checks_targets_without_ttl_source_io(
     tmp_path, monkeypatch, state, level
 ):
     """A held directory mutex must not add TTL contention to vector delivery."""
@@ -179,7 +179,7 @@ async def test_embedding_queue_checks_sources_without_ttl_locks(
     source = "viking://user/u/sessions/s/history/archive_001"
     target = unit if level == 1 else unit + "/event.md"
     await fs.write_file(unit + "/event.md", "event", ctx=ctx)
-    await fs.write_file(source + "/.meta.json", "{}", ctx=ctx)
+    await fs.mkdir(source, ctx=ctx)
     if state == "source_missing":
         await fs.rm(source, recursive=True, ctx=ctx, no_vector=True)
     if state in {"target_missing", "disabled"}:
@@ -187,6 +187,9 @@ async def test_embedding_queue_checks_sources_without_ttl_locks(
     blocker = await fs._async_agfs.pathlock_acquire_exact(fs._uri_to_path(unit, ctx=ctx))
     acquire = AsyncMock(wraps=fs._async_agfs.pathlock_acquire_exact)
     monkeypatch.setattr(fs._async_agfs, "pathlock_acquire_exact", acquire)
+    stat, read = AsyncMock(wraps=fs.stat), AsyncMock(wraps=fs.read_file)
+    monkeypatch.setattr(fs, "stat", stat)
+    monkeypatch.setattr(fs, "read_file", read)
     embedder = SimpleNamespace(
         prepare_embedding_input=lambda text: text,
         embed_async=AsyncMock(return_value=EmbedResult(dense_vector=[1.0, 0.0])),
@@ -229,7 +232,7 @@ async def test_embedding_queue_checks_sources_without_ttl_locks(
         async with asyncio.timeout(10):
             while not results:
                 await asyncio.sleep(0.01)
-        success = state in {"enabled", "disabled"}
+        success = state != "target_missing"
         assert results[0].outcome is (ProcessOutcome.SUCCESS if success else ProcessOutcome.FAILED)
         assert db.upsert.await_count == int(success)
         if not success:
@@ -237,6 +240,12 @@ async def test_embedding_queue_checks_sources_without_ttl_locks(
         embedder.embed_async.assert_awaited_once()
         assert loops[0] is not asyncio.get_running_loop()
         acquire.assert_not_awaited()
+        assert not any(
+            call.args and call.args[0].startswith(source)
+            for call in stat.await_args_list + read.await_args_list
+        )
+        if success:
+            assert "_write_source" not in db.upsert.await_args.args[0]
         assert engine.redis is None
     finally:
         await fs._async_agfs.pathlock_release(blocker)
@@ -331,8 +340,7 @@ async def test_real_registration_reset_recycle(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(not os.environ.get("TTL_TEST_REDIS"), reason="requires local Redis")
-async def test_commit_writes_and_stale_file_vector_delivery(tmp_path, monkeypatch):
-    import json
+async def test_commit_writes_and_delayed_vector_delivery(tmp_path, monkeypatch):
     import time
     from datetime import datetime
     from unittest.mock import AsyncMock
@@ -387,10 +395,7 @@ async def test_commit_writes_and_stale_file_vector_delivery(tmp_path, monkeypatc
         [{"role": "user", "parts": [TextPart(text="TTL integration")]}]
     )
     source = root + "/history/archive_001"
-    meta = source + "/.meta.json"
-    await fs.write_file(
-        meta, json.dumps({"phase1": {"queue_message": {"task_id": "new"}}}), ctx=ctx
-    )
+    await fs.mkdir(source, ctx=ctx)
     registry = MemoryTypeRegistry(load_schemas=False)
     registry.register(
         MemoryTypeSchema(
@@ -454,7 +459,7 @@ async def test_commit_writes_and_stale_file_vector_delivery(tmp_path, monkeypatc
         assert await redis.zscore(e.prefix("a") + kind, uri.rsplit("/", 1)[0]) is not None
     message = queued[0]
     assert message.context_data["created_at"] and message.task_id == "new"
-    assert message.context_data["_write_source"] == source
+    assert "_write_source" not in message.context_data
 
     class Embedder(DenseEmbedderBase):
         def __init__(self):
@@ -470,23 +475,18 @@ async def test_commit_writes_and_stale_file_vector_delivery(tmp_path, monkeypatc
     handler = TextEmbeddingHandler(db, SimpleNamespace(bind=lambda _: embedder))
     assert (await handler.on_dequeue({"data": message.to_json()})).outcome is ProcessOutcome.SUCCESS
     db.upsert.assert_awaited_once()
-    # Reused archive has a different owner. Neither file nor queued vector may commit.
-    await fs.write_file(
-        meta,
-        json.dumps({"phase1": {"queue_message": {"task_id": "replacement"}}}),
-        ctx=ctx,
-    )
+    # In-flight extraction may finish after its source is deleted.
+    await fs.rm(source, recursive=True, ctx=ctx, no_vector=True)
     with bind_task_context("new", "a", "u", work_id="commit-work"):
-        with pytest.raises(NotFoundError):
-            await updater._apply_upsert(
-                ResolvedOperation(
-                    memory_fields={"content": "stale"}, memory_type="events", uris=uris
-                ),
-                ctx,
-                extract_context=extract,
-            )
-    assert (await handler.on_dequeue({"data": message.to_json()})).outcome is ProcessOutcome.FAILED
-    db.upsert.assert_awaited_once()
+        await updater._apply_upsert(
+            ResolvedOperation(
+                memory_fields={"content": "delayed"}, memory_type="events", uris=uris
+            ),
+            ctx,
+            extract_context=extract,
+        )
+    assert (await handler.on_dequeue({"data": message.to_json()})).outcome is ProcessOutcome.SUCCESS
+    assert db.upsert.await_count == 2
     # Actual recursive deletion after a clock advance; no stat/rm mocks.
     await redis.set(e.prefix("a") + "backfill:initial:done", "1")
     later = time.time_ns() + 3 * 86400 * 1_000_000_000

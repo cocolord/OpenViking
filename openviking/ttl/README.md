@@ -126,9 +126,10 @@ state. Redis failure keeps the deletion fence for the normal cleanup retry.
 Late callbacks for a deleted Account only repeat cleanup; they do not reschedule
 maintenance or scan the filesystem.
 
-For a Session archive with a task ID, source checks read its `.meta.json` directly
-to verify existence and task ownership. They do not also stat the archive
-directory. Other sources and archives without a task ID retain an existence check.
+TTL does not inspect archives before delayed writes: no `.meta.json` read,
+source stat or archive URI propagation. Existing Session and queue checks remain
+unchanged; in-flight extraction may finish after its source Session is deleted.
+Vector delivery retains a target-existence check, not atomic with the write.
 
 Tests live in `tests/ttl/`. `TTL_TEST_REDIS` and `TTL_TEST_CLUSTER` opt into isolated
 real Redis tests; ordinary tests use fakeredis with Lua support. Integration tests

@@ -1573,11 +1573,6 @@ class MemoryUpdater:
                 ),
                 extract_context=extract_context,
             )
-            from openviking.ttl.wiring import get_ttl_adapter
-
-            adapter = get_ttl_adapter()
-            if adapter is not None:
-                await adapter.check_source(getattr(extract_context, "source_archive_uri", ""), ctx)
             await viking_fs.write_file(
                 uri,
                 new_full_content,
@@ -1909,11 +1904,6 @@ class MemoryUpdater:
                 # Convert to embedding msg and enqueue
                 embedding_msg = EmbeddingMsgConverter.from_context(memory_context)
                 if embedding_msg:
-                    from openviking.ttl.wiring import get_ttl_adapter
-
-                    source_uri = getattr(extract_context, "source_archive_uri", "")
-                    if source_uri and get_ttl_adapter() is not None:
-                        embedding_msg.context_data["_write_source"] = source_uri
                     if getattr(ingest_options, "search_tags", None) is not None:
                         embedding_msg.context_data["search_tags"] = list(ingest_options.search_tags)
                         embedding_msg.context_data["_upsert_options"] = {

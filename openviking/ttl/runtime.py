@@ -1102,21 +1102,9 @@ class DirectoryTTL:
         finally:
             await agfs.pathlock_release(lease)
 
-    async def check_source(self, source_uri, ctx, *, task_id=None):
-        """Best-effort stale-work check; no lock spans the check and write."""
-        item = directory(source_uri) if source_uri else None
+    async def check_target(self, uri, ctx):
+        """Check a delayed vector's target exists; no lock spans the write."""
+        item = directory(uri) if uri else None
         if ctx is None or item is None or not await self.requires_existing_session(item[1], ctx):
             return
-        if item[0] == "sessions" and source_uri.startswith(item[2] + "/history/"):
-            if task_id is None:
-                from openviking.service.task_work_index import get_task_context
-
-                task = get_task_context()
-                task_id = task.task_id if task else None
-            if task_id:
-                meta = json.loads(await self.fs.read_file(source_uri + "/.meta.json", ctx=ctx))
-                owner = meta.get("phase1", {}).get("queue_message", {}).get("task_id")
-                if owner != task_id:
-                    raise NotFoundError(source_uri, "stale Session commit task")
-                return
-        await self.fs.stat(source_uri, ctx=ctx, skip_count=True)
+        await self.fs.stat(uri, ctx=ctx, skip_count=True)
