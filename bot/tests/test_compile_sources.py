@@ -20,7 +20,7 @@ from vikingbot.bus.queue import MessageBus
 from vikingbot.compile import entry
 from vikingbot.compile.hashing import content_hash
 from vikingbot.compile.models import CompileFailure, CompileLimits, SanitizedCompileRequest
-from vikingbot.compile.ops.common import payload
+from vikingbot.compile.ops.common import pack, payload
 from vikingbot.compile.pipeline import Pipeline
 from vikingbot.compile.pipeline_agent import ChildProvider, complete_tool_result
 from vikingbot.compile.results import CombineResponse, FileResponse, RecordResponse
@@ -159,6 +159,7 @@ async def test_preloaded_image_fact_reaches_output_with_source_identity(runtime)
 @pytest.mark.asyncio
 async def test_discovered_images_use_existing_multi_read_wrapper(runtime):
     pipeline, png = runtime
+    pipeline.files.get = AsyncMock(wraps=pipeline.files.get)
     pipeline.changes = {"diff_dirs": [], "full_dirs": ["viking://resources/cedar"], "head": "test"}
     pipeline.tools = {
         "openviking_multi_read": VikingMultiReadTool(),
@@ -176,6 +177,46 @@ async def test_discovered_images_use_existing_multi_read_wrapper(runtime):
     pipeline.model.ask = AsyncMock(side_effect=ask)
     assert await entry.run(pipeline, [], {}) is None
     assert next(iter(pipeline.evidence.values()))["hash"] == content_hash(png)
+    assert not any(
+        call.args[0].startswith("sources/") for call in pipeline.files.get.await_args_list
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("combine", [False, True])
+async def test_image_payload_and_packing_reuse_registered_metadata(runtime, combine):
+    pipeline, _ = runtime
+    image = await seed(runtime)
+    stored = pipeline.files.values[image.payload_ref]
+    pipeline.files.get = AsyncMock(wraps=pipeline.files.get)
+    expected = {
+        "id": image.record_id,
+        "payload": {
+            **{key: value for key, value in stored.items() if key != "image"},
+            "source_ranges": [image.record_id],
+        },
+    }
+    assert await payload(pipeline, image, combine=combine) == expected
+    schema = CombineResponse if combine else RecordResponse
+    assert await pack(pipeline, [image], "Read the image.", schema) == [[image]]
+    pipeline.files.get.assert_not_awaited()
+    assert "source_ranges" not in pipeline.evidence[image.record_id]
+
+    text = next(record for record in pipeline.records.values() if record.routing_text == TEXT)
+    result = await payload(pipeline, text, combine=combine)
+    pipeline.files.get.assert_awaited_once_with(text.payload_ref)
+    if combine:
+        assert result["content"]["text"] == pipeline.client.read_raw.return_value
+    else:
+        assert result["payload"]["text"].startswith("1: # Cedar\n")
+    del pipeline.files.values[text.payload_ref]
+    with pytest.raises(ValueError, match="Missing evidence/payload"):
+        await payload(pipeline, text, combine=combine)
+    del pipeline.files.values[image.payload_ref]
+    with pytest.raises(ValueError, match="Assigned source range is missing"):
+        await EvidenceReader(pipeline.files, {"inputs": [expected]}).execute(
+            source_range=image.record_id
+        )
 
 
 @pytest.mark.asyncio
