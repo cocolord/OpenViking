@@ -265,7 +265,7 @@ class DirectoryTTL:
                     await self._scheduler.unregister(self._identity(account))
                 redis = await self.client()
                 prefix = self.prefix(account)
-                await redis.delete(
+                await redis.unlink(
                     *(prefix + kind for kind in TTLIndexType),
                     *(
                         prefix + "backfill:" + name

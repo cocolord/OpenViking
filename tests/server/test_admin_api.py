@@ -2805,9 +2805,14 @@ async def test_account_deletion_cleans_ttl_state_and_late_callbacks(
         await engine.on_post_write(root + "/s/messages.jsonl", engine.context(account), 2)
         engine._pending.add(account)
         engine._recycle.add(account)
-        scheduler.unregister.side_effect = (
-            OSError("TTL Redis unavailable") if fail_cleanup else None
-        )
+        unlink = engine.redis.unlink
+
+        async def unlink_ttl(*keys):
+            if fail_cleanup:
+                raise OSError("TTL Redis unavailable")
+            return await unlink(*keys)
+
+        monkeypatch.setattr(engine.redis, "unlink", unlink_ttl)
 
         response = await admin_client.delete(
             f"/api/v1/admin/accounts/{account}", headers=root_headers()
@@ -2817,7 +2822,9 @@ async def test_account_deletion_cleans_ttl_state_and_late_callbacks(
         if fail_cleanup:
             assert task["status"] == "failed" and "TTL Redis unavailable" in task["error"]
             assert await admin_app.state.api_key_manager.get_deletion(account) is not None
-            scheduler.unregister.side_effect = None
+            assert await engine.redis.zcard(engine.prefix(account) + "sessions") == 1
+            assert await engine.redis.zcard(other_key) == 1
+            fail_cleanup = False
             response = await admin_client.delete(
                 f"/api/v1/admin/accounts/{account}", headers=root_headers()
             )
