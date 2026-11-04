@@ -69,6 +69,7 @@ class BatchWriteOperation(BaseModel):
     content: str | None = None
     content_base64: str | None = None
     mode: Literal["replace", "append", "create", "upsert"] = "replace"
+    expected_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     tags: list[str] | None = None
     tag_mode: Literal["replace", "append", "clear"] = "replace"
     acl: AclSpec | None = None

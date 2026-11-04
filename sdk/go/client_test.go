@@ -1985,6 +1985,7 @@ func TestSessionExistsHandlesNotFound(t *testing.T) {
 }
 
 func TestCompileAndListTasksRequests(t *testing.T) {
+	memoryFrom := make(chan any, 1)
 	client, closeServer := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v1/compile":
@@ -1992,7 +1993,9 @@ func TestCompileAndListTasksRequests(t *testing.T) {
 				t.Fatalf("method = %s", r.Method)
 			}
 			body := readJSONBody(t, r)
-			if !reflect.DeepEqual(body["from"], []any{"viking://resources/source"}) ||
+			if body["skill"] == "memory" {
+				memoryFrom <- body["from"]
+			} else if !reflect.DeepEqual(body["from"], []any{"viking://resources/source"}) ||
 				body["to"] != "viking://resources/output" ||
 				body["skill"] != "viking://agent/skills/wiki" ||
 				body["instruction"] != "Keep supporting evidence." ||
@@ -2035,6 +2038,18 @@ func TestCompileAndListTasksRequests(t *testing.T) {
 	}
 	if compiled["task_id"] != "cmp_1" {
 		t.Fatalf("compiled = %#v", compiled)
+	}
+
+	for name, from := range map[string][]string{"nil": nil, "empty": {}} {
+		t.Run("memory/"+name, func(t *testing.T) {
+			if _, err := client.Compile(context.Background(), from, "viking://user/alice/memories", "memory", nil); err != nil {
+				t.Fatal(err)
+			}
+			got := <-memoryFrom
+			if sources, ok := got.([]any); !ok || len(sources) != 0 {
+				t.Fatalf("from = %#v", got)
+			}
+		})
 	}
 
 	tasks, err := client.ListTasks(context.Background(), &ListTasksOptions{

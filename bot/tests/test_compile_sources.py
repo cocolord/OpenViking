@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
-"""Issue #6713: native images must remain readable, cited evidence in Compile."""
+"""Compile source evidence and publication contracts."""
 
 import base64
 import json
@@ -22,6 +22,7 @@ from vikingbot.bus.queue import MessageBus
 from vikingbot.compile import entry
 from vikingbot.compile.hashing import content_hash
 from vikingbot.compile.models import CompileFailure, CompileLimits, SanitizedCompileRequest
+from vikingbot.compile.ops import finalize, reduce
 from vikingbot.compile.ops.common import pack, payload
 from vikingbot.compile.pipeline import Pipeline
 from vikingbot.compile.pipeline_agent import ChildProvider, complete_tool_result
@@ -38,6 +39,7 @@ from vikingbot.sandbox.backends.direct import DirectBackend
 from vikingbot.session.manager import SessionManager
 
 from openviking.models.model_error import ModelErrorKind
+from openviking_cli.exceptions import NotFoundError
 
 URI = "viking://resources/cedar/diagram.png"
 TEXT = "viking://resources/cedar/notes.md"
@@ -90,6 +92,77 @@ def runtime():
     pipeline.files = MemoryFiles()
     pipeline.model.files, pipeline.model.resources = pipeline.files, None
     return pipeline, png
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("old", [None, "old"])
+async def test_finalize_preserves_publication_revision(runtime, old):
+    pipeline, _ = runtime
+    pipeline.direct_output_format = "files"
+    pipeline.old["page.md"] = old
+    await pipeline.files.put(
+        "accepted",
+        {
+            "path": "page.md",
+            "owner": "reduce",
+            "content": "new",
+            "sha256": content_hash("new"),
+            "base_hash": content_hash(old) if old is not None else None,
+            "source_refs": [],
+        },
+    )
+    result = await finalize.run(pipeline, ["accepted"])
+    operation = {"uri": pipeline.target + "/page.md", "content": "new", "mode": "create"}
+    if old is not None:
+        operation.update(mode="replace", expected_sha256=content_hash(old))
+    assert result.operations == [operation]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["create", "update", "rename", "conflict"])
+async def test_resolve_files_preserves_target_revision(runtime, mode):
+    pipeline, _ = runtime
+    pipeline.target, pipeline.skill_target = "viking://agent/skills", True
+    path = "guide/SKILL.md"
+    content = "---\nname: guide\ndescription: Test guide.\n---\nA: old\nB: old\n"
+    revision = None if mode == "create" else content_hash(content)
+    pipeline.old[path] = content if revision else None
+    pipeline.client.stat.side_effect = NotFoundError("missing")
+    for i in range(2):
+        await pipeline.files.put(
+            f"candidate-{i}",
+            {
+                "path": path,
+                "owner": str(i),
+                "content": content,
+                "sha256": content_hash(content),
+                "base_hash": None if mode == "conflict" and i else revision,
+                "source_refs": [],
+                "inputs": [],
+            },
+        )
+    destination = "guide-new/SKILL.md" if mode == "rename" else path
+    body = content.replace("old", "new")
+    if mode == "rename":
+        body = body.replace("name: guide", "name: guide-new")
+    expected = None if mode == "rename" else revision
+    pipeline.model.ask = AsyncMock(
+        return_value=FileResponse(
+            files=[{"path": destination, "content": body, "base_hash": expected}]
+        )
+    )
+    references = await reduce.resolve_files(pipeline, ["candidate-0", "candidate-1"])
+    if mode == "conflict":
+        assert references == []
+        assert "Conflicting target revisions" in pipeline.failures[0]
+        pipeline.model.ask.assert_not_awaited()
+        return
+    assert not pipeline.failures
+    assert (await pipeline.files.get(references[0]))["base_hash"] == expected
+    rendered = await finalize.run(pipeline, references)
+    uri = pipeline.target + "/" + destination
+    assert rendered.updated == ([uri] if expected else [])
+    assert rendered.created == ([] if expected else [uri])
 
 
 async def seed(runtime):

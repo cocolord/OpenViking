@@ -1,5 +1,6 @@
 import asyncio
 import base64
+from hashlib import sha256
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -7,6 +8,7 @@ import pytest
 
 import openviking.storage.content_write as content_write_module
 from openviking.server.identity import RequestContext, Role
+from openviking.server.routers.content import BatchWriteOperation
 from openviking.service.task_store import PersistentTaskStore
 from openviking.service.task_tracker import TaskTracker
 from openviking.session.memory.dataclass import MemoryFile
@@ -25,6 +27,7 @@ from openviking.telemetry.context import bind_telemetry
 from openviking.telemetry.operation import OperationTelemetry
 from openviking.utils.content_hash import content_md5
 from openviking_cli.exceptions import (
+    ConflictError,
     InvalidArgumentError,
     NotFoundError,
     PermissionDeniedError,
@@ -411,6 +414,68 @@ async def test_batch_accepts_more_than_256_operations(monkeypatch):
         wait=False,
     )
     assert len(overflow["created"]) == 257
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("current", ["old", "newer", None])
+@pytest.mark.parametrize("skip_conflicts", [False, True])
+async def test_batch_checks_revision_under_write_lock(monkeypatch, current, skip_conflicts):
+    root = "viking://resources/wiki"
+    uri, other = f"{root}/a.txt", f"{root}/b.txt"
+    vfs = _VFS(root, {uri: current} if current is not None else {})
+    read_bytes = vfs.read_file_bytes
+
+    async def read_locked(*args, **kwargs):
+        assert vfs._async_agfs.held
+        return await read_bytes(*args, **kwargs)
+
+    read = AsyncMock(side_effect=read_locked)
+    monkeypatch.setattr(vfs, "read_file_bytes", read)
+    coordinator = ContentWriteCoordinator(vfs)
+    ctx = RequestContext(user=UserIdentifier.the_default_user(), role=Role.USER)
+    kwargs = dict(
+        root_uri=root,
+        operations=[
+            BatchWriteOperation(
+                uri=uri, content="compiled", expected_sha256=sha256(b"old").hexdigest()
+            ).model_dump(exclude_none=True),
+            {"uri": other, "content": "independent"},
+        ],
+        ctx=ctx,
+        wait=False,
+        defer_processing=True,
+        skip_conflicts=skip_conflicts,
+    )
+    if current != "old" and not skip_conflicts:
+        with pytest.raises(ConflictError, match="Target revision changed"):
+            await coordinator.batch_write(**kwargs)
+        assert not vfs.writes
+    else:
+        result = await coordinator.batch_write(**kwargs)
+        assert result["created"] == [other]
+        assert result["updated"] == ([uri] if current == "old" else [])
+        if skip_conflicts:
+            assert [c["uri"] for c in result["conflicts"]] == ([uri] if current != "old" else [])
+        assert vfs.files[other] == "independent"
+    assert vfs.files.get(uri) == ("compiled" if current == "old" else current)
+    if current is not None:
+        read.assert_awaited_once_with(uri, ctx=ctx)
+    assert not vfs._async_agfs.held
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expected", ["", "g" * 64, 42])
+async def test_batch_rejects_invalid_revision(expected):
+    root = "viking://resources/wiki"
+    vfs = _VFS(root)
+    with pytest.raises(InvalidArgumentError, match="Invalid expected_sha256"):
+        await ContentWriteCoordinator(vfs).batch_write(
+            root_uri=root,
+            operations=[{"uri": root + "/a.txt", "content": "x", "expected_sha256": expected}],
+            ctx=RequestContext(user=UserIdentifier.the_default_user(), role=Role.USER),
+            wait=False,
+        )
+    assert not vfs.writes and not vfs._async_agfs.paths
 
 
 @pytest.mark.asyncio

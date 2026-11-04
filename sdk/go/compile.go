@@ -19,6 +19,9 @@ func (c *Client) Compile(
 	if opts == nil {
 		opts = &CompileOptions{}
 	}
+	if fromURIs == nil {
+		fromURIs = []string{}
+	}
 	payload := map[string]any{
 		"from":  fromURIs,
 		"to":    to,

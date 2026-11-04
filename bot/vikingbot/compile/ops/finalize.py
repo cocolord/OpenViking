@@ -81,6 +81,8 @@ async def run(runtime: Pipeline, references: list[str]) -> RenderedBundle:
             **file_ops.encode_content(payload),
             "mode": "replace" if revision else "create",
         }
+        if revision is not None and not runtime.skill_target:
+            operation["expected_sha256"] = revision
         operation.pop("content_base64" if operation["content"] is not None else "content")
         rendered.operations.append(operation)
         (rendered.updated if revision else rendered.created).append(uri)

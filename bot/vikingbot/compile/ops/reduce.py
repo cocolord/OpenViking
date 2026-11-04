@@ -119,15 +119,24 @@ async def resolve_files(runtime: Pipeline, references: list[str]) -> list[str]:
         records = [runtime.records[i] for i in sorted(inputs) if i in runtime.records]
         group = Group("merge-" + digest([ref for ref, _ in items]), records)
         snapshots = dict(items)
+        old = {}
 
         def validate(response):
             file_ops.reuse_files(response, snapshots)
-            file_ops.validate_files(runtime, response, group, records, {})
+            file_ops.validate_files(runtime, response, group, records, old)
             blocked = {d.path for d in response.files if reserved.get(d.path, path) != path}
             if blocked:
                 raise ValueError(f"Output paths are reserved by other jobs: {sorted(blocked)}")
 
         try:
+            revision = items[0][1]["base_hash"]
+            if any(artifact["base_hash"] != revision for _, artifact in items):
+                raise ValueError(f"Conflicting target revisions: {path}")
+            if revision is not None:
+                previous = runtime.old.get(path)
+                if previous is None or content_hash(previous) != revision:
+                    raise ValueError(f"Target revision changed: {path}")
+                old[path] = previous
             transform = Transform(
                 output="files",
                 execution="direct",
@@ -135,7 +144,8 @@ async def resolve_files(runtime: Pipeline, references: list[str]) -> list[str]:
                     "Resolve candidate path collisions following the Skill and instruction. "
                     "Combine compatible contributions, deduplicate equivalents, or rename independent "
                     "files. Preserve required detail and input independence. Submit complete files "
-                    "with supporting inputs, without patches or base_hash; outputs create new files. "
+                    "with supporting inputs, without patches. Keep base_hash for existing paths; "
+                    "omit it for new paths. "
                     "Preserve binary candidates using their supplied content_ref; never generate Base64."
                 ),
             )
@@ -164,7 +174,7 @@ async def resolve_files(runtime: Pipeline, references: list[str]) -> list[str]:
                 else:
                     reserved.update((draft.path, path) for draft in response.files)
                     break
-            resolved = await file_ops.save_files(runtime, response, group, records, {})
+            resolved = await file_ops.save_files(runtime, response, group, records, old)
             await file_ops.accept_files(runtime, resolved)
             return resolved
         except (OSError, ValueError) as exc:

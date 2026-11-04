@@ -13,6 +13,7 @@ from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import partial
+from hashlib import sha256
 from typing import Any, Awaitable, Callable, Dict, Optional
 from uuid import uuid4
 
@@ -27,7 +28,6 @@ from openviking.core.namespace_policy import (
     NamespaceProcessingMode,
     namespace_policy_for_uri,
 )
-from openviking.service.task_domain import collect_queue_work_errors
 from openviking.privacy.sanitizer import PrivacySanitizer
 from openviking.resource.processing_mode import (
     DEFAULT_PROCESSING_MODE,
@@ -36,6 +36,7 @@ from openviking.resource.processing_mode import (
 )
 from openviking.resource.watch_storage import is_watch_task_control_uri
 from openviking.server.identity import RequestContext, Role
+from openviking.service.task_domain import collect_queue_work_errors
 from openviking.service.task_tracker import (
     TaskStatus,
     get_task_tracker,
@@ -769,6 +770,13 @@ class ContentWriteCoordinator:
                 try:
                     if exists and stat.get("isDir"):
                         raise ConflictError(f"Target is a directory: {uri}")
+                    expected = operation["expected_sha256"]
+                    if expected is not None and (
+                        not exists
+                        or sha256(await self._viking_fs.read_file_bytes(uri, ctx=ctx)).hexdigest()
+                        != expected
+                    ):
+                        raise ConflictError(f"Target revision changed: {uri}")
                 except ConflictError as exc:
                     if not skip_conflicts:
                         raise
@@ -1083,6 +1091,13 @@ class ContentWriteCoordinator:
                     ) from exc
 
             mode = raw.get("mode", "replace")
+            expected = raw.get("expected_sha256")
+            if expected is not None and (
+                not isinstance(expected, str)
+                or len(expected) != 64
+                or any(c not in "0123456789abcdef" for c in expected)
+            ):
+                raise InvalidArgumentError("Invalid expected_sha256")
             self._validate_batch_mode(mode)
             if has_content_base64 and mode == "append":
                 raise InvalidArgumentError(
@@ -1114,6 +1129,7 @@ class ContentWriteCoordinator:
                     "uri": uri,
                     "content": content,
                     "mode": mode,
+                    "expected_sha256": expected,
                     "ingest_options": ingest_options,
                 }
             )
