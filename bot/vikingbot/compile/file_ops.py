@@ -47,6 +47,13 @@ def file_bytes(file: dict) -> bytes:
     return text.encode("utf-8") if text is not None else base64.b64decode(encoded, validate=True)
 
 
+def validate_nonempty_content(value: str | bytes, path: str) -> None:
+    """Apply the same nonempty-content invariant before staging and publication."""
+    text = encode_content(value)["content"]
+    if not value or (text is not None and not text.strip()):
+        raise ValueError(f"Empty output: {path}")
+
+
 def file_view(file: dict, reference: str | None = None) -> dict:
     """Expose text or binary metadata to models; byte snapshots remain runtime-only."""
     if file is None:
@@ -171,6 +178,7 @@ def validate_files(runtime: Pipeline, response, group, records, old):
                 "File references require execution=agent and validated scratch resolution"
             )
         value = apply_file(draft, current)
+        validate_nonempty_content(value, draft.path)
         output_format = runtime.direct_output_format or getattr(
             getattr(runtime, "contract", None), "output_format", None
         )
