@@ -19,6 +19,12 @@ _FRONTMATTER = re.compile(r"\A---\r?\n.*?\r?\n(?:---|\.\.\.)(?:\r?\n|$)", re.DOT
 _TABLE_SEPARATOR = re.compile(r"\s*\|(?:\s*:?-{3,}:?\s*\|)+\s*")
 
 
+def has_substantive_text(content: str) -> bool:
+    """Return whether text has evidence beyond optional YAML front matter."""
+    match = _FRONTMATTER.match(content)
+    return bool(content[match.end() if match else 0 :].strip())
+
+
 @dataclass(frozen=True)
 class CompileSourceRange:
     """An exact excerpt of one original source, with separately repeated reading context.

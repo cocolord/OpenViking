@@ -23,6 +23,7 @@ from vikingbot.compile.renderer import RenderedBundle, validate_relative_file_pa
 from vikingbot.compile.results import Document, Source
 from vikingbot.compile.review import run as review_stage
 from vikingbot.compile.skill_resources import SkillResources
+from vikingbot.compile.sources import has_substantive_text
 
 _PLANNER = """Choose the simplest stage sequence that fulfills the authoritative Skill and
 user instruction. Sources are prepared text ranges and image references. Only their
@@ -363,6 +364,15 @@ class Pipeline:
                 if source_id in seen:
                     continue
                 seen.add(source_id)
+                if not part.image and not has_substantive_text(part.content):
+                    await self.files.put(
+                        f"sources/{source_id}",
+                        {**metadata, "text": part.content, "context": part.context},
+                    )
+                    self.evidence[source_id] = metadata
+                    self.status[source_id] = "unreferenced"
+                    self.metrics["unreferenced_source_ranges"] += 1
+                    continue
                 pending.append((source_id, metadata, part.content, part.context, part.image))
                 if len(pending) >= self.limits.source_concurrency:
                     await flush()

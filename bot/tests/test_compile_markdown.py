@@ -196,6 +196,26 @@ async def test_map_only_collects_only_completed_output_directories(pipeline):
     assert (await pipeline.files.get("summary"))["prepared"] is False
 
 
+async def test_map_skips_frontmatter_only_sources_without_starting_a_worker(pipeline):
+    pipeline.contract = contract()
+    pipeline.model.agent_runner = AsyncMock()
+
+    async def batches():
+        yield split_source(
+            "viking://resources/source/empty.md",
+            "---\nsource_file: empty.pdf\nsource_format: pdf\n---\n\n",
+            1000,
+        )
+
+    seeded = await pipeline.seed(batches())
+
+    assert seeded == []
+    assert pipeline.model.agent_runner.await_count == 0
+    assert list(pipeline.status.values()) == ["unreferenced"]
+    source_id = next(iter(pipeline.status))
+    assert (await pipeline.files.get(f"sources/{source_id}"))["text"].startswith("---")
+
+
 async def test_markdown_routing_reaches_reduce_without_publishing_map_drafts(pipeline, monkeypatch):
     calls = await configure_pipeline(pipeline, merge=True)
 
@@ -303,7 +323,10 @@ async def test_markdown_routing_uses_content_and_checks_foreign_decisions(pipeli
     async def chat(**kwargs):
         data = json.loads(kwargs["messages"][1]["content"])
         assert all("Retry limit: 7" in d["markdown"] for d in data["documents"])
-        assert all("scope" not in d and "routing_text" not in d for d in data["documents"])
+        assert all(
+            "scope" not in d and "routing_text" not in d and "path" not in d
+            for d in data["documents"]
+        )
         return LLMResponse(
             content=json.dumps(
                 {
@@ -334,8 +357,42 @@ async def test_markdown_routing_uses_content_and_checks_foreign_decisions(pipeli
         )
 
     pipeline.model.ask = malicious
-    with pytest.raises(ValueError, match="supplied candidates"):
-        await Shuffle(pipeline).run(node, docs)
+    assert await Shuffle(pipeline).run(node, docs) == []
+    assert pipeline.failures == [
+        "1 pipeline jobs failed: ['Related documents must be supplied candidates']"
+    ]
+
+
+async def test_routing_keeps_completed_batches_when_one_batch_fails(pipeline, monkeypatch):
+    pipeline.contract = contract(True)
+    pipeline.limits = pipeline.limits.model_copy(
+        update={"shuffle_batch_size": 1, "shuffle_concurrency": 1}
+    )
+    docs = [Document("first.md", "drafts/first.md"), Document("second.md", "drafts/second.md")]
+    for doc in docs:
+        await pipeline.files.sandbox.write_file(doc.workspace_path, "# Topic\n\nFacts.")
+    monkeypatch.setattr(Shuffle, "vectors", AsyncMock(return_value=[[1.0, 0.0], [1.0, 0.0]]))
+
+    calls = 0
+
+    async def ask(stage, system, data, schema, validate, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ValueError("route: Return exactly one decision per assigned document")
+        response = RouteResponse(decisions=[{"document": data["assignments"][0]["document"]}])
+        validate(response)
+        return response
+
+    pipeline.model.ask = ask
+    node = parse_plan(MERGE, pipeline.contract)[1]
+
+    groups = await Shuffle(pipeline).run(node, docs)
+
+    assert [[document.path for document in group.documents] for group in groups] == [["second.md"]]
+    assert pipeline.failures == [
+        "1 pipeline jobs failed: ['route: Return exactly one decision per assigned document']"
+    ]
 
 
 async def test_finalization_requires_unique_paths_and_prior_target_read(pipeline):
