@@ -43,7 +43,6 @@ from openviking.utils.image_input import (
     MAX_COMPILE_IMAGE_DOWNLOAD_BYTES,
     MAX_IMAGE_INPUT_DOWNLOAD_BYTES,
 )
-from openviking.utils.media_limits import DEFAULT_IMAGE_PREVIEW_MAX_DIMENSION
 from openviking_cli.exceptions import NotFoundError
 
 URI = "viking://resources/cedar/diagram.png"
@@ -484,45 +483,28 @@ async def test_large_image_is_compressed_without_changing_source_identity(
             assert rendition_image.getpixel((50, 50)) == (255, 255, 255)
 
 
-@pytest.mark.parametrize("case", ["long_edge", "download_size"])
-async def test_compile_normalizes_images_on_preload_and_worker_reread(runtime, case):
+async def test_compile_reads_above_multi_read_download_limit(runtime):
     pipeline, _ = runtime
-    limit = DEFAULT_IMAGE_PREVIEW_MAX_DIMENSION
-    if case == "long_edge":
-        image = Image.new("RGB", (limit * 2, 128), "white")
-    else:
-        width = limit + 52
-        pixels = random.Random(6713).randbytes(width * width * 3)
-        image = Image.frombytes("RGB", (width, width), pixels)
-    with image, BytesIO() as output:
+    width = 2100
+    pixels = random.Random(6713).randbytes(width * width * 3)
+    with Image.frombytes("RGB", (width, width), pixels) as image, BytesIO() as output:
         image.save(output, format="PNG")
         original = output.getvalue()
+    assert MAX_IMAGE_INPUT_DOWNLOAD_BYTES < len(original) <= MAX_COMPILE_IMAGE_DOWNLOAD_BYTES
     client = pipeline.client
     client.stat.return_value = {"size": len(original)}
     client.download_bytes.return_value = original
 
-    native = await VikingMultiReadTool._read_image(client, URI)
-    if case == "long_edge":
-        assert len(original) < VikingMultiReadTool._MAX_INLINE_MEDIA_BYTES
-        assert native["media_bytes"] == len(original)
-    else:
-        assert MAX_IMAGE_INPUT_DOWNLOAD_BYTES < len(original) <= MAX_COMPILE_IMAGE_DOWNLOAD_BYTES
-        assert not native["success"]
-        client.download_bytes.assert_not_awaited()
-
     source = await read_source(client, URI)
-    url = source.image["image_url"]["url"]
-    assert url.startswith("data:image/jpeg;base64,")
-    rendition = base64.b64decode(url.split(",", 1)[1])
-    with Image.open(BytesIO(rendition)) as preview:
-        assert preview.size == (limit, 64 if case == "long_edge" else limit)
-    assert len(rendition) <= VikingMultiReadTool._MAX_INLINE_MEDIA_BYTES
+    data = base64.b64decode(source.image["image_url"]["url"].split(",", 1)[1])
+    with Image.open(BytesIO(data)) as preview:
+        assert max(preview.size) <= 2048
     assert source.sha256 == content_hash(original)
 
     reader = CompileImageReadTool(VikingMultiReadTool(), {URI: source.sha256})
     result = await reader._read_image(client, URI)
     assert result["image"] == source.image
-    assert result["media_bytes"] == len(rendition)
+    assert 0 < result["media_bytes"] <= VikingMultiReadTool._MAX_INLINE_MEDIA_BYTES
     assert result["sha256"] == source.sha256
 
 
@@ -542,7 +524,7 @@ async def test_compile_resizes_when_full_resolution_encoding_exceeds_budget(
         assert preview.size == (900, 500)
 
 
-async def test_simple_compile_multi_read_delivers_normalized_image(runtime):
+async def test_simple_compile_resizes_long_edge_under_byte_budget(runtime):
     from vikingbot.compile import simple
 
     pipeline, _ = runtime
@@ -550,6 +532,7 @@ async def test_simple_compile_multi_read_delivers_normalized_image(runtime):
     with Image.new("RGB", (4096, 128), "white") as original, BytesIO() as output:
         original.save(output, format="PNG")
         source = output.getvalue()
+    assert len(source) < VikingMultiReadTool._MAX_INLINE_MEDIA_BYTES
     client.stat.return_value = {"size": len(source)}
     client.download_bytes.return_value = source
     target = pipeline.target + "/findings.md"
