@@ -293,7 +293,10 @@ async def test_file_worker_uses_existing_tools_without_emit(
             ),
         )
     if ending == "budget":
-        replies *= MAX_JOB_ATTEMPTS
+        replies.extend(
+            [tool_reply(("copy", "copy_drafts", {"paths": ["inputs/previous/0.md"]}))]
+            * (MAX_JOB_ATTEMPTS - 1)
+        )
     else:
         replies.extend(
             [
@@ -339,11 +342,14 @@ async def test_file_worker_uses_existing_tools_without_emit(
             await pipeline.generate("map-0", "Generate Markdown", {"inputs": []}, [])
         if ending == "budget":
             assert pipeline.model.provider.chat.await_count == MAX_JOB_ATTEMPTS
-    for call in pipeline.model.provider.chat.await_args_list:
+    for index, call in enumerate(pipeline.model.provider.chat.await_args_list):
         names = {t["function"]["name"] for t in call.kwargs["tools"]}
-        assert {"read_file", "write_file", "edit_file"} <= names
         assert "emit" not in names
-        assert ("read_target_file" in names) == pipeline.target_has_content
+        if ending == "budget" and index:
+            assert names == {"read_file", "copy_drafts"}
+        else:
+            assert {"read_file", "write_file", "edit_file"} <= names
+            assert ("read_target_file" in names) == pipeline.target_has_content
 
 
 @pytest.mark.parametrize("input_path", ["assignment.json", "inputs/0.md"])
@@ -868,15 +874,20 @@ async def test_remote_worker_delete_quotes_a_single_nonrecursive_file(pipeline):
 
 async def test_reduce_recovers_spent_worker_without_selecting_partial_files(pipeline, agent_loop):
     loop, key, _ = agent_loop
-    limits = pipeline.limits.model_copy(update={"subagent_iterations": 2})
+    limits = pipeline.limits.model_copy(update={"subagent_iterations": 4})
     pipeline.contract = contract(merge=True)
     await pipeline.files.sandbox.write_file("original.md", "# Original")
     original = Document("original.md", "original.md", ["source-0"])
     pipeline.status["source-0"] = "prepared"
+    read = tool_reply(("read", "read_file", {"path": "inputs/0.md"}))
     chat = pipeline.model.provider.chat = AsyncMock(
         side_effect=[
             tool_reply(("partial", "write_file", {"path": "partial.md", "content": "# Partial"})),
-            tool_reply(("read", "read_file", {"path": "inputs/0.md"})),
+            read,
+            read,
+            read,
+            tool_reply(("draft", "read_file", {"path": "inputs/previous/0.md"})),
+            tool_reply(("copy", "copy_drafts", {"paths": []})),
             tool_reply(
                 ("complete", "write_file", {"path": "complete.md", "content": "# Complete"})
             ),
@@ -893,9 +904,77 @@ async def test_reduce_recovers_spent_worker_without_selecting_partial_files(pipe
     assert not pipeline.failures
     assert any(
         "1 model/tool rounds remain, including this one" in message.get("content", "")
-        for message in chat.await_args_list[1].kwargs["messages"]
+        for message in chat.await_args_list[3].kwargs["messages"]
         if message["role"] == "user"
     )
+
+
+async def test_worker_reuses_reviewed_drafts_within_the_existing_retry(pipeline, agent_loop):
+    loop, key, _ = agent_loop
+    limits = pipeline.limits.model_copy(update={"subagent_iterations": 5})
+    sandbox = pipeline.files.sandbox
+    draft = "# Reusable\n\nOriginal fact."
+    assignment = tool_reply(("assignment", "read_file", {"path": "assignment.json"}))
+    alias = "inputs/previous/0.md"
+    chat = pipeline.model.provider.chat = AsyncMock(
+        side_effect=[
+            tool_reply(
+                ("write", "write_file", {"path": "guide/reusable.md", "content": draft}),
+                ("other", "write_file", {"path": "other.md", "content": "# Unselected"}),
+                ("scratch", "write_file", {"path": "scratch.txt", "content": "Ignore"}),
+                ("blank", "write_file", {"path": "blank.md", "content": " "}),
+            ),
+            assignment,
+            assignment,
+            assignment,
+            assignment,
+            assignment,
+            tool_reply(
+                ("read", "read_file", {"path": alias}),
+                ("evidence", "read_evidence", {"source_range": "source-0"}),
+            ),
+            tool_reply(("copy", "copy_drafts", {"paths": [alias]})),
+            tool_reply(("write", "write_file", {"path": alias, "content": "Do not overwrite"})),
+            LLMResponse("Done"),
+        ]
+    )
+    pipeline.model.agent_runner = agent_runner(loop, key, None, limits)
+
+    data = {"inputs": [{"payload": {"source_ranges": ["source-0"]}}]}
+    outputs = await pipeline.generate("map-0", "Write the guide", data, ["source-0"])
+
+    assert chat.await_count == 2 * limits.subagent_iterations
+    assert pipeline.metrics["repairs"] == 1
+    initial, retry, after_copy = [chat.await_args_list[i].kwargs for i in (0, 5, 8)]
+    assert "copy_drafts" not in {tool["function"]["name"] for tool in initial["tools"]}
+    assert {tool["function"]["name"] for tool in retry["tools"]} == {"copy_drafts", "read_file"}
+    assert {"read_evidence", "write_file"} <= {
+        tool["function"]["name"] for tool in after_copy["tools"]
+    }
+    retry_messages = chat.await_args_list[9].kwargs["messages"]
+    tools = [message["content"] for message in retry_messages if message["role"] == "tool"]
+    handoff = json.loads(tools[0])["previous_attempt"]
+    assert "exhausted its tool rounds" in handoff["reason"]
+    assert handoff["drafts"] == [
+        {"path": "guide/reusable.md", "content_file": alias},
+        {"path": "other.md", "content_file": "inputs/previous/1.md"},
+    ]
+    assert draft in tools
+    assert any("Tool 'read_evidence' is not available in this turn" in result for result in tools)
+    assert json.loads(tools[-2]) == {
+        "copied": ["guide/reusable.md"],
+        "skipped": [],
+        "not_selected": ["other.md"],
+    }
+    assert any("Assigned input is read-only" in result for result in tools)
+    assert [doc.path for doc in outputs] == ["guide/reusable.md"]
+    assert outputs[0].source_refs == ["source-0"]
+    copies = await sandbox.list_files("__compile_staging__/drafts", max_entries=None)
+    matching = [entry.path for entry in copies if entry.path.endswith("/guide/reusable.md")]
+    assert len(matching) == 2
+    assert outputs[0].workspace_path in matching
+    for path in matching:
+        assert await sandbox.read_file(path) == draft
 
 
 @pytest.mark.parametrize("recover", [False, True])

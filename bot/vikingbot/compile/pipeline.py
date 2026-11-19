@@ -83,15 +83,19 @@ class Pipeline:
 
     async def generate(self, stage, instructions, data, source_refs):
         """Recover unfinished workers within one bounded stage budget."""
+        previous_attempt = None
         for attempt in range(MAX_JOB_ATTEMPTS):
             try:
-                return await self.generate_once(stage, instructions, data, source_refs)
-            except IncompleteWorkerOutput:
+                return await self.generate_once(
+                    stage, instructions, data, source_refs, previous_attempt=previous_attempt
+                )
+            except IncompleteWorkerOutput as error:
                 if attempt + 1 == MAX_JOB_ATTEMPTS:
                     raise
+                previous_attempt = error if error.output_root else None
                 self.metrics["repairs"] += 1
 
-    async def generate_once(self, stage, instructions, data, source_refs):
+    async def generate_once(self, stage, instructions, data, source_refs, *, previous_attempt=None):
         """Run one worker; its natural-completion callback validates the files once."""
         if self.model.agent_runner is None:
             raise ValueError("Compile requires a file-tool agent runner")
@@ -117,6 +121,7 @@ class Pipeline:
                 "Preserve unrelated target content and existing facts from unchanged sources. "
                 "Read existing target files before updating them.\n"
             )
+        worker_options = {"previous_attempt": previous_attempt} if previous_attempt else {}
         outputs = await self.model.agent_runner(
             system,
             {
@@ -128,6 +133,7 @@ class Pipeline:
             self.model,
             stage=stage,
             runtime=self,
+            **worker_options,
         )
         return [replace(document, source_refs=list(source_refs)) for document in outputs]
 
