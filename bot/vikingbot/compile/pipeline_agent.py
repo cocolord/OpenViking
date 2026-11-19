@@ -164,9 +164,10 @@ class CopyDrafts(Tool):
     def __init__(self, sandbox, output_root, drafts: dict[str, Document], write_lock: asyncio.Lock):
         self.sandbox, self.output_root = sandbox, output_root
         self.drafts, self.write_lock = drafts, write_lock
+        self.selection_complete = False
 
     async def execute(self, tool_context: ToolContext, **kwargs: Any) -> str:
-        selected = list(dict.fromkeys(kwargs["paths"]))
+        selected = dict.fromkeys(kwargs["paths"])
         if any(alias not in self.drafts for alias in selected):
             raise ValueError("Copy paths must be previous-attempt content_file aliases")
         prefix = self.output_root + "/"
@@ -187,7 +188,12 @@ class CopyDrafts(Tool):
                 await self.sandbox.write_file_bytes(prefix + draft.path, payload)
                 existing.add(key)
                 copied.append(draft.path)
-        return json.dumps({"copied": copied, "skipped": skipped}, ensure_ascii=False)
+        self.selection_complete = True
+        not_selected = [draft.path for alias, draft in self.drafts.items() if alias not in selected]
+        return json.dumps(
+            {"copied": copied, "skipped": skipped, "not_selected": not_selected},
+            ensure_ascii=False,
+        )
 
 
 def agent_runner(loop, session_key, connection, limits):
@@ -226,18 +232,24 @@ def agent_runner(loop, session_key, connection, limits):
                 ],
             }
             evidence_instructions = (
-                "Read assignment.json and review its previous_attempt drafts first. "
-                "Use copy_drafts to reuse reviewed pages at their listed output paths. "
-                "Treat the old drafts as read-only, and write or edit only in the new output. "
-                "Use the current assignment and evidence to verify and fill specific gaps. "
+                "Read assignment.json, then review the read-only previous_attempt drafts first. "
+                "Batch independent draft reads. Call copy_drafts with the content_file aliases of "
+                "all reviewed pages you can reuse, including those that only need a targeted edit. "
+                "Pass an empty paths list only if none can be reused. "
+                "The other tools open after copy_drafts records your selection. "
+                "Use assigned inputs and source evidence only to fill specific gaps, "
+                "then write or edit in the new output. "
             )
         await sandbox.write_file(
             f"{root}/assignment.json", json.dumps(assignment, ensure_ascii=False)
         )
         registry = ToolRegistry(config=loop.config)
         write_lock = asyncio.Lock() if drafts else None
+        copy_tool = None
         if write_lock is not None:
-            registry.register(CopyDrafts(sandbox, output_root, drafts, write_lock))
+            copy_tool = CopyDrafts(sandbox, output_root, drafts, write_lock)
+            registry.register(copy_tool)
+        handoff_inputs = {alias: readonly_paths[alias] for alias in ("assignment.json", *drafts)}
         for name in ("read_file", "write_file", "edit_file", "delete_file"):
             tool = (
                 DraftDeleteTool(sandbox, output_root)
@@ -251,7 +263,11 @@ def agent_runner(loop, session_key, connection, limits):
                     tool,
                     output_root,
                     merge_only=True,
-                    readonly_paths=readonly_paths,
+                    readonly_paths=(
+                        handoff_inputs
+                        if copy_tool is not None and name == "read_file"
+                        else readonly_paths
+                    ),
                     write_lock=write_lock,
                 )
             )
@@ -272,6 +288,11 @@ def agent_runner(loop, session_key, connection, limits):
             scoped = copy(search)
             scoped.execute = search_target
             registry.register(scoped)
+        deferred_tools = (
+            [name for name in registry.tool_names if name not in {"read_file", "copy_drafts"}]
+            if copy_tool is not None
+            else []
+        )
         child = copy(loop)
         child.provider = ChildProvider(model, stage)
         child._preview_tool_result = complete_tool_result
@@ -302,13 +323,22 @@ def agent_runner(loop, session_key, connection, limits):
             return _PlainTextFinal()
 
         async def remind_completion(iteration):
+            notes = []
+            if copy_tool is not None and copy_tool.selection_complete and deferred_tools:
+                deferred_tools.clear()
+                registry.get("read_file").readonly_paths.update(readonly_paths)
+                notes.append(
+                    "Draft selection is complete. Use the copy result to identify pages still "
+                    "needed. Check only their specific gaps and any concrete gaps in copied "
+                    "pages. If the output is ready, reply Done."
+                )
             remaining = limits.subagent_iterations - iteration + 1
             if remaining in (20, 5, 1):
-                return (
+                notes.append(
                     f"{remaining} model/tool rounds remain, including this one. "
                     "Reply Done as soon as the requested files are ready."
                 )
-            return None
+            return "\n".join(notes) or None
 
         final, _, _, _, _ = await child._run_agent_loop(
             messages=[
@@ -330,6 +360,7 @@ def agent_runner(loop, session_key, connection, limits):
             session_key=session_key,
             publish_events=False,
             tool_registry=registry,
+            disabled_tools=deferred_tools,
             openviking_tool_names=set(registry.tool_names),
             openviking_connection=connection,
             allow_final_fallback=False,
