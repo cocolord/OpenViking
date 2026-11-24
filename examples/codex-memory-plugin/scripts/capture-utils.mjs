@@ -392,9 +392,16 @@ function stripStartupBlocks(text) {
   return (output + source.slice(cursor)).trim();
 }
 
-function withoutStartupContext(entries, cfg) {
+function capturedTurnPositions(entries, cfg) {
+  const positions = new Map();
+  extractSharedCaptureTurns(entries, cfg, (index, position) => positions.set(index, position));
+  return positions;
+}
+
+function withoutStartupContext(entries, cfg, collectMigrationIndices) {
   const filtered = [];
   const excludedLegacyTurnIndices = [];
+  const positions = collectMigrationIndices ? capturedTurnPositions(entries, cfg) : null;
   let beforeFirstTurn = true;
   for (const [index, entry] of entries.entries()) {
     if (entry?.type === "turn_context") beforeFirstTurn = false;
@@ -419,25 +426,71 @@ function withoutStartupContext(entries, cfg) {
       filtered.push(entry);
     } else if (content.length) {
       filtered.push({ ...entry, payload: { ...payload, content } });
-    } else {
-      // Use the old extractor to locate this message in the old cursor's
-      // coordinate system. Capture filters may already have dropped it.
-      const prefix = extractSharedCaptureTurns(entries.slice(0, index), cfg).length;
-      if (extractSharedCaptureTurns(entries.slice(0, index + 1), cfg).length > prefix) {
-        excludedLegacyTurnIndices.push(prefix);
-      }
+    } else if (collectMigrationIndices) {
+      // Capture filters may already have dropped this message in the old format.
+      const position = positions.get(index);
+      if (position !== undefined) excludedLegacyTurnIndices.push(position);
     }
   }
   return { entries: filtered, excludedLegacyTurnIndices };
 }
 
-export function extractCaptureTranscript(rolloutEntries, cfg = {}) {
+// Resumed hosts emit this environment shape after turn_context too. Require
+// its complete host structure; user-authored examples must stay on the wire.
+const RESUMED_ENVIRONMENT_BLOCK = /^<environment_context>\s*<environments>[\s\S]*?<\/environments>\s*<filesystem>[\s\S]*?<\/filesystem>\s*<\/environment_context>$/;
+const DELEGATION_BLOCK = /^<codex_delegation>\s*<source_thread_id>[0-9a-f-]+<\/source_thread_id>\s*<input>[\s\S]*?<\/input>\s*<\/codex_delegation>$/i;
+
+function withoutMachineContext(entries, cfg, collectMigrationIndices) {
+  const filtered = [];
+  const excludedTurnIndices = [];
+  const positions = collectMigrationIndices ? capturedTurnPositions(entries, cfg) : null;
+  for (const [index, entry] of entries.entries()) {
+    const payload = entry?.payload;
+    const authored = entry?.metadata?.client_authored;
+    if (entry?.type !== "response_item" || payload?.type !== "message"
+      || payload.role !== "user" || !Array.isArray(payload.content) || authored === true) {
+      filtered.push(entry);
+      continue;
+    }
+    const content = payload.content.filter((part) => {
+      if (part?.type !== "input_text" || typeof part.text !== "string") return true;
+      const text = part.text.trim();
+      return !RESUMED_ENVIRONMENT_BLOCK.test(text)
+        && !(authored === false && DELEGATION_BLOCK.test(text));
+    });
+    if (content.length === payload.content.length) {
+      filtered.push(entry);
+    } else if (content.length) {
+      filtered.push({ ...entry, payload: { ...payload, content } });
+    } else if (collectMigrationIndices) {
+      const position = positions.get(index);
+      if (position !== undefined) excludedTurnIndices.push(position);
+    }
+  }
+  return { entries: filtered, excludedTurnIndices };
+}
+
+export function extractCaptureTranscript(rolloutEntries, cfg = {}, { collectMigrationIndices = true } = {}) {
   const expanded = expandCodexRolloutEntries(rolloutEntries);
   const deduplicated = deduplicateCodexToolEvents(expanded);
   const normalized = normalizeCodexNativeToolEvents(deduplicated);
   const completed = normalizeCodexCompletedToolEvents(normalized);
-  const { entries, excludedLegacyTurnIndices } = withoutStartupContext(completed, cfg);
-  return { turns: extractSharedCaptureTurns(entries, cfg), excludedLegacyTurnIndices };
+  const startup = withoutStartupContext(completed, cfg, collectMigrationIndices);
+  const machine = withoutMachineContext(startup.entries, cfg, collectMigrationIndices);
+  const excludedLegacyTurnIndices = [...startup.excludedLegacyTurnIndices];
+  for (const index of machine.excludedTurnIndices) {
+    let legacyIndex = index;
+    for (const removed of startup.excludedLegacyTurnIndices) {
+      if (removed <= legacyIndex) legacyIndex += 1;
+    }
+    excludedLegacyTurnIndices.push(legacyIndex);
+  }
+  excludedLegacyTurnIndices.sort((a, b) => a - b);
+  return {
+    turns: extractSharedCaptureTurns(machine.entries, cfg),
+    excludedLegacyTurnIndices,
+    excludedV2TurnIndices: machine.excludedTurnIndices,
+  };
 }
 
 export function extractCaptureTurns(rolloutEntries, cfg = {}) {

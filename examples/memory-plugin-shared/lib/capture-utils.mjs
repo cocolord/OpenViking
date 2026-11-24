@@ -510,10 +510,11 @@ export function shapeCapturePayload(payload, role, cfg = {}, { toolNameById = {}
   return { parts, text: decision.shouldCapture ? decision.text : "", signalText: signalText || "", dropped: false };
 }
 
-export function extractCaptureTurns(rolloutEntries, cfg = {}) {
+// Host adapters can map old cursors using captured positions from this pass.
+export function extractCaptureTurns(rolloutEntries, cfg = {}, onCapturedTurn) {
   const toolNameById = collectToolNamesByIdFromEntries(rolloutEntries);
   const turns = [];
-  for (const entry of rolloutEntries || []) {
+  for (const [index, entry] of (rolloutEntries || []).entries()) {
     if (!entry || typeof entry !== "object") continue;
     const payload = entry.payload && typeof entry.payload === "object" ? entry.payload : entry;
     const message = payload.message && typeof payload.message === "object" ? payload.message : null;
@@ -525,6 +526,7 @@ export function extractCaptureTurns(rolloutEntries, cfg = {}) {
     const shaped = shapeCapturePayload(payload, role, cfg, { toolNameById });
     if (shaped.dropped || (!shaped.text && shaped.parts.length === 0)) continue;
     turns.push({ role, text: shaped.parts.length ? shaped.signalText : shaped.text, parts: shaped.parts });
+    onCapturedTurn?.(index, turns.length - 1);
   }
   return turns;
 }

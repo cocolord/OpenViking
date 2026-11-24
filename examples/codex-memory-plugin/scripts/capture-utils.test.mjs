@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { extractCaptureTranscript, extractCaptureTurns } from "./capture-utils.mjs";
@@ -14,6 +15,10 @@ const startupBlocks = [
   "# AGENTS.md instructions\n\n<INSTRUCTIONS>\nUse Chinese for answers.\n</INSTRUCTIONS>",
   "<environment_context>\n  <cwd>/tmp/project</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-09-25</current_date>\n  <timezone>Asia/Singapore</timezone>\n  <filesystem><permission_profile type=\"disabled\" /></filesystem>\n</environment_context>",
 ];
+
+const machineContext = JSON.parse(readFileSync(new URL(
+  "../../../tests/session/memory/fixtures/machine_context_language.json", import.meta.url,
+), "utf-8"));
 
 function userEntry(...texts) {
   return {
@@ -78,6 +83,43 @@ test("keeps incomplete wrappers and normal-turn quotations", () => {
   assert.deepEqual(excludedLegacyTurnIndices, []);
   assert.equal(turns.length, 2);
   assert.match(turns[1].text, /AGENTS\.md instructions/);
+});
+
+test("excludes resumed environment and machine delegation from user memory capture", () => {
+  const delegated = { ...userEntry(machineContext.delegation), metadata: { client_authored: false } };
+  const { turns, excludedLegacyTurnIndices, excludedV2TurnIndices } = extractCaptureTranscript([
+    userEntry(...startupBlocks),
+    { type: "turn_context", payload: {} },
+    userEntry("Already captured question"),
+    userEntry(machineContext.environment_context),
+    delegated,
+    userEntry("New human question"),
+  ], CAPTURE_CONFIG);
+  assert.deepEqual(turns.map((turn) => turn.text), ["Already captured question", "New human question"]);
+  assert.deepEqual(excludedLegacyTurnIndices, [0, 2, 3]);
+  assert.deepEqual(excludedV2TurnIndices, [1, 2]);
+});
+
+test("preserves authored examples and delegation without machine provenance", () => {
+  const authored = { ...userEntry(machineContext.environment_context, machineContext.delegation),
+    metadata: { client_authored: true } };
+  const quoted = userEntry(`Please explain this message:\n${machineContext.delegation}`);
+  const turns = extractCaptureTurns([
+    { type: "turn_context", payload: {} },
+    authored, quoted, userEntry(machineContext.delegation),
+  ], CAPTURE_CONFIG);
+  assert.equal(turns.length, 3);
+  assert.match(turns[0].text, /environment_context/);
+  assert.match(turns[1].text, /Please explain/);
+  assert.equal(turns[2].text, machineContext.delegation);
+});
+
+test("preserves human text beside resumed environment context", () => {
+  const entry = userEntry(machineContext.environment_context, "Keep this real prompt");
+  const { turns, excludedV2TurnIndices } = extractCaptureTranscript([entry], CAPTURE_CONFIG);
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].parts[0].text, "Keep this real prompt");
+  assert.deepEqual(excludedV2TurnIndices, []);
 });
 
 function toolParts(turns, toolName) {

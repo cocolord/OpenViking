@@ -1,4 +1,5 @@
 export function collectToolNamesByIdFromEntries(entries: any[]): Record<string, string>;
+export function extractCaptureTurns(entries: any[], cfg?: Record<string, any>, onCapturedTurn?: (sourceIndex: number, turnIndex: number) => void): any[];
 export function findLastHumanTurnIndex(turns: any[]): number;
 export function extractPartsFromPayload(payload: any, options?: Record<string, any>): any[];
 export function extractTextFromPayload(payload: any, options?: Record<string, any>): string;

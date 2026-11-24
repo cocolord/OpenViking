@@ -39,12 +39,12 @@ async function writeRollout(id, entries) {
   return path;
 }
 
-async function catchUp(id, transcriptPath, sent, { oldCursor, fail = false } = {}) {
+async function catchUp(id, transcriptPath, sent, { oldCursor, oldVersion = 1, fail = false } = {}) {
   const outcome = await withSessionLock(id, async () => {
     const state = await loadState(id);
     if (oldCursor !== undefined) {
       state.capturedTurnCount = oldCursor;
-      state.captureFormatVersion = 1;
+      state.captureFormatVersion = oldVersion;
       await saveState(state);
     }
     const result = await catchUpTurns({
@@ -129,6 +129,30 @@ test("legacy startup-only cursor migrates without an empty batch", async () => {
   assert.equal(state.capturedTurnCount, 0);
   assert.deepEqual(sent, []);
 });
+
+for (const oldVersion of [1, 2]) {
+  test(`v${oldVersion} cursor migration excludes machine messages without replay`, async () => {
+    const id = `machine-v${oldVersion}`;
+    const sent = [];
+    const delegated = { ...message("user", "<codex_delegation>\n"
+      + "<source_thread_id>01a11a42-22d3-30f0-4ed3-56cb789e0d10</source_thread_id>\n"
+      + "<input>Wait for the serial test slot.</input>\n</codex_delegation>"),
+    metadata: { client_authored: false } };
+    const path = await writeRollout(id, rollout(
+      message("user", "Already sent"), delegated, message("assistant", "Also sent"),
+      message("user", "New question"),
+    ));
+    const oldCursor = oldVersion === 1 ? 4 : 3;
+    const failed = await catchUp(id, path, sent, { oldCursor, oldVersion, fail: true });
+    assert.equal(failed.result.added, 0);
+    assert.equal(failed.state.capturedTurnCount, 2);
+    assert.equal(failed.state.captureFormatVersion, CAPTURE_FORMAT_VERSION);
+    const retried = await catchUp(id, path, sent);
+    assert.equal(retried.result.added, 1);
+    assert.deepEqual(sent.map((item) => item.parts[0].text), ["New question"]);
+    assert.equal((await catchUp(id, path, sent)).result.added, 0);
+  });
+}
 
 test("shortened transcript resumes at the latest human turn", async () => {
   const id = "shortened";

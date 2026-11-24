@@ -415,6 +415,24 @@ test("extractCaptureTurns drops filtered turns and keeps turn.text unfiltered", 
   assert.equal(turns[0].text, "please remember the retry policy")
 })
 
+test("captured positions follow filters and preserve cross-entry tool names", () => {
+  const entries = [
+    null,
+    userEntry("scratch: skip this note"),
+    { payload: { role: "assistant", content: [{ type: "text", text: "skip this answer" }] } },
+    userEntry("Keep this human question"),
+    { payload: { type: "function_call", call_id: "read-1", name: "read", arguments: "{}" } },
+    { payload: { type: "function_call_output", call_id: "read-1", output: "Resource content" } },
+  ]
+  const positions = []
+  const turns = extractCaptureTurns(entries, {
+    captureAssistantTurns: true,
+    captureFilters: ["user:d/^scratch:/", "assistant:d/^skip this/"],
+  }, (index, position) => positions.push([index, position]))
+  assert.deepEqual(positions, [[3, 0], [4, 1], [5, 2]])
+  assert.equal(turns[2].parts[0].tool_name, "read")
+})
+
 test("extractCaptureTurns falls back to the text path when a turn has no parts", () => {
   const entries = [{ payload: { role: "user", content: [{ type: "unknown", value: 1 }], text: "" } }]
   assert.deepEqual(extractCaptureTurns(entries, { captureFilters: ["d/x/"] }), [])

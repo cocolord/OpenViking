@@ -65,12 +65,12 @@ function parseTranscript(content) {
  * Callers must not treat `ok: false` as a transcript shrink — resetting the
  * cursor on a transient read error replays the whole session.
  */
-export async function readTranscriptTurns(transcriptPath, cfg, logError) {
+export async function readTranscriptTurns(transcriptPath, cfg, logError, options) {
   if (!transcriptPath) return { turns: [], excludedLegacyTurnIndices: [], ok: false };
   try {
     const raw = await readFile(transcriptPath, "utf-8");
     if (!raw.trim()) return { turns: [], excludedLegacyTurnIndices: [], ok: true };
-    return { ...extractCaptureTranscript(parseTranscript(raw), cfg), ok: true };
+    return { ...extractCaptureTranscript(parseTranscript(raw), cfg, options), ok: true };
   } catch (err) {
     logError?.("transcript_read", err);
     return { turns: [], excludedLegacyTurnIndices: [], ok: false };
@@ -113,11 +113,16 @@ export async function catchUpTurns({
   // a session whose Stop/SessionEnd workers never ran.
   if (transcriptPath) state.transcriptPath = transcriptPath;
 
-  const { turns, excludedLegacyTurnIndices, ok } = await readTranscriptTurns(transcriptPath, cfg, logError);
+  const { turns, excludedLegacyTurnIndices, excludedV2TurnIndices = [], ok } = await readTranscriptTurns(
+    transcriptPath, cfg, logError,
+    { collectMigrationIndices: state.captureFormatVersion !== CAPTURE_FORMAT_VERSION },
+  );
 
   if (ok && state.captureFormatVersion !== CAPTURE_FORMAT_VERSION) {
     const oldCursor = Math.max(0, Number(state.capturedTurnCount) || 0);
-    state.capturedTurnCount = oldCursor - excludedLegacyTurnIndices.filter((index) => index < oldCursor).length;
+    const excludedTurnIndices = state.captureFormatVersion === 2
+      ? excludedV2TurnIndices : excludedLegacyTurnIndices;
+    state.capturedTurnCount = oldCursor - excludedTurnIndices.filter((index) => index < oldCursor).length;
     state.captureFormatVersion = CAPTURE_FORMAT_VERSION;
     // The caller holds the session lock. Persist the corrected cursor before
     // any append; a failed send must retry from this new coordinate system.
@@ -125,7 +130,7 @@ export async function catchUpTurns({
     log?.("capture_format_migrated", {
       oldCursor,
       correctedCursor: state.capturedTurnCount,
-      excludedLegacyTurnIndices,
+      excludedTurnIndices,
     });
   }
 
