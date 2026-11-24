@@ -27,6 +27,13 @@ _URI_LANGUAGE_NOISE_RE = re.compile(
     r"\b(?:(?:viking|https?)://|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}/)"
     r"[^\s<>\]\)\"'`]+"
 )
+_ENVIRONMENT_LANGUAGE_NOISE_RE = re.compile(
+    r"(?ms)^[ \t]*<environment_context>.*?</environment_context>[ \t]*(?=\n|$)"
+)
+_IDENTIFIER_LANGUAGE_NOISE_RE = re.compile(
+    r"\b(?:[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}"
+    r"|(?=[A-Za-z0-9_-]*[A-Za-z])(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]+)\b"
+)
 
 _LATIN_STOPWORDS = {
     "en": set(
@@ -287,7 +294,8 @@ def _detect_latin_language(text: str, fallback_language: str) -> str:
     This intentionally stays conservative: if the signal is weak or tied, it
     uses English instead of guessing a non-English Latin language.
     """
-    words = re.findall(r"[a-z\u00c0-\u024f]+", text.lower())
+    # Score complete words, not fragments of e41, source_id or hexadecimal IDs.
+    words = re.findall(r"(?<![\w])[a-z\u00c0-\u024f]+(?![\w])", text.lower())
     if len(words) < 3:
         return "en"
 
@@ -411,8 +419,10 @@ def resolve_output_language_from_text(
 
 
 def strip_language_detection_noise(text: str) -> str:
-    """Remove URIs and bare domain paths that should not affect output language."""
-    return _URI_LANGUAGE_NOISE_RE.sub(" ", text or "")
+    """Remove machine context and identifiers from natural-language signals."""
+    text = _ENVIRONMENT_LANGUAGE_NOISE_RE.sub(" ", text or "")
+    text = _URI_LANGUAGE_NOISE_RE.sub(" ", text)
+    return _IDENTIFIER_LANGUAGE_NOISE_RE.sub(" ", text)
 
 
 def resolve_output_language(

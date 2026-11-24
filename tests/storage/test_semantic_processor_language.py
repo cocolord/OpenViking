@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import os
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -15,6 +17,7 @@ from openviking.session.memory.utils.language import (
     _resolve_system_fallback_language,
     resolve_output_language,
     resolve_output_language_from_conversation,
+    strip_language_detection_noise,
 )
 
 
@@ -39,6 +42,42 @@ class TestLanguageDetection:
         text = "This is an English document for testing language detection"
         language = _detect_language_from_text(text, fallback_language="en")
         assert language == "en"
+
+    @pytest.mark.parametrize("fallback", ["en", "zh-CN"])
+    def test_host_context_does_not_change_chinese_language(self, fallback):
+        fixture = json.loads(
+            (
+                Path(__file__).parents[1] / "session/memory/fixtures/machine_context_language.json"
+            ).read_text()
+        )
+        text = fixture["environment_context"] + "\n" + fixture["delegation"]
+        assert _detect_language_from_text(text, fallback_language=fallback) == "zh-CN"
+
+    def test_identifiers_do_not_create_portuguese_word_signal(self):
+        text = "01a11a42-22d3-30f0-4ed3-56cb789e0d10 " * 6 + "e41 accepted_result"
+        assert _detect_language_from_text(text, fallback_language="en") == "en"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "e41",
+            "source_id",
+            "01a11a42-22d3-30f0-4ed3-56cb789e0d10",
+            "01a1da58-abdd-7ef0-bef4-a6d809a9a4ea",
+        ],
+    )
+    def test_machine_tokens_are_not_latin_words(self, text):
+        from openviking.session.memory.utils.language import _detect_latin_language
+
+        assert _detect_latin_language(" ".join([text] * 8), "pt") == "en"
+
+    def test_language_cleanup_preserves_natural_text(self):
+        text = (
+            "Em 2026-11-24 o usuário confirmou a tarefa e as preferências do projeto. "
+            "Este documento registra as decisões do usuário para o projeto e uma nota final."
+        )
+        assert strip_language_detection_noise(text) == text
+        assert _detect_language_from_text(text, fallback_language="en") == "pt"
 
     def test_detect_language_japanese(self):
         text = "これは日本語のドキュメントです"

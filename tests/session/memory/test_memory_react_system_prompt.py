@@ -4,6 +4,8 @@
 Test that provider instruction correctly instructs LLM.
 """
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -280,6 +282,20 @@ class TestSessionConversationToolFiltering:
         provider = SessionExtractContextProvider(messages=messages)
 
         assert provider._detect_language() == "zh-CN"
+
+    def test_host_context_does_not_request_portuguese_memories(self):
+        fixture = json.loads(
+            (Path(__file__).parent / "fixtures/machine_context_language.json").read_text()
+        )
+        messages = [
+            Message(
+                id="environment", role="user", parts=[TextPart(fixture["environment_context"])]
+            ),
+            Message(id="delegation", role="user", parts=[TextPart(fixture["delegation"])]),
+        ]
+        provider = SessionExtractContextProvider(messages=messages)
+        assert provider.get_output_language() == "zh-CN"
+        assert "All memory content MUST be written in zh-CN." in provider.instruction()
 
     async def test_prepare_extraction_messages_replaces_image_part_with_vlm_description(self):
         class FakeVisionVLM:
